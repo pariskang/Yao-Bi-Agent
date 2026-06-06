@@ -1,0 +1,46 @@
+runtime:
+  default_backend: disabled
+  supported_backends: [disabled, mock, http, transformers]
+  env:
+    backend: TAO_BACKEND
+    endpoint_url: TAO_ENDPOINT_URL
+    api_key: TAO_API_KEY
+    model_id: TAO_MODEL_ID
+  output_contract:
+    format: json_object
+    required_key: markdown_report
+    json_repair: true
+    guardrail: no_final_diagnosis_no_patient_executable_prescription_no_dose
+    fallback: deterministic_report
+model:
+  id: CMLM/Dao1-30b-a3b
+  base: Qwen3-30B-A3B
+  architecture: sparse_moe
+  total_parameters: 30B
+  active_parameters: 3B
+  role: explanation_only
+  license_boundary: non_commercial_non_medical_research
+inference_profiles:
+  research_report:
+    temperature: 0.3
+    top_p: 0.85
+    repetition_penalty: 1.1
+    max_new_tokens: 2048
+    do_sample: true
+  teaching_explanation:
+    temperature: 0.6
+    top_p: 0.9
+    repetition_penalty: 1.1
+    max_new_tokens: 3072
+    do_sample: true
+  structured_json:
+    temperature: 0.1
+    top_p: 0.8
+    repetition_penalty: 1.05
+    max_new_tokens: 1024
+    do_sample: false
+prohibited_roles:
+  - final_diagnosis
+  - patient_executable_prescription
+  - dose_instruction
+  - replacement_for_clinician

@@ -1,0 +1,71 @@
+- id: F001
+  name: 独活寄生汤路线
+  category: formula
+  priority: 80
+  trigger:
+    any: [elderly, chronic_yabi, osteoporosis, lumbar_leg_pain, ganshen_buzu]
+  effect:
+    formula_route: 独活寄生汤加减
+    route_score: 5
+    core_module: [独活, 桑寄生, 秦艽, 防风, 杜仲, 牛膝, 熟地黄, 细辛]
+  rationale: 适用于老年、久病、肝肾亏虚、慢性腰腿痛经验路线。
+- id: F002
+  name: 当归四逆汤路线
+  category: formula
+  priority: 75
+  trigger:
+    any: [lower_limb_numbness, radiating_leg_pain, cold_extremities, cold_aversion]
+    at_least: 2
+  effect:
+    formula_route: 当归四逆汤加减
+    route_score: 5
+    core_module: [当归, 桂枝, 细辛, 通草, 白芍, 大枣, 甘草]
+  rationale: 用于血虚寒凝、下肢麻木、放射痛的经验线索解释。
+- id: F003
+  name: 黄芪桂枝五物汤路线
+  category: formula
+  priority: 70
+  trigger:
+    all: [lower_limb_numbness]
+    any: [fatigue, qi_deficiency, limb_weakness]
+  effect:
+    formula_route: 黄芪桂枝五物汤加减
+    route_score: 4
+    core_module: [黄芪, 桂枝, 白芍, 通草, 当归, 大枣]
+  rationale: 气血不足、肢体麻木无力的经验路线。
+- id: F004
+  name: 桂枝芍药知母汤路线
+  category: formula
+  priority: 72
+  trigger:
+    any: [cold_damp_obstruction, heavy_lower_limb, white_greasy_coating, cold_aversion, joint_stiffness]
+    at_least: 2
+  effect:
+    formula_route: 桂枝芍药知母汤加减
+    route_score: 5
+    core_module: [桂枝, 白芍, 知母, 麻黄, 附片, 防风, 白术]
+  rationale: 寒湿痹阻、下肢沉重、苔腻、活动不利的经验路线。
+- id: F005
+  name: 柴胡类方路线
+  category: formula
+  priority: 68
+  trigger:
+    any: [bitter_taste, dry_mouth, emotional_constraint, insomnia, young_patient]
+    at_least: 2
+  effect:
+    formula_route: 柴胡类方加减
+    route_score: 4
+    core_module: [柴胡, 黄芩, 姜半夏, 桂枝, 白芍, 炒芥子]
+  rationale: 少阳气郁、口苦、情志不畅、睡眠差的经验路线。
+- id: F006
+  name: 补肾类方路线
+  category: formula
+  priority: 74
+  trigger:
+    any: [kidney_yang_deficiency, osteoporosis, chronic_yabi, elderly, lumbar_knee_soreness]
+    at_least: 2
+  effect:
+    formula_route: 补肾类方
+    route_score: 4
+    core_module: [熟地黄, 山茱萸, 山药, 杜仲, 巴戟天, 菟丝子, 续断, 附片]
+  rationale: 肝肾不足、肾阳不足、骨质疏松、久病腰痛的经验路线。

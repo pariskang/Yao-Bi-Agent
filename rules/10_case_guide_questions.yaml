@@ -1,0 +1,284 @@
+red_flag_questions:
+  - id: RF001
+    question: 腰痛是否由跌倒、车祸、重物砸伤等明显外伤后出现？
+    options: [是, 否, 不确定]
+    urgent_if: [是]
+    label: 明显外伤后腰痛
+  - id: RF002
+    question: 是否出现大小便控制困难、会阴区麻木，或突然尿不出来？
+    options: [是, 否, 不确定]
+    urgent_if: [是]
+    label: 大小便控制异常/会阴区麻木
+  - id: RF003
+    question: 是否出现一侧或双侧下肢明显无力、走路拖脚、进行性加重？
+    options: [是, 否, 不确定]
+    urgent_if: [是]
+    label: 进行性下肢无力
+  - id: RF004
+    question: 是否伴有发热、寒战，或近期有感染？
+    options: [是, 否, 不确定]
+    caution_if: [是, 不确定]
+    label: 发热感染线索
+  - id: RF005
+    question: 是否有肿瘤病史、原因不明体重下降、夜间痛明显加重？
+    options: [是, 否, 不确定]
+    caution_if: [是, 不确定]
+    label: 肿瘤/消耗/夜间痛线索
+  - id: RF006
+    question: 是否长期使用激素，或已知严重骨质疏松，并突然出现剧烈腰背痛？
+    options: [是, 否, 不确定]
+    caution_if: [是, 不确定]
+    label: 骨折高风险线索
+chief_complaint_questions:
+  - id: CC001
+    stage: basic
+    field: chief_complaint.main_symptom
+    question: 你最主要的不舒服是什么？
+    input_type: free_text
+    examples: [腰痛, 腰腿痛, 腰酸, 腰痛伴腿麻]
+  - id: CC002
+    stage: basic
+    field: chief_complaint.duration
+    question: 这种情况持续多久了？
+    input_type: duration
+    examples: [3天, 2周, 半年, 5年]
+  - id: CC003
+    stage: basic
+    field: chief_complaint.recurrent_status
+    question: 这次是否是原来旧病加重？
+    options: [第一次出现, 反复发作，这次加重, 一直存在，没有明显加重, 不清楚]
+pain_questions:
+  - id: P001
+    stage: pain_profile
+    field: pain_profile.location
+    question: 疼痛主要在哪个部位？
+    type: multi_choice
+    options: [腰正中, 一侧腰部, 双侧腰部, 腰骶部, 臀部, 大腿后侧, 小腿, 足部, 说不清]
+  - id: P002
+    stage: pain_profile
+    field: pain_profile.radiation
+    question: 疼痛会不会从腰部放射到臀部或下肢？
+    options: [不会, 到臀部, 到大腿, 到小腿, 到足部, 不确定]
+    tag_mapping:
+      到小腿: [radiating_leg_pain]
+      到足部: [radiating_leg_pain]
+  - id: P003
+    stage: pain_profile
+    field: pain_profile.pain_nature
+    question: 疼痛性质更像哪一种？
+    type: multi_choice
+    options: [酸痛, 胀痛, 刺痛, 冷痛, 灼痛, 隐痛, 掣痛/牵拉痛, 麻痛, 说不清]
+    tag_mapping:
+      冷痛: [cold_pain]
+      刺痛: [stabbing_pain]
+      胀痛: [distending_pain]
+      麻痛: [lower_limb_numbness]
+  - id: P004
+    stage: pain_profile
+    field: pain_profile.severity_0_10
+    question: 0到10分，你觉得疼痛大约几分？
+    input_type: scale_0_10
+  - id: P005
+    stage: pain_profile
+    field: pain_profile.aggravating_factors
+    question: 什么情况下会加重？
+    type: multi_choice
+    options: [久坐, 久站, 弯腰, 劳累, 受凉, 阴雨天, 走路, 咳嗽打喷嚏, 夜间, 没有明显规律]
+    tag_mapping:
+      受凉: [cold_aggravation]
+      阴雨天: [damp_weather_aggravation]
+      咳嗽打喷嚏: [nerve_root_irritation_possible]
+  - id: P006
+    stage: pain_profile
+    field: pain_profile.relieving_factors
+    question: 什么情况下会缓解？
+    type: multi_choice
+    options: [休息, 热敷, 活动后, 按摩, 卧床, 服止痛药, 没有明显缓解]
+    tag_mapping:
+      热敷: [warmth_relieves]
+neuro_ortho_questions:
+  - id: N001
+    stage: neuro_ortho
+    field: neuro_ortho.numbness
+    question: 是否有下肢麻木？
+    options: [没有, 偶尔有, 经常有, 持续存在, 说不清]
+    tag_mapping:
+      偶尔有: [lower_limb_numbness]
+      经常有: [lower_limb_numbness]
+      持续存在: [lower_limb_numbness]
+  - id: N002
+    stage: neuro_ortho
+    field: neuro_ortho.numbness_location
+    question: 麻木主要在哪个部位？
+    type: multi_choice
+    options: [臀部, 大腿外侧, 大腿后侧, 小腿外侧, 小腿后侧, 足背, 足底, 脚趾, 双下肢, 说不清]
+  - id: N003
+    stage: neuro_ortho
+    field: neuro_ortho.weakness
+    question: 是否感觉腿无力、走路不稳、脚抬不起来？
+    options: [没有, 轻微, 明显, 越来越重]
+    urgent_if: [越来越重]
+  - id: N004
+    stage: neuro_ortho
+    field: neuro_ortho.walking_limitation
+    question: 走一段路后是否腰腿痛或麻木加重，休息或弯腰后缓解？
+    options: [是, 否, 不确定]
+  - id: N005
+    stage: neuro_ortho
+    field: neuro_ortho.imaging
+    question: 是否做过腰椎X线、CT、MRI或骨密度检查？
+    type: multi_choice
+    options: [做过MRI, 做过CT, 做过X线, 做过骨密度, 没做过, 不记得]
+  - id: N006
+    stage: neuro_ortho
+    field: neuro_ortho.western_diagnosis
+    question: 医生曾经告诉你有什么诊断？
+    type: multi_choice
+    options: [腰椎间盘突出, 腰椎管狭窄, 腰椎滑脱, 骨质疏松, 骨折/压缩性骨折, 腰肌劳损, 坐骨神经痛, 其他, 不清楚]
+    tag_mapping:
+      骨质疏松: [osteoporosis]
+tcm_four_diagnosis_questions:
+  - id: T001
+    stage: tcm_core
+    field: tcm_inquiry.cold_heat
+    question: 你平时怕冷还是怕热？
+    options: [怕冷, 怕热, 都不明显, 有时怕冷有时怕热]
+    tag_mapping:
+      怕冷: [cold_aversion]
+  - id: T002
+    stage: tcm_core
+    field: tcm_inquiry.cold_pain_relation
+    question: 腰腿痛遇冷会不会加重？热敷会不会舒服？
+    options: [遇冷加重，热敷舒服, 热敷不舒服, 没影响, 不确定]
+    tag_mapping:
+      遇冷加重，热敷舒服: [cold_aggravation, warmth_relieves, cold_damp_signal]
+      热敷不舒服: [possible_heat_pattern]
+  - id: T003
+    stage: tcm_core
+    field: tcm_inquiry.cold_extremities
+    question: 手脚是否容易发凉？
+    options: [明显, 轻微, 没有, 不确定]
+    tag_mapping:
+      明显: [cold_extremities]
+      轻微: [cold_extremities]
+  - id: T004
+    stage: tcm_core
+    field: tcm_inquiry.dampness
+    question: 身体是否容易困重、沉重，尤其阴雨天更明显？
+    options: [明显, 轻微, 没有, 不确定]
+    tag_mapping:
+      明显: [dampness]
+      轻微: [dampness]
+  - id: T007
+    stage: tcm_core
+    field: tcm_inquiry.fatigue
+    question: 是否容易疲劳、气短、懒言？
+    options: [明显, 轻微, 没有]
+    tag_mapping:
+      明显: [fatigue]
+      轻微: [fatigue]
+  - id: T010
+    stage: tcm_core
+    field: tcm_inquiry.lumbar_knee_soreness
+    question: 是否经常腰膝酸软，而不是单纯疼痛？
+    options: [明显, 轻微, 没有]
+    tag_mapping:
+      明显: [lumbar_knee_soreness]
+      轻微: [lumbar_knee_soreness]
+  - id: T013
+    stage: tcm_core
+    field: tcm_inquiry.mouth_taste
+    question: 是否经常口苦、口干，或咽喉不清爽？
+    options: [明显, 轻微, 没有]
+    tag_mapping:
+      明显: [bitter_taste, dry_mouth]
+      轻微: [bitter_taste]
+  - id: T016
+    stage: tcm_core
+    field: tcm_inquiry.sleep
+    question: 睡眠怎么样？
+    options: [正常, 入睡困难, 容易醒, 多梦, 早醒, 疼痛影响睡眠, 睡不踏实]
+    tag_mapping:
+      入睡困难: [insomnia]
+      容易醒: [insomnia]
+      多梦: [insomnia]
+      早醒: [insomnia]
+      疼痛影响睡眠: [insomnia]
+      睡不踏实: [insomnia]
+  - id: T018
+    stage: tcm_core
+    field: tcm_inquiry.appetite
+    question: 胃口怎么样？
+    options: [正常, 胃口差, 容易腹胀, 吃药容易胃不舒服, 恶心反酸]
+    tag_mapping:
+      胃口差: [poor_appetite]
+      容易腹胀: [epigastric_discomfort]
+      吃药容易胃不舒服: [weak_stomach]
+      恶心反酸: [nausea]
+  - id: T020
+    stage: tcm_core
+    field: tcm_inquiry.sweating
+    question: 是否夜间出汗、醒后汗止？
+    options: [是, 否, 偶尔]
+    tag_mapping:
+      是: [night_sweat]
+  - id: T021
+    stage: tcm_core
+    field: tcm_inquiry.urine
+    question: 小便是否夜尿多、尿频、尿黄或尿清长？
+    options: [夜尿多, 尿频, 尿黄, 尿清长, 正常]
+  - id: T022
+    stage: tcm_core
+    field: tcm_inquiry.stool
+    question: 大便情况？
+    options: [正常, 便秘, 溏稀, 黏腻不爽, 干结]
+    tag_mapping:
+      黏腻不爽: [dampness]
+  - id: T023
+    stage: tcm_core
+    field: tcm_inquiry.menstruation
+    question: 如适用，月经是否规律？是否伴有腰痛加重？
+    options: [规律, 不规律, 经期腰痛加重, 已绝经, 不适用]
+  - id: T024
+    stage: tcm_core
+    field: tcm_inquiry.tongue.color
+    question: 舌头颜色更像偏淡、偏暗紫，还是偏红？
+    options: [偏淡, 偏暗紫, 偏红, 说不清]
+    tag_mapping:
+      偏暗紫: [dark_tongue]
+  - id: T025
+    stage: tcm_core
+    field: tcm_inquiry.tongue.coating
+    question: 舌苔是否偏厚腻、白腻或黄腻？
+    options: [薄白, 白腻, 黄腻, 厚腻, 说不清]
+    tag_mapping:
+      白腻: [white_greasy_coating]
+      厚腻: [greasy_coating]
+comorbidity_questions:
+  - id: C001
+    stage: comorbidity
+    field: comorbidity.diseases
+    question: 是否有以下疾病？
+    type: multi_choice
+    options: [高血压, 糖尿病, 骨质疏松, 肾功能异常, 肝功能异常, 胃溃疡/胃炎, 心脏病, 肿瘤病史, 过敏史, 无, 不清楚]
+    tag_mapping:
+      骨质疏松: [osteoporosis]
+      肿瘤病史: [cancer_history]
+  - id: C002
+    stage: comorbidity
+    field: comorbidity.medications
+    question: 最近是否服用过止痛药或消炎药？
+    type: multi_choice
+    options: [塞来昔布, 布洛芬, 双氯芬酸, 艾瑞昔布, 依托考昔, 乙哌立松, 甲钴胺, 其他, 没有, 不清楚]
+  - id: C003
+    stage: comorbidity
+    field: comorbidity.anticoagulant_or_steroid
+    question: 是否正在服用抗凝药、阿司匹林、激素或降糖药？
+    options: [是, 否, 不确定]
+    tag_mapping:
+      是: [anticoagulant_use]
+  - id: C004
+    stage: comorbidity
+    field: comorbidity.allergy
+    question: 是否有药物或中药过敏史？
+    options: [有, 没有, 不确定]

@@ -1,0 +1,78 @@
+- id: R001
+  name: 气血痹阻基础规则
+  category: syndrome
+  priority: 90
+  trigger:
+    any: [dark_tongue, chronic_yabi, lumbar_leg_pain, white_greasy_coating]
+    at_least: 2
+  effect:
+    syndrome: 气血痹阻证
+    score: 3
+    modules: [健脾化湿底盘, 桂枝芍药缓急模块]
+  rationale: 舌暗、久痛、苔腻提示气血运行不畅兼湿阻。
+  safety_level: low
+- id: R002
+  name: 气滞血瘀规则
+  category: syndrome
+  priority: 80
+  trigger:
+    any: [fixed_pain, strain_or_sprain, emotional_constraint, purple_tongue, stabbing_pain]
+    at_least: 2
+  effect:
+    syndrome: 气滞血瘀证
+    score: 4
+    modules: [活血化瘀模块, 理气通络模块]
+  rationale: 疼痛固定、刺痛、舌紫暗等提示瘀阻络脉。
+  safety_level: low
+- id: R003
+  name: 肝肾不足规则
+  category: syndrome
+  priority: 95
+  trigger:
+    all: [elderly]
+    any: [chronic_yabi, osteoporosis, lumbar_knee_soreness, long_duration]
+  effect:
+    syndrome: 肝肾不足证
+    score: 5
+    modules: [补肝肾强筋骨模块]
+  rationale: 高龄、久病、骨质疏松提示肝肾亏虚、骨失所养。
+  safety_level: low
+- id: R004
+  name: 肾阳不足规则
+  category: syndrome
+  priority: 85
+  trigger:
+    any: [slow_pulse, cold_aversion, cold_extremities, deep_cold_pain]
+    at_least: 2
+  effect:
+    syndrome: 肾阳不足证
+    score: 5
+    modules: [温阳散寒模块, 补肾助阳模块]
+  rationale: 畏寒、四肢冷、脉缓等提示阳虚寒凝线索。
+  safety_level: medium
+- id: R005
+  name: 少阳气郁规则
+  category: syndrome
+  priority: 70
+  trigger:
+    any: [bitter_taste, dry_mouth, insomnia, young_patient, emotional_constraint]
+    at_least: 2
+  effect:
+    syndrome: 少阳气郁证
+    score: 4
+    modules: [少阳清热化痰模块]
+  rationale: 口苦口干、睡眠差、情志约束可作为少阳气郁线索。
+  safety_level: low
+- id: R006
+  name: 脾虚不运规则
+  category: syndrome
+  priority: 75
+  trigger:
+    any: [poor_appetite, epigastric_discomfort, teeth_marks, fatigue, weak_stomach]
+    at_least: 2
+  effect:
+    syndrome: 脾虚不运证
+    score: 4
+    modules: [顾护中焦模块, 健脾化湿底盘]
+  rationale: 胃纳差、乏力、齿痕等提示脾运不足，需顾护中焦。
+  safety_level: low

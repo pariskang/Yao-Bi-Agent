@@ -1,0 +1,16 @@
+mode: research_education_clinician_review_only
+required_disclaimer: 本结果仅用于名老中医经验研究、医案复盘与教学讨论，不构成诊断、处方或治疗建议。
+patient_facing_forbidden_outputs:
+  - 最终临床诊断
+  - 可执行处方
+  - 剂量医嘱
+  - 自行购药建议
+  - 替代医生诊疗意见
+high_risk_herbs:
+  - 附片
+  - 细辛
+  - 蜈蚣
+  - 全蝎
+  - 制川乌
+  - 制草乌
+  - 乌头
