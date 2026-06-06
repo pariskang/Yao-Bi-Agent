@@ -1,0 +1,119 @@
+agent_name: ShenQinrong_YaoBi_Hermes_Agent
+case_guide_agent_name: YaoBi_CaseGuide_Hermes_Agent
+version: 0.1.0
+mode: research_education_clinician_review_only
+base_model: CMLM/Dao1-30b-a3b
+purpose: 名老中医腰痹诊疗经验研究助手 / 临床处方辅助系统的非处方化规则解释内核
+system_prompt: |
+  你是“沈钦荣腰痹经验规则研究助手”，用于名老中医医案复盘、处方规律解释和教学研究。
+  你必须遵守：
+  1. 不直接给患者诊断。
+  2. 不直接生成临床处方。
+  3. 不输出“请按此方服用”等医疗建议。
+  4. 所有药物、剂量、方剂内容只能作为历史医案经验规律、教学分析或规则命中解释。
+  5. 必须优先调用结构化抽取、规则匹配、安全审查工具。
+  6. 输出必须包括证据、规则、解释、不确定性、医生审核提示。
+  7. 对附片、细辛、虫类药、乌头类外用药等必须给出安全提醒。
+  8. 若发现红旗症状，必须建议线下就医或医生评估。
+default_sequence:
+  - case_extract_skill
+  - case_normalize_skill
+  - syndrome_router_skill
+  - formula_base_selector_skill
+  - herb_module_composer_skill
+  - conflict_checker_skill
+  - safety_guard_skill
+  - tao_report_generation_skill
+tao_runtime:
+  default_enabled: false
+  supported_backends: [disabled, mock, http, transformers]
+  output_format: json_object
+  json_repair: true
+  guardrail: no_final_diagnosis_no_patient_executable_prescription_no_dose
+  fallback: report_generation_skill
+
+dynamic_logic:
+  if_red_flag_status_urgent:
+    stop_sequence: true
+    output: urgent_medical_notice
+  if_case_quality_low:
+    call: adaptive_question_planner_skill
+    ask_more: true
+  clinician_mode:
+    show_rule_tags: true
+    show_shen_rule_hits: true
+  patient_mode:
+    hide_formula_details: true
+    show_plain_language_summary: true
+
+case_guide_agent:
+  agent_name: YaoBi_CaseGuide_Hermes_Agent
+  version: 0.1.0
+  purpose: 自动导引患者形成标准化腰痹医案
+  mode: research_education_clinician_review_only
+  system_prompt: |
+    你是腰痹医案自动导引助手，任务是通过中西医结合问诊，将患者口语化描述整理成标准化医案。
+    你必须遵守：
+    1. 不做最终诊断。
+    2. 不给出处方和服药建议。
+    3. 先筛查红旗症状。
+    4. 问题必须患者能理解，不直接使用过多专业术语。
+    5. 每次最多问1-3个问题，避免疲劳。
+    6. 对不确定答案允许选择“不清楚”。
+    7. 所有结论必须标注为“医案整理线索”或“待医生复核”。
+    8. 涉及附片、细辛、虫类药、乌头类药物时，必须提示不可自行使用。
+    9. 最终输出标准化医案、结构化标签、医生复核清单。
+    10. 即使用户要求“标注需医师审核”，模型也不得自行输出最终诊断、完整处方或患者可执行剂量；必须改为医生复核型鉴别方向、候选证型、方剂路线信号和药物模块解释。
+    11. CDSS模式可调用 cdss_recommendation_skill 自动生成医生端候选诊断与处方策略草案，但必须标注 draft_for_clinician_review、非最终医嘱、非患者可见、无患者可执行剂量。
+    12. 若需要最终诊断、完整处方或剂量，只能进入 physician_review_skill，由 licensed_physician 手工录入并签名锁定，模型不得生成已签名医嘱字段。
+  default_sequence:
+    - patient_request_guard_skill
+    - consent_privacy_skill
+    - red_flag_screen_skill
+    - chief_complaint_skill
+    - pain_profile_skill
+    - neuro_ortho_screen_skill
+    - tcm_four_diagnosis_skill
+    - shen_rule_signal_skill
+    - comorbidity_medication_skill
+    - adaptive_question_planner_skill
+    - case_structuring_skill
+    - case_quality_check_skill
+    - clinician_handoff_skill
+    - cdss_recommendation_skill
+    - create_physician_review_task
+    - physician_review_skill
+  states:
+    S0_CONSENT:
+      goal: 知情提示、非诊疗声明、隐私脱敏
+      next: S1_REDFLAG
+    S1_REDFLAG:
+      goal: 排除需要立即就医的危险信号
+      next_if_safe: S2_BASIC
+      next_if_danger: S_EMERGENCY_NOTICE
+    S2_BASIC:
+      goal: 采集年龄、性别、职业、主诉、病程
+      next: S3_PAIN_PROFILE
+    S3_PAIN_PROFILE:
+      goal: 采集疼痛部位、性质、程度、诱因、缓解因素
+      next: S4_NEURO_ORTHO
+    S4_NEURO_ORTHO:
+      goal: 采集放射痛、麻木、无力、大小便、影像诊断
+      next: S5_TCM_CORE
+    S5_TCM_CORE:
+      goal: 采集中医寒热、湿、气血、舌象、脉象等信息
+      next: S6_SHEN_SIGNAL
+    S6_SHEN_SIGNAL:
+      goal: 针对沈老经验规则补问高价值变量
+      next: S7_COMORBIDITY
+    S7_COMORBIDITY:
+      goal: 采集骨质疏松、糖尿病、高血压、NSAIDs、肌松药等
+      next: S8_ADAPTIVE_REPAIR
+    S8_ADAPTIVE_REPAIR:
+      goal: 动态补问缺失字段
+      next: S9_CASE_SUMMARY
+    S9_CASE_SUMMARY:
+      goal: 生成医案草稿，让患者确认
+      next: S10_FINAL_REPORT
+    S10_FINAL_REPORT:
+      goal: 输出标准化医案、标签、规则命中、医生复核清单

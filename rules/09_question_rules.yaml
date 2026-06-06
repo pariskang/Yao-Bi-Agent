@@ -1,0 +1,27 @@
+- id: Q_SHEN_001
+  stage: shen_signal
+  question: 你的腰腿痛遇冷会加重、热敷会舒服吗？
+  type: single_choice
+  options: [遇冷加重，热敷舒服, 遇冷加重，但热敷不明显, 热敷不舒服, 没有明显关系, 不确定]
+  tag_mapping:
+    遇冷加重，热敷舒服: [cold_aggravation, warmth_relieves, cold_damp_signal]
+    热敷不舒服: [possible_heat_pattern]
+  priority_when:
+    any: [lower_limb_numbness, chronic_yabi, elderly]
+- id: Q_SHEN_002
+  stage: shen_signal
+  question: 是否有口苦、口干，或者睡眠不踏实？
+  type: multi_choice
+  options: [口苦, 口干, 入睡困难, 容易醒, 多梦, 都没有]
+  tag_mapping:
+    口苦: [bitter_taste, shaoyang_signal]
+    口干: [dry_mouth]
+    入睡困难: [insomnia]
+- id: Q_SHEN_003
+  stage: shen_signal
+  question: 是否检查出骨质疏松、椎体压缩，或者近几年身高变矮？
+  type: multi_choice
+  options: [骨质疏松, 椎体压缩, 身高变矮, 没有, 不清楚]
+  tag_mapping:
+    骨质疏松: [osteoporosis, bushen_bone_signal]
+    椎体压缩: [compression_fracture_history, urgent_if_acute_pain]

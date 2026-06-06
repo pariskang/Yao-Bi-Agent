@@ -1,0 +1,16 @@
+conflicts:
+  - id: duhuo_vs_guizhi_zhimu
+    group_a: [独活, 桑寄生, 秦艽, 防风]
+    group_b: [知母, 麻黄, 附片]
+    meaning: 独活寄生路线偏补益祛风湿，桂枝芍药知母路线偏温散寒湿，二者一般不完整叠加。
+    action: ask_agent_to_choose_primary_route
+  - id: heavy_stasis_vs_duhuo
+    group_a: [桃仁, 赤芍, 红花]
+    group_b: [独活, 桑寄生, 秦艽]
+    meaning: 活血重剂与独活寄生补益风药不宜无原则堆叠。
+    action: require_rationale
+  - id: baizhu_vs_fried_baizhu
+    group_a: [白术]
+    group_b: [麸炒白术]
+    meaning: 炮制替代关系，一般二选一。
+    action: deduplicate

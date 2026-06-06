@@ -1,0 +1,55 @@
+modules:
+  spleen_damp_core:
+    name: 健脾化湿底盘
+    herbs: [白术, 茯苓, 党参, 甘草]
+    triggers: [white_greasy_coating, teeth_marks, fatigue, dampness, chronic_yabi]
+    role: base
+    note: 沈老腰痹治疗底盘模块，重在脾运湿化。
+  guizhi_shaoyao_pain_core:
+    name: 桂枝芍药缓急止痛模块
+    herbs: [桂枝, 白芍, 甘草, 大枣, 生姜]
+    triggers: [spasm_pain, cold_aversion, lumbar_pain, muscle_tension]
+    role: pain_support
+    note: 温经通阳、柔筋缓急。
+  wind_damp_channel:
+    name: 独活寄生祛风湿模块
+    herbs: [独活, 桑寄生, 秦艽, 防风, 细辛]
+    triggers: [lumbar_leg_pain, chronic_yabi, wind_damp_obstruction]
+    role: channel
+    note: 祛风寒湿、通腰膝经络。
+  liver_kidney_bone:
+    name: 补肝肾强筋骨模块
+    herbs: [杜仲, 桑寄生, 牛膝, 熟地黄, 山茱萸, 枸杞子, 续断, 巴戟天]
+    triggers: [elderly, osteoporosis, chronic_yabi, lumbar_knee_soreness]
+    role: root_support
+    note: 强腰膝、补肝肾、处理久病退变。
+  blood_stasis:
+    name: 活血化瘀模块
+    herbs: [丹参, 川芎, 桃仁, 红花, 赤芍, 牡丹皮, 郁金, 香附]
+    triggers: [dark_tongue, fixed_pain, sprain, strain, stasis_pattern, stabbing_pain]
+    role: add_on
+    note: 处理劳损、瘀阻、疼痛固定。
+  insect_channel:
+    name: 虫类搜络模块
+    herbs: [蜈蚣, 全蝎, 地龙, 蕲蛇]
+    triggers: [refractory_pain, severe_numbness, chronic_channel_obstruction, lower_limb_numbness]
+    role: add_on
+    note: 顽痛、久麻、久痹入络时的经验模块，必须医师审核。
+  shaoyang_heat_phlegm:
+    name: 少阳清热化痰模块
+    herbs: [柴胡, 黄芩, 黄连, 姜半夏, 竹茹, 炒芥子]
+    triggers: [bitter_taste, dry_mouth, insomnia, emotional_constraint, phlegm_heat]
+    role: concurrent
+    note: 调少阳、清郁热、和胃化痰。
+  stomach_protection:
+    name: 顾护中焦模块
+    herbs: [陈皮, 半夏, 砂仁, 木香, 郁金, 北沙参]
+    triggers: [epigastric_discomfort, poor_appetite, weak_stomach, nausea]
+    role: tolerance
+    note: 提高处方耐受性，防滋腻碍胃。
+  sleep_calm:
+    name: 安神除烦模块
+    herbs: [酸枣仁, 远志, 栀子, 淡豆豉, 竹茹, 茯苓]
+    triggers: [insomnia, irritability, bitter_taste, restlessness]
+    role: concurrent
+    note: 腰痹兼睡眠差、烦躁、郁热扰心。

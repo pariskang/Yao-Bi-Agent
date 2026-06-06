@@ -1,0 +1,21 @@
+dose_rules:
+  白术:
+    common: 30g
+    meaning: 重在燥湿健脾、祛痹通络。
+    warning: 仅用于沈老经验剂量语法解释，不应自动用于临床开方。
+  细辛:
+    common: 3g
+    meaning: 小剂量温经通络。
+    warning: 需严格安全审查，不得自动建议患者使用。
+  附片:
+    common: 10g，先煎
+    meaning: 温阳散寒。
+    warning: 有毒性风险，必须医生审核。
+  白芍:
+    common: 20g
+    meaning: 柔筋缓急止痛。
+    warning: 仅作经验解释。
+  蜈蚣:
+    common: 小剂量
+    meaning: 虫类搜络。
+    warning: 虫类药不适合自动推荐给患者。
