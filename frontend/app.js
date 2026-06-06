@@ -64,6 +64,7 @@ const state = {
   step: 0,
   doctorMode: true,
   answers: JSON.parse(localStorage.getItem('yaobi-case') || '{}'),
+  fsm: JSON.parse(localStorage.getItem('yaobi-fsm') || '{\"rounds\":{},\"lastAnswers\":{}}'),
 };
 
 const screen = document.querySelector('#screen');
@@ -71,6 +72,7 @@ const pageTitle = document.querySelector('#pageTitle');
 
 function save() {
   localStorage.setItem('yaobi-case', JSON.stringify(state.answers));
+  localStorage.setItem('yaobi-fsm', JSON.stringify(state.fsm));
   updatePreview();
 }
 
@@ -84,6 +86,39 @@ function setAnswer(id, value, multi = false) {
     state.answers[id] = value;
   }
   save();
+}
+
+
+function stageRound(stage) {
+  return state.fsm.rounds[stage] || 0;
+}
+
+function setStageRound(stage, value) {
+  state.fsm.rounds[stage] = Math.max(0, Math.min(3, value));
+  save();
+}
+
+function questionAnswered(q) {
+  const value = state.answers[q.id];
+  return Array.isArray(value) ? value.length > 0 : value !== undefined && value !== '' && value !== null;
+}
+
+function questionReason(q, stage) {
+  const tags = getTags();
+  if (stage === 'redflag') return '红旗筛查优先；若命中危险信号，将立即停止后续普通问诊。';
+  if (['cold_relation', 'cold_heat'].includes(q.id) && (tags.includes('elderly') || tags.includes('lower_limb_numbness'))) return '结合上一轮高龄/麻木/久病线索，深化寒湿、温经散寒与通络规则变量。';
+  if (['numbness', 'numbness_location', 'radiation'].includes(q.id)) return '结合疼痛部位和上一轮回答，深化放射痛、麻木和神经根风险线索。';
+  if (['imaging', 'western_diagnosis', 'diseases'].includes(q.id)) return '结合当下规则命中，补足影像、骨质疏松和医生复核背景。';
+  if (['sleep', 'appetite', 'mouth_taste'].includes(q.id)) return '结合沈老规则中的口苦、睡眠、胃纳变量，深化少阳/顾护中焦线索。';
+  return '根据当前规则标签与上一轮答案，补齐本状态最有信息增益的字段。';
+}
+
+function currentStageQuestions(stage) {
+  const list = questions[stage] || [];
+  const round = stageRound(stage);
+  const unanswered = list.filter(q => !questionAnswered(q));
+  const pool = unanswered.length ? unanswered : list;
+  return pool.slice(round * 3, round * 3 + 3).map(q => ({ ...q, reason: questionReason(q, stage) }));
 }
 
 function renderStepper() {
@@ -125,25 +160,35 @@ function renderStart() {
 }
 
 function renderQuestionStage(stage) {
-  const list = questions[stage] || [];
   const urgent = getRedFlagStatus().status === 'urgent';
   if (stage !== 'redflag' && urgent) {
     screen.innerHTML = `<section class="result-panel redflag"><h3>已命中红旗信号</h3><p>请先线下就医或急诊评估。本工具已停止后续中医问诊。</p><button class="ghost-btn" id="backRed">返回红旗筛查</button></section>`;
     document.querySelector('#backRed').addEventListener('click', () => { state.step = 1; render(); });
     return;
   }
-  screen.innerHTML = `<div class="card-grid"></div><div class="footer-actions"><button class="ghost-btn" id="prevBtn">上一步</button><button class="primary-btn" id="nextBtn">下一步</button></div>`;
+  const round = stageRound(stage);
+  const list = currentStageQuestions(stage);
+  screen.innerHTML = `
+    <section class="fsm-strip">
+      <strong>有限状态机追问</strong>
+      <span>本状态第 ${round + 1}/3 轮，每轮最多 3 问；问题会叠加当前规则标签与上一轮答案深化。</span>
+      <button class="ghost-btn" id="endStateBtn" type="button">手动结束本状态</button>
+    </section>
+    <div class="card-grid"></div>
+    <div class="footer-actions"><button class="ghost-btn" id="prevBtn">上一步</button><button class="ghost-btn" id="deepenBtn">本状态深化追问</button><button class="primary-btn" id="nextBtn">进入下一个状态</button></div>`;
   const grid = screen.querySelector('.card-grid');
   list.forEach(q => grid.appendChild(renderQuestion(q, stage)));
   document.querySelector('#prevBtn').addEventListener('click', () => { state.step = Math.max(0, state.step - 1); render(); });
-  document.querySelector('#nextBtn').addEventListener('click', () => { state.step = Math.min(steps.length - 1, state.step + 1); render(); });
+  document.querySelector('#deepenBtn').addEventListener('click', () => { state.fsm.lastAnswers[stage] = { ...state.answers }; setStageRound(stage, round + 1); render(); });
+  document.querySelector('#endStateBtn').addEventListener('click', () => { state.fsm.lastAnswers[stage] = { ...state.answers }; state.step = Math.min(steps.length - 1, state.step + 1); render(); });
+  document.querySelector('#nextBtn').addEventListener('click', () => { state.fsm.lastAnswers[stage] = { ...state.answers }; state.step = Math.min(steps.length - 1, state.step + 1); render(); });
 }
 
 function renderQuestion(q, stage) {
   const tpl = document.querySelector('#questionTemplate').content.cloneNode(true);
   const card = tpl.querySelector('.question-card');
   card.classList.toggle('redflag', stage === 'redflag');
-  tpl.querySelector('.question-meta').textContent = `${stage.toUpperCase()} · ${q.id}`;
+  tpl.querySelector('.question-meta').textContent = `${stage.toUpperCase()} · ${q.id} · ${q.reason || '规则深化追问'}`;
   tpl.querySelector('h3').textContent = q.q;
   const options = tpl.querySelector('.options');
   const current = answerValue(q.id);

@@ -126,3 +126,38 @@ def test_cdss_recommendation_blocks_patient_role():
     result = cdss_recommendation_skill({"normalized_tags": []}, user_role="patient")["cdss_recommendation"]
     assert result["status"] == "blocked_patient_role"
     assert result["patient_visible"] is False
+
+
+def test_caseguide_state_stays_for_deepening_and_limits_to_three_followups():
+    session = CaseGuideSession()
+    started = session.start("腰痛")
+    assert started["fsm"]["max_followups_per_state"] == 3
+    assert [q["id"] for q in started["next_questions"]] == ["RF001", "RF002", "RF003"]
+
+    first = session.answer_red_flags({"RF001": "否", "RF002": "否", "RF003": "否"})
+    assert first["state"] == "S1_REDFLAG"
+    assert [q["id"] for q in first["next_questions"]] == ["RF004", "RF005", "RF006"]
+    assert first["fsm"]["remaining_followups"] == 2
+
+    second = session.answer_red_flags({"RF004": "否", "RF005": "否", "RF006": "否"})
+    assert second["state"] == "S2_BASIC"
+
+    still_basic = session.answer_stage({"age": 68})
+    assert still_basic["state"] == "S2_BASIC"
+    assert still_basic["next_questions"]
+    assert all(q["state"] == "S2_BASIC" for q in still_basic["next_questions"])
+
+    session.answer_stage({"main_symptom": "腰痛"})
+    forced_next = session.answer_stage({"duration": "5年"})
+    assert forced_next["state"] == "S3_PAIN_PROFILE"
+
+
+def test_caseguide_manual_end_current_state_advances_before_three_turns():
+    session = CaseGuideSession()
+    session.start("腰痛")
+    session.answer_red_flags({"RF001": "否", "RF002": "否", "RF003": "否", "RF004": "否", "RF005": "否", "RF006": "否"})
+    session.answer_stage({"age": 68})
+    result = session.end_current_state()
+    assert result["manual_end_accepted"] is True
+    assert result["state"] == "S3_PAIN_PROFILE"
+    assert result["fsm"]["turn_index"] == 0

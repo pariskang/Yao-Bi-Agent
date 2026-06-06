@@ -39,6 +39,11 @@ dynamic_logic:
   if_case_quality_low:
     call: adaptive_question_planner_skill
     ask_more: true
+  per_state_followup_limit:
+    max_turns: 3
+    max_questions_per_turn: 3
+    allow_manual_end_state: true
+    deepen_with: [previous_turn_answers, normalized_tags, shen_rule_signals, syndrome_candidates, formula_routes]
   clinician_mode:
     show_rule_tags: true
     show_shen_rule_hits: true
