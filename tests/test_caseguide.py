@@ -161,3 +161,26 @@ def test_caseguide_manual_end_current_state_advances_before_three_turns():
     assert result["manual_end_accepted"] is True
     assert result["state"] == "S3_PAIN_PROFILE"
     assert result["fsm"]["turn_index"] == 0
+
+
+def test_caseguide_shen_signal_state_applies_deepening_answers():
+    session = CaseGuideSession()
+    session.start("腰痛")
+    session.answer_red_flags({"RF001": "否", "RF002": "否", "RF003": "否", "RF004": "否", "RF005": "否", "RF006": "否"})
+    session.answer_stage({"age": 68, "main_symptom": "腰痛", "duration": "5年"}, end_state=True)
+    session.answer_stage({"P001": ["腰骶部"], "P002": "到小腿", "P003": ["酸痛"]}, end_state=True)
+    session.answer_stage({"N001": "经常有", "N002": ["小腿外侧"], "N003": "没有"}, end_state=True)
+    session.answer_stage({"T001": "怕冷", "T002": "遇冷加重，热敷舒服", "T016": "睡不踏实"}, end_state=True)
+    assert session.state == "S6_SHEN_SIGNAL"
+    result = session.answer_stage({"T018": "胃口差"})
+    assert result["state"] == "S6_SHEN_SIGNAL"
+    assert session.case_state["tcm_inquiry"]["appetite"] == "胃口差"
+    assert "poor_appetite" in session.case_state["normalized_tags"]
+
+
+def test_caseguide_cannot_manually_skip_unanswered_red_flags():
+    session = CaseGuideSession()
+    session.start("腰痛")
+    blocked = session.end_current_state()
+    assert blocked["manual_end_accepted"] is False
+    assert blocked["state"] == "S1_REDFLAG"

@@ -18,5 +18,6 @@ def test_frontend_static_ui_contains_required_caseguide_surfaces():
     assert "手动结束本状态" in app
     assert "本状态深化追问" in app
     assert "stageRound" in app
+    assert "Math.min(2, value)" in app
     assert "CDSS" in app
     assert "@media" in css

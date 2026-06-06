@@ -94,7 +94,7 @@ function stageRound(stage) {
 }
 
 function setStageRound(stage, value) {
-  state.fsm.rounds[stage] = Math.max(0, Math.min(3, value));
+  state.fsm.rounds[stage] = Math.max(0, Math.min(2, value));
   save();
 }
 
@@ -118,7 +118,8 @@ function currentStageQuestions(stage) {
   const round = stageRound(stage);
   const unanswered = list.filter(q => !questionAnswered(q));
   const pool = unanswered.length ? unanswered : list;
-  return pool.slice(round * 3, round * 3 + 3).map(q => ({ ...q, reason: questionReason(q, stage) }));
+  const selected = pool.slice(round * 3, round * 3 + 3);
+  return (selected.length ? selected : pool.slice(-3)).map(q => ({ ...q, reason: questionReason(q, stage) }));
 }
 
 function renderStepper() {

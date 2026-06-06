@@ -93,6 +93,7 @@ class CaseGuideSession:
         elif self.state == "S5_TCM_CORE":
             self.case_state = tcm_four_diagnosis_skill(self.case_state, answers)["case_state"]
         elif self.state == "S6_SHEN_SIGNAL":
+            self._apply_any_answers(answers)
             self.case_state = shen_rule_signal_skill(self.case_state)["case_state"]
         elif self.state == "S7_COMORBIDITY":
             self.case_state = comorbidity_medication_skill(self.case_state, answers)["case_state"]
@@ -106,8 +107,11 @@ class CaseGuideSession:
     def end_current_state(self) -> dict[str, Any]:
         """Manual user action: stop asking within the current state and advance."""
 
-        if self.state == "S1_REDFLAG" and self.case_state.get("red_flags", {}).get("status") == "urgent":
-            return {"state": self.state, "case_state": self.case_state, **self._question_payload(), "manual_end_accepted": False}
+        if self.state == "S1_REDFLAG":
+            red_status = self.case_state.get("red_flags", {}).get("status")
+            unanswered_red_flags = bool(self.next_questions())
+            if red_status == "urgent" or unanswered_red_flags:
+                return {"state": self.state, "case_state": self.case_state, **self._question_payload(), "manual_end_accepted": False}
         self._advance_state()
         return {"state": self.state, "case_state": self.case_state, **self._question_payload(), "manual_end_accepted": True}
 
