@@ -1,0 +1,71 @@
+tags:
+  elderly:
+    description: 年龄60岁及以上
+  very_elderly:
+    description: 年龄73岁及以上
+  chronic_yabi:
+    aliases: [腰痛多年, 久病, 反复腰痛, 慢性腰痛]
+  long_duration:
+    aliases: [多年, 反复多年]
+  lumbar_pain:
+    aliases: [腰痛, 腰酸, 腰背痛]
+  lumbar_leg_pain:
+    aliases: [腰腿痛, 腰痛伴腿痛]
+  lower_limb_numbness:
+    aliases: [下肢麻木, 腿麻, 右下肢麻木, 左下肢麻木]
+  radiating_leg_pain:
+    aliases: [放射痛, 放射至小腿, 坐骨神经痛]
+  cold_aversion:
+    aliases: [畏寒, 怕冷]
+  cold_extremities:
+    aliases: [手脚凉, 四肢冷]
+  warmth_relieves:
+    aliases: [热敷缓解, 热敷舒服]
+  cold_aggravation:
+    aliases: [受凉加重, 遇冷加重]
+  dark_tongue:
+    aliases: [舌暗, 舌紫暗]
+  purple_tongue:
+    aliases: [舌紫, 舌紫暗]
+  white_greasy_coating:
+    aliases: [苔白腻, 白腻苔]
+  greasy_coating:
+    aliases: [苔腻, 厚腻]
+  slow_pulse:
+    aliases: [脉缓]
+  thin_pulse:
+    aliases: [脉细]
+  bitter_taste:
+    aliases: [口苦]
+  dry_mouth:
+    aliases: [口干]
+  insomnia:
+    aliases: [夜寐差, 睡眠差, 入睡困难, 多梦]
+  poor_appetite:
+    aliases: [胃纳差, 胃口差, 纳差]
+  epigastric_discomfort:
+    aliases: [胃脘不适, 胃不舒服]
+  fatigue:
+    aliases: [乏力, 疲劳]
+  lumbar_knee_soreness:
+    aliases: [腰膝酸软]
+  osteoporosis:
+    aliases: [骨质疏松]
+  fixed_pain:
+    aliases: [疼痛固定]
+  stabbing_pain:
+    aliases: [刺痛]
+  trauma_fracture_risk:
+    aliases: [外伤, 跌倒, 车祸]
+  cauda_equina_symptoms:
+    aliases: [大小便失禁, 会阴麻木, 尿不出来]
+  progressive_weakness:
+    aliases: [进行性无力, 走路拖脚]
+  fever_or_infection:
+    aliases: [发热, 寒战, 感染]
+  cancer_history:
+    aliases: [肿瘤史, 癌症史]
+  unexplained_weight_loss:
+    aliases: [体重下降]
+  anticoagulant_use:
+    aliases: [抗凝药, 华法林, 利伐沙班, 阿司匹林]

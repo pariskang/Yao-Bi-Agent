@@ -1,0 +1,14 @@
+{
+  "case_id": "auto_generated",
+  "patient_profile": {"age": null, "sex": null, "occupation": null, "physical_labor": null},
+  "chief_complaint": {"main_symptom": null, "duration": null, "acute_worsening": null},
+  "pain_profile": {"location": [], "radiation": null, "pain_nature": [], "severity_0_10": null, "aggravating_factors": [], "relieving_factors": []},
+  "neuro_ortho": {"numbness": null, "numbness_location": [], "weakness": null, "walking_limitation": null, "bowel_bladder": null, "imaging": [], "western_diagnosis": []},
+  "tcm_inquiry": {"cold_heat": null, "dampness": null, "fatigue": null, "sleep": null, "appetite": null, "mouth_taste": null, "sweating": null, "stool": null, "urine": null, "menstruation": null, "tongue": {"color": null, "coating": null, "photo_uploaded": false}, "pulse": null},
+  "comorbidity": {"diseases": [], "medications": [], "allergy": null},
+  "red_flags": {"status": null, "positive_items": []},
+  "normalized_tags": [],
+  "shen_rule_signals": {},
+  "missing_fields": [],
+  "case_quality_score": null
+}

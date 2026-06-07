@@ -1,0 +1,14 @@
+required_disclaimer: 本结果仅用于名老中医经验研究、医案复盘与教学讨论，不构成诊断、处方或治疗建议。
+red_flags:
+  fever_or_infection: 发热、寒战或近期感染需线下评估。
+  cancer_history: 肿瘤病史或夜间痛明显需医生评估。
+  unexplained_weight_loss: 原因不明体重下降需排除严重疾病。
+  trauma_fracture_risk: 外伤后腰痛需排除骨折。
+  cauda_equina_symptoms: 大小便控制异常、会阴区麻木或尿潴留需急诊评估。
+  progressive_weakness: 进行性下肢无力、拖脚需尽快线下评估。
+  pregnancy: 妊娠相关腰痛需专科评估。
+  severe_liver_kidney_disease: 严重肝肾功能异常需医师审核。
+  anticoagulant_use: 抗凝或阿司匹林使用需关注出血与相互作用风险。
+  allergy_to_herbs: 药物或中药过敏史需医生审核。
+  self_medication_request: 自行购药/自服请求必须拒绝并转为医生复核建议。
+toxic_or_high_risk_herbs: [附片, 细辛, 蜈蚣, 全蝎, 制川乌, 制草乌, 乌头]

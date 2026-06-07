@@ -1,0 +1,104 @@
+from backend.llm.dao_client import DaoClient, DaoGenerationConfig
+from backend.llm.json_repair import loads_with_repair
+from backend.llm.output_guard import guard_tao_output
+from backend.skills.pipeline import run_case_pipeline
+from backend.skills.tao_report_generation_skill import tao_report_generation_skill
+
+
+class BrokenJsonDaoClient(DaoClient):
+    def __init__(self, text: str):
+        super().__init__(DaoGenerationConfig(backend="mock"))
+        self.text = text
+
+    def generate(self, structured_rule_outputs):
+        return self.text
+
+
+def test_json_repair_handles_fenced_trailing_comma_and_single_quotes():
+    parsed, meta = loads_with_repair("""```json
+    {'markdown_report': '教学解释', 'final_diagnosis': null,}
+    ```""")
+    assert parsed["markdown_report"] == "教学解释"
+    assert parsed["final_diagnosis"] is None
+    assert meta["repaired"] is True
+
+
+def test_tao_overlay_accepts_repaired_safe_json():
+    safe = """以下为结果：
+    {'markdown_report': '本案为规则命中教学解释，不构成诊断、处方或治疗建议。',
+     'final_diagnosis': null,
+     'complete_prescription': null,
+     'patient_executable_dose': null,}
+    """
+    result = run_case_pipeline(
+        "患者女，68岁，腰痛反复5年，加重1月，伴下肢麻木，畏寒，舌暗苔白腻，脉细缓，既往骨质疏松。",
+        use_llm=True,
+        dao_client=BrokenJsonDaoClient(safe),
+    )
+    assert result["tao_runtime"]["status"] == "accepted"
+    assert result["tao_runtime"]["json_repair"]["repaired"] is True
+    assert result["tao_runtime"]["fallback_used"] is False
+    assert "Tao 教学解释补充" in result["markdown_report"]
+
+
+def test_tao_overlay_rejects_prescriptive_output_and_falls_back():
+    unsafe = '{"markdown_report": "最终诊断为腰椎间盘突出症，处方如下：细辛3g，水煎服。", "final_diagnosis": "腰椎间盘突出症"}'
+    result = run_case_pipeline("患者男，50岁，腰痛伴腿麻。", use_llm=True, dao_client=BrokenJsonDaoClient(unsafe))
+    assert result["tao_runtime"]["status"] == "guard_rejected"
+    assert result["tao_runtime"]["fallback_used"] is True
+    assert "最终诊断为腰椎间盘突出症" not in result["markdown_report"]
+
+
+def test_tao_disabled_runtime_falls_back_to_deterministic_report():
+    result = run_case_pipeline("患者女，68岁，腰痛反复5年。", use_llm=True, dao_client=DaoClient(DaoGenerationConfig(backend="disabled")))
+    assert result["tao_runtime"]["status"] == "fallback"
+    assert result["tao_runtime"]["fallback_used"] is True
+    assert "沈钦荣腰痹经验规则分析报告" in result["markdown_report"]
+
+
+def test_guard_detects_diagnosis_prescription_and_dose_patterns():
+    guard = guard_tao_output("最终诊断为腰痹，处方如下：细辛3g，每日2次。")
+    categories = {item["category"] for item in guard["violations"]}
+    assert {"final_diagnosis", "patient_executable_prescription", "dose_instruction"}.issubset(categories)
+
+
+def test_dao_mock_question_plan_preserves_candidate_ids():
+    client = DaoClient(DaoGenerationConfig(backend="mock"))
+    raw = client.generate_question_plan({
+        "candidate_questions": [
+            {"id": "Q1", "question": "问题1", "reason": "规则1"},
+            {"id": "Q2", "question": "问题2", "reason": "规则2"},
+        ]
+    })
+    parsed, _ = loads_with_repair(raw)
+    assert [q["id"] for q in parsed["questions"]] == ["Q1", "Q2"]
+
+
+def test_dao_direct_chat_mock_and_transformers_source_contract():
+    client = DaoClient(DaoGenerationConfig(backend="mock"))
+    assert "Tao mock direct reply" in client.chat([], "请解释规则线索")
+    source = __import__("pathlib").Path("backend/llm/dao_client.py").read_text(encoding="utf-8")
+    assert "TextIteratorStreamer" in source
+    assert "AutoTokenizer.from_pretrained" in source
+    assert "AutoModelForCausalLM.from_pretrained" in source
+    assert "trust_remote_code=True" in source
+    assert "attn_implementation=self.config.attn_implementation" in source
+
+
+def test_dao_from_env_reads_direct_transformers_knobs(monkeypatch):
+    monkeypatch.setenv("TAO_BACKEND", "transformers")
+    monkeypatch.setenv("TAO_TORCH_DTYPE", "bfloat16")
+    monkeypatch.setenv("TAO_DEVICE_MAP", "cuda:0")
+    monkeypatch.setenv("TAO_ATTN_IMPLEMENTATION", "eager")
+    config = DaoGenerationConfig.from_env()
+    assert config.backend == "transformers"
+    assert config.torch_dtype == "bfloat16"
+    assert config.device_map == "cuda:0"
+    assert config.attn_implementation == "eager"
+
+
+def test_dao_transformers_cache_is_configuration_aware():
+    source = __import__("pathlib").Path("backend/llm/dao_client.py").read_text(encoding="utf-8")
+    assert "_model_signature" in source
+    assert "self.__class__._model_signature != signature" in source
+    assert "self.__class__._model_signature = signature" in source

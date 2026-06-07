@@ -1,0 +1,118 @@
+# YaoBi-CaseGuide Skill Protocol
+
+YaoBi-CaseGuide Skill 是自动导引患者形成标准化腰痹医案的轻量化 Hermes 智能体。它以红旗筛查为安全底线，以中西医问诊为信息骨架，以沈钦荣腰痹经验规则为导引逻辑，将患者口语化描述转化为可供医生复核、科研标注和规则匹配的医案。
+
+## 严格边界
+
+用户若要求“诊断和处方”，系统只能输出：
+
+- 候选诊断/证型假设：标注为“待医生复核”。
+- 方剂路线信号：标注为“经验规则线索，非处方”。
+- 药物模块解释：不生成患者可执行剂量和服药方法。
+- 标准化医案、结构化标签、风险提示、医生复核清单。
+
+系统不得输出最终诊断、临床处方、患者自服剂量或替代医生治疗建议。
+
+## 12 个问诊 Skill
+
+1. `consent_privacy_skill`：知情与脱敏。
+2. `red_flag_screen_skill`：红旗症状筛查，优先级最高。
+3. `chief_complaint_skill`：主诉生成。
+4. `pain_profile_skill`：疼痛部位、放射、性质、评分、诱因、缓解因素。
+5. `neuro_ortho_screen_skill`：麻木、无力、间歇性跛行、影像、既往诊断。
+6. `tcm_four_diagnosis_skill`：寒热、湿重、气血、肝肾、少阳情志、睡眠、胃纳、汗出二便、月经、舌象。
+7. `shen_rule_signal_skill`：当归四逆、寒湿、补肾强骨、柴胡、顾护中焦、气血痹阻夹湿等信号捕捉。
+8. `comorbidity_medication_skill`：合并病、NSAIDs、肌松药、抗凝/激素/降糖药、过敏史。
+9. `adaptive_question_planner_skill`：按安全权重、规则信息增益、缺失字段、证型不确定性、方剂路线不确定性、患者疲劳度动态补问。
+10. `case_structuring_skill`：生成标准医案草稿。
+11. `case_quality_check_skill`：按基本信息、疼痛、红旗、中医特征、沈老信号评分。
+12. `clinician_handoff_skill`：生成医生复核摘要。
+
+## 状态机
+
+`CaseGuideSession` 按以下状态运行：`S0_CONSENT → S1_REDFLAG → S2_BASIC → S3_PAIN_PROFILE → S4_NEURO_ORTHO → S5_TCM_CORE → S6_SHEN_SIGNAL → S7_COMORBIDITY → S8_ADAPTIVE_REPAIR → S9_CASE_SUMMARY → S10_FINAL_REPORT`。若红旗为 urgent，进入 `S_EMERGENCY_NOTICE` 并停止后续中医问诊。
+
+## “诊断和处方”需求的安全实现
+
+`clinician_review_package_skill` 是处理“请给出诊断和处方”这类需求的唯一出口。它不会生成最终诊断或完整处方，而是生成：
+
+- 西医鉴别方向：如神经根受压、椎管狭窄、骨质疏松相关压缩骨折风险等，全部标注“待医生结合查体和影像复核”。
+- 中医候选证型：来自确定性规则评分，标注“候选证型，待医生复核”。
+- 方剂路线信号：如独活寄生汤、当归四逆汤、桂枝芍药知母汤等路线，仅作经验规则线索。
+- 药物模块解释：只列代表药物和触发证据，不合成患者可执行处方，不给服用剂量。
+
+这样既满足医生/科研场景下对“诊断假设与处方经验”的复盘需要，又避免患者端自动诊疗和自动开方风险。
+
+## 为什么不能“标注医师审核后仍给患者可执行剂量”
+
+`patient_request_guard_skill` 会拦截最终诊断、完整处方、患者可执行剂量和自服方案请求。原因是“标注需医师审核”不能消除患者端自动诊疗风险：一旦系统输出完整药味、剂量、煎服法或疗程，患者可能直接执行，尤其涉及附片、细辛、虫类药、乌头类药物时风险更高。
+
+因此系统允许的替代输出是：标准化医案、鉴别方向、候选证型、方剂路线信号、代表性药物模块、安全风险和医生复核清单。若需要最终诊断或处方，必须由具有资质的医生在面诊、查体、影像和用药安全审查后完成。
+
+## 医师审核模块
+
+新增 `create_physician_review_task` 与 `physician_review_skill`，用于医生端闭环：
+
+1. 系统先生成标准化医案、鉴别方向、候选证型、方剂路线信号和药物模块解释。
+2. `create_physician_review_task` 创建仅医生可见的审核任务。
+3. 具备资质的 `licensed_physician` 可以在医生端**手工录入**最终诊断、处方、剂量、煎服法、疗程和复诊计划。
+4. `physician_review_skill` 要求医师身份、执业证号和签名，拒绝模型生成的最终诊断或处方。
+5. 签名记录进入审计日志，患者端只能看到医生签名后的内容。
+
+这满足“需要医师审核模块”的需求，但仍保持模型不自动诊断、不自动开方、不自动给患者剂量的安全边界。
+
+## CDSS 自动草案模块
+
+`cdss_recommendation_skill` 面向医生端 CDSS 场景，可以由模型/规则自动生成：
+
+- 西医候选诊断/鉴别方向；
+- 中医候选证型；
+- 方剂路线草案；
+- 药物模块组合草案；
+- 高风险药物与复核清单。
+
+但这些内容的状态始终是 `draft_for_clinician_review`，不是已签名诊断、不是最终处方、不是患者可见医嘱，也不包含患者可执行剂量。最终诊断、完整处方、剂量、煎服法和疗程必须经 `physician_review_skill` 由 licensed physician 手工录入并签名。
+
+## FSM v0.2：状态内动态深化追问
+
+CaseGuide 现在采用“有限状态机 + 状态内最多三轮追问”模式：
+
+1. 每个状态先根据本状态核心目标给出最多 3 个问题。
+2. 用户回答后，系统把上一轮答案写入 `case_state.fsm.last_answers`，刷新 `normalized_tags`、沈老经验信号、候选证型和方剂路线信号。
+3. 下一轮问题会叠加“当前规则上下文 + 上一轮答案 + 未补齐字段”进行深化，而不是机械展示完整题库。
+4. 每个状态最多追问 3 轮；到达上限会自动进入下一状态。
+5. 前端/调用方可以触发 `end_current_state()` 手动结束当前状态，直接进入下一状态。
+6. 红旗状态仍然最高优先级；若命中 urgent，不允许通过手动结束绕过线下/急诊提示。
+
+每轮响应都会返回：
+
+```json
+{
+  "state": "S3_PAIN_PROFILE",
+  "next_questions": ["最多3个深化问题"],
+  "fsm": {
+    "state_goal": "采集疼痛部位、性质、程度、诱因、缓解因素",
+    "turn_index": 1,
+    "max_followups_per_state": 3,
+    "remaining_followups": 2,
+    "can_end_state": true,
+    "rule_context": {
+      "normalized_tags": ["elderly", "chronic_yabi"],
+      "top_syndrome_candidates": [],
+      "top_formula_routes": []
+    },
+    "last_answers": {}
+  }
+}
+```
+
+
+## FSM v0.3：规则选题 + Tao 问诊推理叠加
+
+问诊 Agent 现在不是单纯规则驱动：
+
+1. **确定性规则层**先根据当前 state、上一轮答案、标准化标签、沈老规则信号、候选证型和方剂路线，生成最多 3 个候选问题 id。
+2. **Tao 叠加层**在 `use_llm_questions=True` 时接收候选问题和规则上下文，只能执行三类动作：重排已有问题、患者友好化改写问题、解释为什么此刻追问。
+3. Tao 输出必须是 JSON object，并且只能引用候选问题中的既有 id；系统会丢弃新增 id。
+4. Tao 输出会经过 JSON repair 与 forbidden-output guard；如果出现最终诊断、完整处方、剂量、煎服法或患者自用建议，立即回退确定性规则问题。
+5. 因此问诊路径是“规则决定边界和候选问题，Tao 做安全的语义深化与表达优化”，符合 Hermes-style agent 编排，而不是让模型自由问诊或自由开方。
