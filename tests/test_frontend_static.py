@@ -17,6 +17,14 @@ def test_frontend_static_ui_contains_required_caseguide_surfaces():
     assert "有限状态机追问" in app
     assert "手动结束本状态" in app
     assert "本状态深化追问" in app
+    assert "Tao" in app
+    assert "Tao Direct Runtime" in app
+    assert "TAO_BACKEND=transformers" in app
+    assert "JSON Repair" in index + app
+    assert "Output Guard" in index + app
+    assert "Physician Review" in app
+    assert "data-tab=\"cdss\"" in app
+    assert "data-tab=\"physician\"" in app
     assert "stageRound" in app
     assert "Math.min(2, value)" in app
     assert "CDSS" in app

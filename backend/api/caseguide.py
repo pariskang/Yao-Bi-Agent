@@ -15,6 +15,7 @@ from backend.skills.pain_profile_skill import pain_profile_skill
 from backend.skills.red_flag_screen_skill import red_flag_screen_skill
 from backend.skills.shen_rule_signal_skill import shen_rule_signal_skill
 from backend.skills.tcm_four_diagnosis_skill import tcm_four_diagnosis_skill
+from backend.skills.tao_question_planner_skill import tao_question_planner_skill
 
 __all__ = [
     "CaseGuideSession",
@@ -35,4 +36,5 @@ __all__ = [
     "red_flag_screen_skill",
     "shen_rule_signal_skill",
     "tcm_four_diagnosis_skill",
+    "tao_question_planner_skill",
 ]

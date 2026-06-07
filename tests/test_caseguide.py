@@ -184,3 +184,69 @@ def test_caseguide_cannot_manually_skip_unanswered_red_flags():
     blocked = session.end_current_state()
     assert blocked["manual_end_accepted"] is False
     assert blocked["state"] == "S1_REDFLAG"
+
+
+def test_caseguide_questions_can_use_tao_overlay_without_changing_candidate_ids():
+    from backend.llm.dao_client import DaoClient, DaoGenerationConfig
+
+    session = CaseGuideSession(use_llm_questions=True, dao_client=DaoClient(DaoGenerationConfig(backend="mock")))
+    result = session.start("腰痛")
+    assert result["fsm"]["tao_question_runtime"]["status"] == "accepted"
+    assert result["fsm"]["tao_question_runtime"]["fallback_used"] is False
+    assert [q["id"] for q in result["next_questions"]] == ["RF001", "RF002", "RF003"]
+    assert all(q.get("tao_enhanced") is True for q in result["next_questions"])
+
+
+def test_tao_question_overlay_rejects_new_ids_and_prescriptive_text():
+    from backend.llm.dao_client import DaoClient, DaoGenerationConfig
+
+    class UnsafeQuestionDao(DaoClient):
+        def __init__(self):
+            super().__init__(DaoGenerationConfig(backend="mock"))
+
+        def generate_question_plan(self, question_context):
+            return '{"questions":[{"id":"NEW001","question":"最终诊断是什么？处方如下可以自行服用吗？","reason":"诊断为腰痹"}]}'
+
+    session = CaseGuideSession(use_llm_questions=True, dao_client=UnsafeQuestionDao())
+    result = session.start("腰痛")
+    assert result["fsm"]["tao_question_runtime"]["fallback_used"] is True
+    assert [q["id"] for q in result["next_questions"]] == ["RF001", "RF002", "RF003"]
+    assert all("最终诊断" not in q["question"] for q in result["next_questions"])
+
+
+def test_tao_question_overlay_rejects_harmless_new_ids_without_fallback_leak():
+    from backend.llm.dao_client import DaoClient, DaoGenerationConfig
+
+    class InventingQuestionDao(DaoClient):
+        def __init__(self):
+            super().__init__(DaoGenerationConfig(backend="mock"))
+
+        def generate_question_plan(self, question_context):
+            return '{"questions":[{"id":"NEW001","question":"这是新增问题吗？","reason":"测试新增 id"}]}'
+
+    session = CaseGuideSession(use_llm_questions=True, dao_client=InventingQuestionDao())
+    result = session.start("腰痛")
+    assert result["fsm"]["tao_question_runtime"]["fallback_used"] is True
+    assert result["fsm"]["tao_question_runtime"]["status"] == "fallback"
+    assert [q["id"] for q in result["next_questions"]] == ["RF001", "RF002", "RF003"]
+    assert all(not q.get("tao_enhanced") for q in result["next_questions"])
+
+
+def test_caseguide_transition_check_does_not_call_tao_twice_per_answer():
+    from backend.llm.dao_client import DaoClient, DaoGenerationConfig
+
+    class CountingQuestionDao(DaoClient):
+        def __init__(self):
+            super().__init__(DaoGenerationConfig(backend="mock"))
+            self.calls = 0
+
+        def generate_question_plan(self, question_context):
+            self.calls += 1
+            return super().generate_question_plan(question_context)
+
+    dao = CountingQuestionDao()
+    session = CaseGuideSession(use_llm_questions=True, dao_client=dao)
+    session.start("腰痛")
+    assert dao.calls == 1
+    session.answer_red_flags({"RF001": "否", "RF002": "否", "RF003": "否"})
+    assert dao.calls == 2

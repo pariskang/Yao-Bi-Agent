@@ -44,6 +44,9 @@ dynamic_logic:
     max_questions_per_turn: 3
     allow_manual_end_state: true
     deepen_with: [previous_turn_answers, normalized_tags, shen_rule_signals, syndrome_candidates, formula_routes]
+    optional_tao_question_overlay: true
+    tao_allowed_actions: [reorder_existing_questions, patient_friendly_rewrite, explain_reason]
+    tao_forbidden_actions: [new_question_id, final_diagnosis, complete_prescription, dose_instruction]
   clinician_mode:
     show_rule_tags: true
     show_shen_rule_hits: true

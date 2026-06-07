@@ -20,3 +20,28 @@ REPORT_PROMPT_TEMPLATE = """
 结构化结果：
 {rule_outputs}
 """
+
+
+QUESTION_PROMPT_TEMPLATE = """
+请基于以下有限状态机问诊上下文，对候选问题做患者友好化改写、排序和追问理由补充。
+
+硬性约束：
+1. 只能使用 candidate_questions 中已有 id，不得新增问题 id。
+2. 每轮最多返回 3 个问题。
+3. 只能改写 question 与 reason，不得改变选项含义、不得加入诊断结论、处方、剂量、煎服法或患者自用建议。
+4. 必须输出 JSON object，不要输出 markdown 代码围栏。
+
+JSON schema：
+{{
+  "questions": [
+    {{"id": "候选问题id", "question": "患者能理解的问题文本", "reason": "为什么此刻追问，需引用规则线索但不做诊断"}}
+  ],
+  "final_diagnosis": null,
+  "complete_prescription": null,
+  "patient_executable_dose": null,
+  "administration_instruction": null
+}}
+
+问诊上下文：
+{question_context}
+"""

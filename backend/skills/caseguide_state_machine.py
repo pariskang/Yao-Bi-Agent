@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from backend.llm.dao_client import DaoClient
+
 from backend.skills.adaptive_question_planner_skill import adaptive_question_planner_skill
 from backend.skills.case_quality_check_skill import case_quality_check_skill
 from backend.skills.case_structuring_skill import case_structuring_skill
@@ -18,6 +20,7 @@ from backend.skills.pain_profile_skill import pain_profile_skill
 from backend.skills.red_flag_screen_skill import red_flag_screen_skill
 from backend.skills.shen_rule_signal_skill import shen_rule_signal_skill
 from backend.skills.tcm_four_diagnosis_skill import tcm_four_diagnosis_skill
+from backend.skills.tao_question_planner_skill import tao_question_planner_skill
 from backend.skills.formula_base_selector_skill import formula_base_selector_skill
 from backend.skills.herb_module_composer_skill import herb_module_composer_skill
 from backend.skills.safety_guard_skill import safety_guard_skill
@@ -54,6 +57,8 @@ class CaseGuideSession:
     state: str = "S0_CONSENT"
     case_state: dict[str, Any] | None = None
     max_followups_per_state: int = MAX_FOLLOWUPS_PER_STATE
+    use_llm_questions: bool = False
+    dao_client: DaoClient | None = None
 
     def __post_init__(self) -> None:
         if self.case_state is None:
@@ -78,7 +83,7 @@ class CaseGuideSession:
         self.case_state["red_flags"] = {"status": result["red_flag_status"], "positive_items": result["positive_flags"]}
         if result["red_flag_status"] == "urgent":
             self.state = "S_EMERGENCY_NOTICE"
-        elif end_state or self._state_turn_limit_reached("S1_REDFLAG") or not self.next_questions():
+        elif end_state or self._state_turn_limit_reached("S1_REDFLAG") or not self._deterministic_next_questions():
             self._advance_state()
         return {"state": self.state, **result, **self._question_payload()}
 
@@ -100,7 +105,7 @@ class CaseGuideSession:
         elif self.state == "S8_ADAPTIVE_REPAIR":
             self._apply_any_answers(answers)
         self._refresh_rule_signals()
-        if end_state or self._state_turn_limit_reached(self.state) or not self.next_questions():
+        if end_state or self._state_turn_limit_reached(self.state) or not self._deterministic_next_questions():
             self._advance_state()
         return {"state": self.state, "case_state": self.case_state, **self._question_payload()}
 
@@ -109,13 +114,26 @@ class CaseGuideSession:
 
         if self.state == "S1_REDFLAG":
             red_status = self.case_state.get("red_flags", {}).get("status")
-            unanswered_red_flags = bool(self.next_questions())
+            unanswered_red_flags = bool(self._deterministic_next_questions())
             if red_status == "urgent" or unanswered_red_flags:
                 return {"state": self.state, "case_state": self.case_state, **self._question_payload(), "manual_end_accepted": False}
         self._advance_state()
         return {"state": self.state, "case_state": self.case_state, **self._question_payload(), "manual_end_accepted": True}
 
     def next_questions(self, max_questions: int = 3) -> list[dict[str, Any]]:
+        deterministic = self._deterministic_next_questions(max_questions)
+        planned = tao_question_planner_skill(
+            self.case_state,
+            self.state,
+            deterministic,
+            rule_context=self.current_rule_context(),
+            dao_client=self.dao_client,
+            use_llm=self.use_llm_questions,
+        )
+        self.case_state.setdefault("fsm", {})["tao_question_runtime"] = planned["tao_question_runtime"]
+        return planned["questions"]
+
+    def _deterministic_next_questions(self, max_questions: int = 3) -> list[dict[str, Any]]:
         if self.state == "S6_SHEN_SIGNAL":
             self.case_state = shen_rule_signal_skill(self.case_state)["case_state"]
             planner = adaptive_question_planner_skill(self.case_state, max_questions=max_questions, patient_burden_count=self._current_turn_count())
@@ -177,6 +195,7 @@ class CaseGuideSession:
                 "can_end_state": self.state in STATES and self.state not in {"S0_CONSENT", "S_EMERGENCY_NOTICE", "S10_FINAL_REPORT"},
                 "rule_context": self.current_rule_context(),
                 "last_answers": self.case_state.get("fsm", {}).get("last_answers", {}).get(self.state, {}),
+                "tao_question_runtime": self.case_state.get("fsm", {}).get("tao_question_runtime"),
             },
         }
 

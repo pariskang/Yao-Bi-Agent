@@ -32,7 +32,7 @@ report_generation_skill：研究/教学报告生成
 
 ## Dao1-30b-a3b 角色
 
-Dao1-30b-a3b 仅用于中医理论解释、方义说明、规则命中结果转写成教学报告、医案语言润色与不确定性说明。规则判断由确定性规则引擎完成，模型不得直接输出临床诊断、患者可执行处方或剂量医嘱。v0.2 新增可选 Tao Runtime：默认关闭，支持 mock/http/transformers 后端；模型输出必须是 JSON object，经过 JSON repair 与 forbidden-output guard 后，才会叠加到确定性规则报告，否则自动回退确定性模板。
+Dao1-30b-a3b 仅用于中医理论解释、方义说明、规则命中结果转写成教学报告、医案语言润色与不确定性说明。规则判断由确定性规则引擎完成，模型不得直接输出临床诊断、患者可执行处方或剂量医嘱。v0.2 新增可选 Tao Runtime：默认关闭，支持 mock/http/transformers 后端；模型输出必须是 JSON object，经过 JSON repair 与 forbidden-output guard 后，才会叠加到确定性规则报告，否则自动回退确定性模板。v0.4 增加 `DaoClient.chat()` 直接 Transformers 推理入口，可按 Dao1 示例直接加载 `CMLM/Dao1-30b-a3b` 并使用 `TextIteratorStreamer` 流式输出，无需 FastAPI 包装。
 
 ## 快速开始
 
@@ -44,6 +44,9 @@ python -m backend.main --text "患者女，68岁，腰痛反复5年，加重1月
 
 # 可选：启用 Tao Runtime 叠加解释；若未配置或输出不安全，会自动回退确定性报告
 TAO_BACKEND=mock python -m backend.main --text "患者女，68岁，腰痛反复5年。" --use-llm
+
+# 直接本地加载 Dao1/Tao（不封装 FastAPI），按模型卡风格使用 Transformers + streamer
+TAO_BACKEND=transformers TAO_MAX_NEW_TOKENS=512 python -m backend.main --tao-chat "请基于规则线索解释本案" --stream
 ```
 
 
@@ -51,7 +54,7 @@ TAO_BACKEND=mock python -m backend.main --text "患者女，68岁，腰痛反复
 
 本项目现在同时包含 `YaoBi_CaseGuide_Hermes_Agent`，用于自动导引患者生成高质量腰痹医案。该模块提供 12 个问诊 Skill：知情脱敏、红旗筛查、主诉生成、疼痛特征、神经骨科、中医四诊、沈老规则信号、合并病用药、动态补问、医案结构化、质量评分和医生交接。
 
-`CaseGuideSession` 按有限状态机运行，每个状态最多 3 轮追问、每轮最多返回 1–3 个高价值问题；每轮都会叠加上一轮答案、当前规则标签、沈老经验信号、候选证型和方剂路线信号深化补问。调用方可通过 `end_current_state()` 手动结束当前状态进入下一状态；若红旗筛查命中 urgent，会停止后续问诊并提示线下/急诊评估。最终输出标准化医案、结构化标签、风险提示、沈老经验规则线索和医生复核清单。
+`CaseGuideSession` 按有限状态机运行，每个状态最多 3 轮追问、每轮最多返回 1–3 个高价值问题；每轮都会叠加上一轮答案、当前规则标签、沈老经验信号、候选证型和方剂路线信号深化补问。v0.3 支持可选 Tao 问诊叠加：确定性规则先给出候选问题 id，Tao 只能在 JSON 合约内重排、患者友好化改写和解释追问理由，不能新增问题 id、诊断、处方或剂量；失败或违规则回退规则问题。调用方可通过 `end_current_state()` 手动结束当前状态进入下一状态；若红旗筛查命中 urgent，会停止后续问诊并提示线下/急诊评估。最终输出标准化医案、结构化标签、风险提示、沈老经验规则线索和医生复核清单。
 
 > 若用户要求“诊断和处方”，系统只输出候选证型/方剂路线信号与药物模块解释，并全部标注为“待医生复核/非处方”；不得生成最终诊断、临床处方、患者自服剂量或替代医生治疗建议。
 

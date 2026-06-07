@@ -21,3 +21,18 @@ def test_safety_flags_raw_red_flag():
     messages = "\n".join(flag["message"] for flag in result["safety"]["red_flags"])
     assert "原文红旗线索" in messages
     assert "自行" in messages
+
+
+def test_direct_tao_cli_disabled_returns_friendly_error():
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "backend.main", "--tao-chat", "测试"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "Tao direct chat is disabled" in result.stderr
+    assert "Traceback" not in result.stderr

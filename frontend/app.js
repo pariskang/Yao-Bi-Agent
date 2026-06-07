@@ -10,6 +10,17 @@ const steps = [
   { id: 'final', label: '最终医案', title: '标准医案、医生复核清单与导出' },
 ];
 
+const featureMatrix = [
+  ['CaseGuide FSM', '有限状态机分阶段问诊，每个状态最多 3 轮、每轮最多 3 问。'],
+  ['Rule Engine', '结构化标签、候选证型、方剂路线、模块命中和冲突检查。'],
+  ['Tao Direct Runtime', '本地 Transformers 直接推理：TAO_BACKEND=transformers，无需 FastAPI 包装。'],
+  ['JSON Repair', '修复模型 JSON 围栏、尾逗号、单引号等常见格式错误。'],
+  ['Output Guard', '拦截最终诊断、完整处方、患者可执行剂量和替代医生建议。'],
+  ['CDSS Draft', '医生端候选诊断/候选证型/处方策略草案，非患者可见。'],
+  ['Physician Review', '最终诊断、处方、剂量只能由 licensed physician 手工签名。'],
+  ['Export', '标准医案 Markdown、规则 JSON、医生复核摘要导出。'],
+];
+
 const questions = {
   redflag: [
     { id: 'RF001', q: '腰痛是否由跌倒、车祸、重物砸伤等明显外伤后出现？', options: ['是', '否', '不确定'], urgent: ['是'] },
@@ -156,6 +167,8 @@ function renderStart() {
           <strong>重要边界：</strong>患者端不会生成最终诊断、完整处方或患者可执行剂量。医生端 CDSS 仅生成草案，最终诊断和处方需 licensed physician 手工录入并签名。
         </div>
       </div>
+      <div class="feature-grid">${featureMatrix.map(([name, desc]) => `<article><strong>${name}</strong><p>${desc}</p></article>`).join('')}</div>
+      <pre class="runtime-code">TAO_BACKEND=transformers python -m backend.main --tao-chat "请解释本案规则线索" --stream</pre>
     </section>`;
   document.querySelector('#startBtn').addEventListener('click', () => { state.step = 1; render(); });
 }
@@ -172,7 +185,7 @@ function renderQuestionStage(stage) {
   screen.innerHTML = `
     <section class="fsm-strip">
       <strong>有限状态机追问</strong>
-      <span>本状态第 ${round + 1}/3 轮，每轮最多 3 问；问题会叠加当前规则标签与上一轮答案深化。</span>
+      <span>本状态第 ${round + 1}/3 轮，每轮最多 3 问；问题会叠加当前规则标签、上一轮答案与 Tao 大模型深化理由。</span>
       <button class="ghost-btn" id="endStateBtn" type="button">手动结束本状态</button>
     </section>
     <div class="card-grid"></div>
@@ -259,12 +272,15 @@ function renderSignals() {
   const c = buildCase();
   screen.innerHTML = `
     <section class="result-panel success"><h3>患者模式：对医生有帮助的信息</h3><ul>${c.tags.map(t => `<li>${tagLabel(t)}</li>`).join('')}</ul></section>
+    <section class="result-panel"><h3>规则引擎命中瀑布流</h3><p class="eyebrow">Rule Engine · Evidence Traceable</p><ul>${c.tags.map(t => `<li>${t} → ${tagLabel(t)}</li>`).join('') || '<li>待补充标签</li>'}</ul></section>
+    <section class="result-panel"><h3>Tao Direct Runtime 叠加层</h3><p class="eyebrow">Transformers local inference · JSON Repair · Output Guard</p><p>后端可直接使用 <code>TAO_BACKEND=transformers</code> 加载 <code>CMLM/Dao1-30b-a3b</code>，不需要 FastAPI 包装；模型只叠加教学解释和问诊改写，若输出诊断/处方/剂量则回退规则模板。</p></section>
     <section class="result-panel"><h3>医生/CDSS 模式：候选诊断与处方策略草案</h3><p class="eyebrow">draft_for_clinician_review · 非最终医嘱 · 非患者可见 · 无患者可执行剂量</p><ul>
       <li>西医候选：${c.tags.includes('radiating_leg_pain') || c.tags.includes('lower_limb_numbness') ? '腰椎间盘突出/神经根受压相关腰腿痛（待查体影像复核）' : '非特异性腰痛等待鉴别'}</li>
       <li>中医候选：${c.tags.includes('osteoporosis') ? '肝肾不足背景' : '气血痹阻夹湿候选'}；${c.tags.includes('cold_aggravation') ? '寒湿/寒凝经脉线索' : '寒热信息待补'}</li>
       <li>方剂路线信号：${c.modules.join('、') || '待补充信息'}</li>
       <li>安全复核：高风险药物、NSAIDs、抗凝/激素/降糖药、肝肾功能、胃肠风险。</li>
     </ul></section>
+    <section class="result-panel"><h3>医师审核签名闭环</h3><p>最终诊断、完整处方、剂量、煎服法和疗程只能在医生端由 licensed physician 手工录入并签名；患者端只显示医案整理线索。</p></section>
     <div class="footer-actions"><button class="ghost-btn" id="prevBtn">上一步</button><button class="primary-btn" id="nextBtn">生成最终医案</button></div>`;
   document.querySelector('#prevBtn').addEventListener('click', () => { state.step--; render(); });
   document.querySelector('#nextBtn').addEventListener('click', () => { state.step++; render(); });
@@ -272,16 +288,38 @@ function renderSignals() {
 
 function renderFinal() {
   const report = buildReport();
-  screen.innerHTML = `<section class="result-panel"><div class="report-tabs"><button class="tab-btn active">标准医案</button><button class="tab-btn">医生复核</button><button class="tab-btn">规则 JSON</button></div><pre class="report-box" id="reportBox"></pre><div class="footer-actions"><button class="ghost-btn" id="copyBtn">复制医案</button><button class="primary-btn" id="downloadBtn">下载 Markdown</button></div></section>`;
-  document.querySelector('#reportBox').textContent = report.markdown;
-  document.querySelector('#copyBtn').addEventListener('click', () => navigator.clipboard?.writeText(report.markdown));
-  document.querySelector('#downloadBtn').addEventListener('click', () => download('yaobi-case.md', report.markdown));
+  const tabs = {
+    case: report.markdown,
+    handoff: report.handoff,
+    tao: report.tao,
+    cdss: report.cdss,
+    physician: report.physician,
+    json: JSON.stringify(report.json, null, 2),
+  };
+  screen.innerHTML = `<section class="result-panel"><div class="report-tabs">
+    <button class="tab-btn active" data-tab="case">标准医案</button>
+    <button class="tab-btn" data-tab="handoff">医生复核</button>
+    <button class="tab-btn" data-tab="tao">Tao 教学解释</button>
+    <button class="tab-btn" data-tab="cdss">CDSS 草案</button>
+    <button class="tab-btn" data-tab="physician">医师签名</button>
+    <button class="tab-btn" data-tab="json">规则 JSON</button>
+  </div><pre class="report-box" id="reportBox"></pre><div class="footer-actions"><button class="ghost-btn" id="copyBtn">复制当前内容</button><button class="primary-btn" id="downloadBtn">下载 Markdown</button></div></section>`;
+  const box = document.querySelector('#reportBox');
+  const setTab = key => { box.textContent = tabs[key]; document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === key)); };
+  setTab('case');
+  document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => setTab(btn.dataset.tab)));
+  document.querySelector('#copyBtn').addEventListener('click', () => navigator.clipboard?.writeText(box.textContent));
+  document.querySelector('#downloadBtn').addEventListener('click', () => download('yaobi-case.md', box.textContent));
 }
 
 function buildReport() {
   const a = state.answers; const c = buildCase();
   const md = `# 腰痹医案草稿\n\n## 一、基本信息\n患者：${a.sex || '未详'}，${a.age || '未详'}岁\n\n## 二、主诉\n${c.chief}\n\n## 三、现病史\n疼痛部位：${fmt(a.location)}；放射情况：${fmt(a.radiation)}；疼痛性质：${fmt(a.pain_nature)}；疼痛评分：${a.severity ?? '未详'}/10。加重因素：${fmt(a.aggravating)}；缓解因素：${fmt(a.relieving)}。下肢麻木：${fmt(a.numbness)}，部位：${fmt(a.numbness_location)}；下肢无力：${fmt(a.weakness)}。\n\n## 四、伴随症状\n寒热：${fmt(a.cold_heat)}；寒热与疼痛关系：${fmt(a.cold_relation)}；睡眠：${fmt(a.sleep)}；胃纳：${fmt(a.appetite)}；口苦口干：${fmt(a.mouth_taste)}。\n\n## 五、既往史与检查\n既往疾病：${fmt(a.diseases)}；影像/检查：${fmt(a.imaging)}；既往诊断：${fmt(a.western_diagnosis)}；近期用药：${fmt(a.medications)}；过敏史：${fmt(a.allergy)}。\n\n## 六、中医四诊信息\n舌色：${fmt(a.tongue_color)}；舌苔：${fmt(a.tongue_coating)}；脉象：待医生面诊补充。\n\n## 七、结构化标签\n${c.tags.map(t => `- ${t}`).join('\n') || '- 暂无'}\n\n## 八、沈老经验规则线索\n${c.modules.map((m, i) => `${i + 1}. ${m}`).join('\n') || '1. 信息不足，待补充。'}\n\n## 九、医生复核清单\n- 红旗筛查：${c.red.status}\n- 下肢肌力、感觉、反射查体\n- 影像/骨密度报告\n- NSAIDs、抗凝药、肝肾功能和胃肠风险\n- 高风险药物需医师审核\n\n> 本报告为医案整理和医生端 CDSS 草案，不构成最终诊断、签名处方或患者可执行剂量。`;
-  return { markdown: md, json: { answers: state.answers, tags: c.tags, modules: c.modules, red_flags: c.red } };
+  const handoff = `# 医生复核摘要\n\n- 主要问题：${c.chief}。\n- 规则标签：${c.tags.join('、') || '待补充'}。\n- 方剂路线信号：${c.modules.join('、') || '待补充'}。\n- 信息缺口：脉象、影像原文、下肢肌力/感觉查体、用药剂量与不良反应。`;
+  const tao = `# Tao 教学解释叠加\n\n运行方式：TAO_BACKEND=transformers python -m backend.main --tao-chat "请解释本案规则线索" --stream\n\nTao Direct Runtime 负责把规则证据转写为教学解释；输出需通过 JSON Repair 和 Output Guard，不允许最终诊断、完整处方或患者可执行剂量。`;
+  const cdss = `# CDSS 草案\n\n状态：draft_for_clinician_review；patient_visible=false；complete_prescription_generated=false；patient_executable_dose_generated=false。\n\n候选方向：${c.tags.includes('lower_limb_numbness') ? '腰腿痛/神经根相关风险待复核' : '腰痛待鉴别'}；候选证型：${c.tags.includes('osteoporosis') ? '肝肾不足背景' : '气血痹阻夹湿候选'}。`;
+  const physician = `# 医师审核签名\n\n最终诊断、完整处方、剂量、煎服法、疗程只能由 licensed physician 手工录入。系统输出仅为规则证据和草案，医生确认后方可锁定。`;
+  return { markdown: md, handoff, tao, cdss, physician, json: { answers: state.answers, tags: c.tags, modules: c.modules, red_flags: c.red, runtime: 'Tao Direct Transformers Runtime', guards: ['JSON Repair', 'Output Guard'], cdss_status: 'draft_for_clinician_review' } };
 }
 
 function fmt(v) { return Array.isArray(v) ? (v.join('、') || '未详') : (v || '未详'); }

@@ -534,5 +534,34 @@
         "safety"
       ]
     }
+  },
+  {
+    "name": "tao_question_planner_skill",
+    "description": "Overlay Tao reasoning on deterministic CaseGuide questions. Tao may only reorder/rewrite existing candidate question ids and add reasons; unsafe or malformed output falls back to deterministic questions.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "case_state": {
+          "type": "object"
+        },
+        "state": {
+          "type": "string"
+        },
+        "deterministic_questions": {
+          "type": "array"
+        },
+        "rule_context": {
+          "type": "object"
+        },
+        "use_llm": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "case_state",
+        "state",
+        "deterministic_questions"
+      ]
+    }
   }
 ]
