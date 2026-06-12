@@ -11,7 +11,7 @@ const steps = [
 ];
 
 const featureMatrix = [
-  ['CaseGuide FSM', '有限状态机分阶段问诊，每个状态最多 3 轮、每轮最多 3 问。'],
+  ['CaseGuide FSM', '有限状态机分阶段问诊，默认每个状态最多 3 轮追问（可设置 1–5 轮）、每轮最多 3 问，答完可自动进入下一状态。'],
   ['Rule Engine', '结构化标签、候选证型、方剂路线、模块命中和冲突检查。'],
   ['Tao Direct Runtime', '本地 Transformers 直接推理：TAO_BACKEND=transformers，无需 FastAPI 包装。'],
   ['JSON Repair', '修复模型 JSON 围栏、尾逗号、单引号等常见格式错误。'],
@@ -77,6 +77,10 @@ const state = {
   answers: JSON.parse(localStorage.getItem('yaobi-case') || '{}'),
   fsm: JSON.parse(localStorage.getItem('yaobi-fsm') || '{\"rounds\":{},\"lastAnswers\":{}}'),
 };
+state.fsm.rounds = state.fsm.rounds || {};
+state.fsm.lastAnswers = state.fsm.lastAnswers || {};
+state.fsm.maxRounds = Number(state.fsm.maxRounds) >= 1 ? Number(state.fsm.maxRounds) : 3;
+state.fsm.autoAdvance = state.fsm.autoAdvance !== false;
 
 const screen = document.querySelector('#screen');
 const pageTitle = document.querySelector('#pageTitle');
@@ -100,12 +104,21 @@ function setAnswer(id, value, multi = false) {
 }
 
 
+function maxRounds() {
+  return Math.max(1, Number(state.fsm.maxRounds) || 3);
+}
+
 function stageRound(stage) {
-  return state.fsm.rounds[stage] || 0;
+  return Math.min(state.fsm.rounds[stage] || 0, maxRounds() - 1);
 }
 
 function setStageRound(stage, value) {
-  state.fsm.rounds[stage] = Math.max(0, Math.min(2, value));
+  state.fsm.rounds[stage] = Math.max(0, Math.min(maxRounds() - 1, value));
+  save();
+}
+
+function setMaxRounds(value) {
+  state.fsm.maxRounds = Math.max(1, Math.min(5, Number(value) || 3));
   save();
 }
 
@@ -127,10 +140,44 @@ function questionReason(q, stage) {
 function currentStageQuestions(stage) {
   const list = questions[stage] || [];
   const round = stageRound(stage);
-  const unanswered = list.filter(q => !questionAnswered(q));
-  const pool = unanswered.length ? unanswered : list;
-  const selected = pool.slice(round * 3, round * 3 + 3);
-  return (selected.length ? selected : pool.slice(-3)).map(q => ({ ...q, reason: questionReason(q, stage) }));
+  const key = `${stage}:${round}`;
+  state.fsm.shownIds = state.fsm.shownIds || {};
+  let ids = state.fsm.shownIds[key];
+  if (!ids || !ids.length) {
+    const unanswered = list.filter(q => !questionAnswered(q));
+    const selected = unanswered.length ? unanswered.slice(0, 3) : list.slice(round * 3, round * 3 + 3);
+    ids = (selected.length ? selected : list.slice(-3)).map(q => q.id);
+    state.fsm.shownIds[key] = ids;
+    save();
+  }
+  return list.filter(q => ids.includes(q.id)).map(q => ({ ...q, reason: questionReason(q, stage) }));
+}
+
+function stageFollowupsExhausted(stage) {
+  return stageRound(stage) + 1 >= maxRounds();
+}
+
+function maybeAutoAdvance(stage) {
+  if (!state.fsm.autoAdvance) return false;
+  const list = questions[stage] || [];
+  const shown = currentStageQuestions(stage);
+  const allAnswered = list.every(q => questionAnswered(q));
+  const shownAnswered = shown.every(q => questionAnswered(q));
+  if (stage === 'redflag' && !allAnswered) return false; // 红旗筛查是硬门控，必须答完才能离开。
+  if (allAnswered || (shownAnswered && stageFollowupsExhausted(stage))) {
+    state.fsm.lastAnswers[stage] = { ...state.answers };
+    save();
+    state.step = Math.min(steps.length - 1, state.step + 1);
+    render();
+    return true;
+  }
+  if (shownAnswered) {
+    state.fsm.lastAnswers[stage] = { ...state.answers };
+    setStageRound(stage, stageRound(stage) + 1);
+    render();
+    return true;
+  }
+  return false;
 }
 
 function renderStepper() {
@@ -182,20 +229,34 @@ function renderQuestionStage(stage) {
   }
   const round = stageRound(stage);
   const list = currentStageQuestions(stage);
+  const remaining = Math.max(0, maxRounds() - round - 1);
+  const exhausted = stageFollowupsExhausted(stage);
   screen.innerHTML = `
     <section class="fsm-strip">
       <strong>有限状态机追问</strong>
-      <span>本状态第 ${round + 1}/3 轮，每轮最多 3 问；问题会叠加当前规则标签、上一轮答案与 Tao 大模型深化理由。</span>
+      <span>本状态第 ${round + 1}/${maxRounds()} 轮（剩余追问 ${remaining} 轮），每轮最多 3 问；问题会叠加当前规则标签、上一轮答案与 Tao 大模型深化理由。</span>
+      <label class="fsm-setting">追问轮数上限
+        <select id="maxRoundsSelect">${[1, 2, 3, 4, 5].map(n => `<option value="${n}" ${n === maxRounds() ? 'selected' : ''}>${n}</option>`).join('')}</select>
+      </label>
+      <label class="fsm-setting"><input type="checkbox" id="autoAdvanceToggle" ${state.fsm.autoAdvance ? 'checked' : ''} />答完自动进入下一状态</label>
       <button class="ghost-btn" id="endStateBtn" type="button">手动结束本状态</button>
     </section>
     <div class="card-grid"></div>
-    <div class="footer-actions"><button class="ghost-btn" id="prevBtn">上一步</button><button class="ghost-btn" id="deepenBtn">本状态深化追问</button><button class="primary-btn" id="nextBtn">进入下一个状态</button></div>`;
+    <div class="footer-actions"><button class="ghost-btn" id="prevBtn">上一步</button><button class="ghost-btn" id="deepenBtn" ${exhausted ? 'disabled title="已达到本状态追问轮数上限"' : ''}>本状态深化追问</button><button class="primary-btn" id="nextBtn">进入下一个状态</button></div>`;
   const grid = screen.querySelector('.card-grid');
   list.forEach(q => grid.appendChild(renderQuestion(q, stage)));
+  document.querySelector('#maxRoundsSelect').addEventListener('change', e => { setMaxRounds(e.target.value); render(); });
+  document.querySelector('#autoAdvanceToggle').addEventListener('change', e => { state.fsm.autoAdvance = e.target.checked; save(); });
   document.querySelector('#prevBtn').addEventListener('click', () => { state.step = Math.max(0, state.step - 1); render(); });
-  document.querySelector('#deepenBtn').addEventListener('click', () => { state.fsm.lastAnswers[stage] = { ...state.answers }; setStageRound(stage, round + 1); render(); });
-  document.querySelector('#endStateBtn').addEventListener('click', () => { state.fsm.lastAnswers[stage] = { ...state.answers }; state.step = Math.min(steps.length - 1, state.step + 1); render(); });
-  document.querySelector('#nextBtn').addEventListener('click', () => { state.fsm.lastAnswers[stage] = { ...state.answers }; state.step = Math.min(steps.length - 1, state.step + 1); render(); });
+  document.querySelector('#deepenBtn').addEventListener('click', () => { if (exhausted) return; state.fsm.lastAnswers[stage] = { ...state.answers }; setStageRound(stage, round + 1); render(); });
+  document.querySelector('#endStateBtn').addEventListener('click', () => {
+    if (stage === 'redflag' && !questions.redflag.every(q => questionAnswered(q))) { alert('红旗筛查是安全硬门控，请先回答全部红旗问题。'); return; }
+    state.fsm.lastAnswers[stage] = { ...state.answers }; state.step = Math.min(steps.length - 1, state.step + 1); render();
+  });
+  document.querySelector('#nextBtn').addEventListener('click', () => {
+    if (stage === 'redflag' && !questions.redflag.every(q => questionAnswered(q))) { alert('红旗筛查是安全硬门控，请先回答全部红旗问题。'); return; }
+    state.fsm.lastAnswers[stage] = { ...state.answers }; state.step = Math.min(steps.length - 1, state.step + 1); render();
+  });
 }
 
 function renderQuestion(q, stage) {
@@ -218,7 +279,12 @@ function renderQuestion(q, stage) {
       const selected = q.multi ? Array.isArray(current) && current.includes(opt) : current === opt;
       const btn = document.createElement('button');
       btn.type = 'button'; btn.className = `option-pill ${selected ? 'selected' : ''}`; btn.textContent = opt;
-      btn.addEventListener('click', () => { setAnswer(q.id, opt, q.multi); renderQuestionStage(steps[state.step].id); });
+      btn.addEventListener('click', () => {
+        setAnswer(q.id, opt, q.multi);
+        // 单选答完后自动深化追问或自动进入下一状态；多选保留手动控制，避免选到一半被跳转。
+        if (!q.multi && maybeAutoAdvance(stage)) return;
+        renderQuestionStage(steps[state.step].id);
+      });
       options.appendChild(btn);
     });
   }

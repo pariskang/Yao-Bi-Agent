@@ -26,6 +26,9 @@ def test_frontend_static_ui_contains_required_caseguide_surfaces():
     assert "data-tab=\"cdss\"" in app
     assert "data-tab=\"physician\"" in app
     assert "stageRound" in app
-    assert "Math.min(2, value)" in app
+    assert "maxRounds" in app  # 追问轮数上限可配置，不再硬编码 3 轮。
+    assert "追问轮数上限" in app
+    assert "答完自动进入下一状态" in app
+    assert "maybeAutoAdvance" in app
     assert "CDSS" in app
     assert "@media" in css
