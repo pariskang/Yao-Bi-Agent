@@ -15,6 +15,7 @@ from backend.skills.clinician_review_package_skill import clinician_review_packa
 from backend.skills.cdss_recommendation_skill import cdss_recommendation_skill
 from backend.skills.comorbidity_medication_skill import comorbidity_medication_skill
 from backend.skills.consent_privacy_skill import consent_privacy_skill
+from backend.skills.mined_evidence_skill import mined_evidence_skill
 from backend.skills.neuro_ortho_screen_skill import neuro_ortho_screen_skill
 from backend.skills.pain_profile_skill import pain_profile_skill
 from backend.skills.red_flag_screen_skill import red_flag_screen_skill
@@ -268,8 +269,9 @@ class CaseGuideSession:
             safety,
             user_role="clinician",
         )
+        mined = mined_evidence_skill(normalized_tags, routed["syndrome_candidates"])
         self.state = "S10_FINAL_REPORT"
-        return {"state": self.state, "case_state": self.case_state, "shen_signals": shen["shen_signals"], "high_value_missing": shen["high_value_missing"], **quality, **routed, **formula, **modules, "safety": safety, **structured, **handoff, **review_package, **cdss}
+        return {"state": self.state, "case_state": self.case_state, "shen_signals": shen["shen_signals"], "high_value_missing": shen["high_value_missing"], **quality, **routed, **formula, **modules, "safety": safety, **structured, **handoff, **review_package, **cdss, "mined_evidence": mined["mined_evidence"], "mined_evidence_disclaimer": mined["disclaimer"]}
 
     def _question_payload(self) -> dict[str, Any]:
         return {

@@ -60,6 +60,21 @@ TAO_BACKEND=transformers TAO_MAX_NEW_TOKENS=512 python -m backend.main --tao-cha
 
 
 
+## xlsx 医案规则挖掘（脱敏）
+
+`backend/mining/xlsx_case_miner.py` 可将门诊 xlsx 导出转化为可审核的候选规则：
+
+```bash
+pip install .[mining]
+python -m backend.mining.xlsx_case_miner --xlsx data/private/门诊导出.xlsx \
+    --yaml rules/11_mined_rule_candidates.yaml --frontend frontend/mined_rules.js
+```
+
+- **脱敏优先**：姓名、病案号、地址、医师工号、就诊序号在内存中即被丢弃，自由文本只做关键词扫描后丢弃；产物仅含聚合统计与 xlsx 行号引用。原始 xlsx 放在 `data/private/`（已 gitignore，`*.xlsx` 全局禁入仓库）。
+- **挖掘内容**：证型/症状/西医诊断分布、药物频次、功效模块、签名方剂命中（独活寄生汤、当归四逆汤、桂枝芍药知母汤、黄芪桂枝五物汤、小柴胡类、四物/八珍底盘）、症状↔方药关联规则（support/confidence/lift）、重点药物剂量分布（细辛、附片、全蝎、蜈蚣、麻黄等）。
+- **审核边界**：所有候选规则 `status: pending_expert_review`、`clinician_only: true`，仅作为医师端研究证据由 `mined_evidence_skill` 注入 `final_report`，不参与自动决策、不向患者输出；剂量分布仅为经验研究信号，不构成可执行剂量。
+- **数据质量诚实声明**：门诊导出的"中医四诊"栏多为模板文本，舌脉信息不可用于挖掘，产物中以 `data_quality.tongue_pulse_usable=false` 明示。
+
 ## CDSS 草案模块
 
 项目新增 `cdss_recommendation_skill`，用于医生端 CDSS 自动生成候选诊断、候选证型、方剂路线和药物模块草案。该草案状态固定为 `draft_for_clinician_review`，不是最终诊断、不是签名处方、不是患者可见医嘱，也不会生成患者可执行剂量；最终医嘱仍需 `physician_review_skill` 医师手工录入并签名。
@@ -84,12 +99,15 @@ TAO_BACKEND=transformers TAO_MAX_NEW_TOKENS=512 python -m backend.main --tao-cha
 ## 目录结构
 
 ```text
-config/       Hermes、模型和安全配置
-rules/        YAML 规则库
-backend/      轻量 Python 技能、规则引擎和 CLI
-backend/llm/  Dao1/Tao Runtime、JSON repair、输出安全校验与提示模板
-docs/         Protocol、UI 与安全政策
-tests/        规则与安全回归测试
+config/          Hermes、模型和安全配置
+rules/           YAML 规则库（含 11_mined_rule_candidates.yaml 挖掘候选规则）
+backend/         轻量 Python 技能、规则引擎和 CLI
+backend/llm/     Dao1/Tao Runtime、JSON repair、输出安全校验与提示模板
+backend/mining/  xlsx 医案脱敏挖掘管道（频次/关联规则/签名方剂/剂量分布）
+frontend/        零依赖静态 UI：总览看板、智能问诊、规则挖掘、证据回溯、医师审核、评估与安全、设置
+data/private/    本地原始 xlsx（gitignore，绝不入库）
+docs/            Protocol、UI 与安全政策
+tests/           规则、安全、挖掘与前端回归测试
 ```
 
 

@@ -1,3 +1,15 @@
+const modules = [
+  { id: 'dashboard', label: '总览看板', icon: '◧' },
+  { id: 'intake', label: '智能问诊', icon: '✚' },
+  { id: 'mining', label: '规则挖掘', icon: '⛏' },
+  { id: 'evidence', label: '证据回溯', icon: '⌖' },
+  { id: 'review', label: '医师审核', icon: '✒' },
+  { id: 'safety', label: '评估与安全', icon: '⛨' },
+  { id: 'settings', label: '设置', icon: '⚙' },
+];
+
+const MINED = typeof window !== 'undefined' && window.MINED_RULES ? window.MINED_RULES : null;
+
 const steps = [
   { id: 'start', label: '开始与知情', title: '自动导引患者生成标准腰痹医案' },
   { id: 'redflag', label: '红旗筛查', title: '先排除需要立即线下评估的危险信号' },
@@ -72,6 +84,7 @@ const questions = {
 };
 
 const state = {
+  module: localStorage.getItem('yaobi-module') || 'dashboard',
   step: 0,
   doctorMode: true,
   answers: JSON.parse(localStorage.getItem('yaobi-case') || '{}'),
@@ -189,7 +202,33 @@ function renderStepper() {
   el.querySelectorAll('button').forEach(btn => btn.addEventListener('click', () => { state.step = Number(btn.dataset.step); render(); }));
 }
 
+function renderModuleNav() {
+  const nav = document.querySelector('#moduleNav');
+  nav.innerHTML = modules.map(m => `
+    <button class="module-link ${m.id === state.module ? 'active' : ''}" data-module="${m.id}" type="button">
+      <span class="module-icon">${m.icon}</span><span>${m.label}</span>
+    </button>`).join('');
+  nav.querySelectorAll('button').forEach(btn => btn.addEventListener('click', () => {
+    state.module = btn.dataset.module;
+    localStorage.setItem('yaobi-module', state.module);
+    render();
+  }));
+}
+
 function render() {
+  renderModuleNav();
+  const intake = state.module === 'intake';
+  document.querySelector('#stepper').style.display = intake ? '' : 'none';
+  document.querySelector('.case-sidebar').style.display = intake ? '' : 'none';
+  document.querySelector('.app-shell').classList.toggle('wide', !intake);
+  if (!intake) {
+    if (state.module === 'dashboard') return renderDashboard();
+    if (state.module === 'mining') return renderMiningModule();
+    if (state.module === 'evidence') return renderEvidenceModule();
+    if (state.module === 'review') return renderReviewModule();
+    if (state.module === 'safety') return renderSafetyModule();
+    if (state.module === 'settings') return renderSettingsModule();
+  }
   renderStepper();
   pageTitle.textContent = steps[state.step].title;
   const id = steps[state.step].id;
@@ -408,6 +447,184 @@ function updatePreview() {
   document.querySelector('#qualityHint').textContent = score >= 80 ? '已可生成医生复核摘要。' : '建议继续补充关键字段。';
 }
 function download(name, text) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/markdown' })); a.download = name; a.click(); URL.revokeObjectURL(a.href); }
+
+// ---------------------------------------------------------------------------
+// Module views (xlsx mining / evidence / review / safety / settings)
+// ---------------------------------------------------------------------------
+
+const TAG_CN = {
+  lower_limb_numbness: '下肢麻木', radiating_leg_pain: '下肢放射痛', bilateral_leg_involvement: '双下肢受累',
+  cold_aggravation: '遇冷/受凉加重', cold_pain: '冷痛', bitter_taste: '口苦', insomnia: '失眠/寐差',
+  fatigue: '乏力', poor_appetite: '纳差', distending_pain: '胀痛', soreness: '酸痛', activity_limitation: '活动受限',
+  night_pain: '夜间痛', sedentary_aggravation: '久坐加重', acute_on_chronic: '慢病急性加重', elderly: '高龄(≥60)',
+  osteoporosis: '骨质疏松',
+};
+const cnTag = t => (t || '').startsWith('zheng::') ? `证型·${t.split('::')[1]}` : (TAG_CN[t] || t);
+
+function noDataPanel() {
+  return `<section class="result-panel"><h3>暂无挖掘数据</h3><p>请先在本地运行脱敏挖掘管道生成 <code>frontend/mined_rules.js</code>：</p>
+    <pre class="runtime-code">python -m backend.mining.xlsx_case_miner --xlsx 门诊导出.xlsx \\
+    --yaml rules/11_mined_rule_candidates.yaml --frontend frontend/mined_rules.js</pre>
+    <p>原始 xlsx 含患者身份信息，仅保留在本地 <code>data/private/</code>，不会进入仓库；产物只包含聚合统计与行号引用。</p></section>`;
+}
+
+function barRows(dist, total, labelFn = x => x, max = 10) {
+  const entries = Object.entries(dist || {}).slice(0, max);
+  const top = Math.max(...entries.map(([, v]) => v), 1);
+  return entries.map(([k, v]) => `
+    <div class="bar-row"><span class="bar-label">${labelFn(k)}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${Math.round(v / top * 100)}%"></span></span>
+      <span class="bar-value">${v}${total ? ` · ${Math.round(v / total * 100)}%` : ''}</span></div>`).join('');
+}
+
+function renderDashboard() {
+  pageTitle.textContent = '总览看板 · 沈钦荣腰痹门诊经验数据';
+  if (!MINED) { screen.innerHTML = noDataPanel(); return; }
+  const s = MINED.dataset_stats;
+  screen.innerHTML = `
+    <div class="stat-grid">
+      <article class="stat-card"><p class="eyebrow">脱敏病例</p><strong>${s.n_cases}</strong><span>门诊就诊记录</span></article>
+      <article class="stat-card"><p class="eyebrow">含中药处方</p><strong>${s.n_with_prescription}</strong><span>可供方药挖掘</span></article>
+      <article class="stat-card"><p class="eyebrow">候选规则</p><strong>${(MINED.rule_candidates || []).length}</strong><span>全部待专家审核</span></article>
+      <article class="stat-card"><p class="eyebrow">签名方剂路线</p><strong>${(MINED.formula_signature_hits || []).length}</strong><span>≥70% 签名药物命中</span></article>
+    </div>
+    <div class="panel-grid">
+      <section class="result-panel"><h3>证型分布</h3>${barRows(s.zheng_distribution, s.n_cases)}</section>
+      <section class="result-panel"><h3>症状标签分布</h3>${barRows(s.symptom_tag_distribution, s.n_cases, cnTag, 12)}</section>
+      <section class="result-panel"><h3>高频药物（按处方计）</h3><div class="chip-cloud">${Object.entries(MINED.herb_frequency_top || {}).slice(0, 28).map(([h, n]) => `<span class="chip">${h}<em>${n}</em></span>`).join('')}</div></section>
+      <section class="result-panel"><h3>功效模块使用</h3>${barRows(MINED.herb_module_counts, s.n_with_prescription)}</section>
+      <section class="result-panel"><h3>西医诊断 Top</h3>${barRows(s.western_dx_top, s.n_cases)}</section>
+      <section class="result-panel"><h3>人群结构</h3>${barRows(s.age_band_distribution, s.n_cases, b => b === '未知' ? '未知' : b.replace('s', ' 岁段'))}<p class="muted">性别：${Object.entries(s.sex_distribution).map(([k, v]) => `${k} ${v}`).join(' / ')}</p></section>
+    </div>
+    <section class="result-panel warning"><h3>数据质量提示</h3><p>${(MINED.data_quality || {}).tongue_pulse_note || ''}</p><p class="muted">${MINED.meta ? MINED.meta.privacy : ''}</p></section>`;
+}
+
+function renderMiningModule() {
+  pageTitle.textContent = '规则挖掘 · xlsx 医案候选规则（support / confidence / lift）';
+  if (!MINED) { screen.innerHTML = noDataPanel(); return; }
+  const rules = MINED.rule_candidates || [];
+  const filter = state.miningFilter || 'all';
+  const types = ['all', ...new Set(rules.map(r => r.rule_type))];
+  const shown = rules.filter(r => filter === 'all' || r.rule_type === filter);
+  screen.innerHTML = `
+    <section class="result-panel">
+      <div class="filter-row">${types.map(t => `<button class="option-pill ${t === filter ? 'selected' : ''}" data-filter="${t}">${t === 'all' ? '全部' : t}</button>`).join('')}</div>
+      <table class="rule-table"><thead><tr><th>规则 ID</th><th>IF</th><th>THEN</th><th>support</th><th>confidence</th><th>lift</th><th>状态</th></tr></thead><tbody>
+      ${shown.map(r => {
+        const st = r.statistics || {};
+        const cell = v => v === undefined ? '—' : v;
+        return `<tr data-rule="${r.rule_id}"><td class="mono">${r.rule_id}</td>
+          <td>${Object.entries(r.if || {}).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join('、') : cnTag(String(v))}`).join('<br/>')}</td>
+          <td>${Object.entries(r.then || {}).map(([, v]) => Array.isArray(v) ? v.join('–') + ' 克' : v).join('<br/>')}</td>
+          <td>${cell(st.support)}</td><td>${cell(st.confidence)}</td>
+          <td>${st.lift !== undefined ? `<span class="lift-pill ${st.lift >= 1.5 ? 'hi' : ''}">${st.lift}</span>` : '—'}</td>
+          <td><span class="badge-pending">待专家审核</span></td></tr>`;
+      }).join('')}
+      </tbody></table>
+      <p class="muted">共 ${shown.length} 条；所有候选规则 clinician_only=true，仅供医师复核与科研教学，不构成诊断或处方依据，不向患者展示。</p>
+    </section>`;
+  screen.querySelectorAll('[data-filter]').forEach(btn => btn.addEventListener('click', () => { state.miningFilter = btn.dataset.filter; renderMiningModule(); }));
+  screen.querySelectorAll('tr[data-rule]').forEach(tr => tr.addEventListener('click', () => { state.evidenceRule = tr.dataset.rule; state.module = 'evidence'; localStorage.setItem('yaobi-module', 'evidence'); render(); }));
+}
+
+function renderEvidenceModule() {
+  pageTitle.textContent = '证据回溯 · 签名方剂命中与剂量分布';
+  if (!MINED) { screen.innerHTML = noDataPanel(); return; }
+  const rules = MINED.rule_candidates || [];
+  const selected = rules.find(r => r.rule_id === state.evidenceRule) || rules[0];
+  const hits = MINED.formula_signature_hits || [];
+  screen.innerHTML = `
+    <div class="panel-grid">
+      <section class="result-panel"><h3>候选规则详情</h3>
+        ${selected ? `<p class="mono">${selected.rule_id}</p>
+          <p><strong>IF</strong> ${Object.entries(selected.if || {}).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join('、') : cnTag(String(v))}`).join('；')}</p>
+          <p><strong>THEN</strong> ${JSON.stringify(selected.then, null, 0).replace(/[{}"]/g, '')}</p>
+          <p><strong>统计</strong> ${Object.entries(selected.statistics || {}).map(([k, v]) => `${k}=${v}`).join('，')}</p>
+          <p><strong>证据</strong> ${selected.evidence}</p>
+          <p><span class="badge-pending">pending_expert_review</span> <span class="badge-pending">clinician_only</span> 强度：${selected.strength || '—'}</p>` : '<p>暂无规则。</p>'}
+        <p class="muted">在「规则挖掘」页点击任意一行即可在此回溯证据。</p>
+      </section>
+      <section class="result-panel"><h3>签名方剂命中（证据行号已脱敏）</h3>
+        ${hits.map(h => `<details><summary><strong>${h.formula}</strong> · ${h.n_cases} 例 · 主证型 ${Object.keys(h.by_zheng)[0] || '—'}</summary>
+          <p>证型分布：${Object.entries(h.by_zheng).map(([z, n]) => `${z} ${n}`).join('；')}</p>
+          <p class="mono">xlsx 行号：${(h.evidence_rows || []).join(', ')}</p></details>`).join('')}
+      </section>
+      <section class="result-panel"><h3>重点药物剂量分布（医师端研究用）</h3>
+        <table class="rule-table"><thead><tr><th>药物</th><th>n</th><th>最小(g)</th><th>最大(g)</th><th>常用(g)</th><th>复核</th></tr></thead><tbody>
+        ${Object.entries(MINED.dose_table || {}).map(([h, d]) => `<tr><td>${h}</td><td>${d.n}</td><td>${d.min_g}</td><td>${d.max_g}</td><td>${d.mode_g}</td><td><span class="badge-pending">医师必核</span></td></tr>`).join('')}
+        </tbody></table>
+        <p class="muted">剂量分布仅为医师端经验研究信号，不向患者输出，不构成可执行剂量。</p>
+      </section>
+    </div>`;
+}
+
+function renderReviewModule() {
+  pageTitle.textContent = '医师审核 · Physician Review 签名闭环';
+  const c = buildCase();
+  screen.innerHTML = `
+    <div class="panel-grid">
+      <section class="result-panel"><h3>待审核队列</h3>
+        <ul class="review-list">
+          <li><strong>当前问诊医案草稿</strong><span>${c.chief || '未开始'}</span><span class="badge-pending">draft_for_clinician_review</span></li>
+          <li><strong>挖掘候选规则</strong><span>${MINED ? (MINED.rule_candidates || []).length : 0} 条</span><span class="badge-pending">pending_expert_review</span></li>
+        </ul></section>
+      <section class="result-panel"><h3>签名边界（不可由模型代签）</h3>
+        <ul>
+          <li>最终诊断：仅 licensed physician 手工录入（source=physician_entered）。</li>
+          <li>完整处方、剂量、煎服法、疗程：仅医师手工录入并签名。</li>
+          <li>模型生成内容（source=model_generated）一律 rejected_model_generated_diagnosis。</li>
+          <li>附片、细辛、全蝎、蜈蚣、麻黄等剂量必须医师逐项复核。</li>
+        </ul>
+        <div class="sign-form">
+          <label>医师工号 <input class="free-note" placeholder="DOC-001" /></label>
+          <label>执业证号 <input class="free-note" placeholder="LICENSE-001" /></label>
+          <button class="primary-btn" type="button" id="signBtn">签名确认（演示）</button>
+        </div></section>
+    </div>`;
+  document.querySelector('#signBtn').addEventListener('click', () => alert('演示环境：实际签名需在 physician_review_skill 后端流程中完成审计记录。'));
+}
+
+function renderSafetyModule() {
+  pageTitle.textContent = '评估与安全 · 红旗门控 / Output Guard / 数据质量';
+  const q = MINED ? MINED.data_quality : null;
+  screen.innerHTML = `
+    <div class="panel-grid">
+      <section class="result-panel redflag"><h3>红旗硬门控（四类）</h3>
+        <ul><li>马尾综合征：大小便障碍、会阴麻木 → 立即急诊。</li><li>肿瘤风险：肿瘤史、消瘦、夜间痛进行性加重。</li><li>感染风险：发热寒战、近期感染。</li><li>骨折风险：外伤、激素、重度骨质疏松骤发剧痛。</li></ul>
+        <p>命中 urgent 立即终止问诊；红旗问题未答完时任何方式不能跳过（FSM 与 UI 双重拦截）。</p></section>
+      <section class="result-panel"><h3>Output Guard 禁用输出</h3>
+        <ul><li>最终诊断、完整处方、患者可执行剂量、煎服法 → 拦截并回退规则模板。</li><li>Tao 只能重排/改写/解释既有问题，新增问题 id 一律丢弃。</li><li>患者端请求诊断处方 → patient_request_guard 阻断。</li></ul></section>
+      <section class="result-panel"><h3>测试与验收指标</h3>
+        <ul><li>pytest 全量：41 项（含红旗拦截、禁用输出、挖掘脱敏、PII 泄漏检查）。</li><li>红旗召回测试：urgent 信号 100% 进入 S_EMERGENCY_NOTICE。</li><li>禁用输出拦截：模型代签诊断/处方用例全部 rejected。</li></ul></section>
+      <section class="result-panel warning"><h3>数据质量与局限</h3>
+        ${q ? `<ul><li>病例数 ${q.n_cases}，含处方 ${q.n_with_prescription}。</li><li>舌脉可用性：${q.tongue_pulse_usable ? '可用' : '不可用'}。${q.tongue_pulse_note}</li><li>缺证型 ${q.n_missing_zheng} 例。</li></ul>` : '<p>运行挖掘管道后展示。</p>'}
+        <p>单中心、单医师、横断面数据；候选规则只是统计信号，须经专家审核才能升级为正式规则。</p></section>
+    </div>`;
+}
+
+function renderSettingsModule() {
+  pageTitle.textContent = '设置 · FSM 追问与 Tao 运行时';
+  screen.innerHTML = `
+    <div class="panel-grid">
+      <section class="result-panel"><h3>有限状态机追问设置</h3>
+        <label class="fsm-setting">每状态追问轮数上限（1–5）
+          <select id="settingMaxRounds">${[1, 2, 3, 4, 5].map(n => `<option value="${n}" ${n === maxRounds() ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+        <label class="fsm-setting"><input type="checkbox" id="settingAutoAdvance" ${state.fsm.autoAdvance ? 'checked' : ''} />答完自动进入下一状态（自动终止追问）</label>
+        <p class="muted">对应后端 CaseGuideSession(max_followups_per_state, questions_per_turn) 与 set_max_followups()。</p></section>
+      <section class="result-panel"><h3>Tao Direct Runtime</h3>
+        <pre class="runtime-code">TAO_BACKEND=transformers python -m backend.main --tao-chat "请解释本案规则线索" --stream</pre>
+        <p>模型仅叠加问诊改写与教学解释；JSON Repair + Output Guard 失败即回退规则模板。</p></section>
+      <section class="result-panel"><h3>本地数据</h3>
+        <button class="ghost-btn" id="clearBtn" type="button">清空本地问诊数据</button>
+        <p class="muted">仅清除浏览器 localStorage 中的答案与 FSM 进度。</p></section>
+    </div>`;
+  document.querySelector('#settingMaxRounds').addEventListener('change', e => setMaxRounds(e.target.value));
+  document.querySelector('#settingAutoAdvance').addEventListener('change', e => { state.fsm.autoAdvance = e.target.checked; save(); });
+  document.querySelector('#clearBtn').addEventListener('click', () => {
+    if (!confirm('确定清空本地问诊数据？')) return;
+    localStorage.removeItem('yaobi-case'); localStorage.removeItem('yaobi-fsm'); location.reload();
+  });
+}
 
 document.querySelector('#doctorModeBtn').addEventListener('click', () => { state.doctorMode = !state.doctorMode; alert(state.doctorMode ? '已进入医生/研究者模式' : '已进入患者简洁模式'); });
 document.querySelector('#exportJsonBtn').addEventListener('click', () => download('yaobi-case.json', JSON.stringify(buildReport().json, null, 2)));

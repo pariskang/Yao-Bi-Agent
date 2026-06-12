@@ -32,3 +32,27 @@ def test_frontend_static_ui_contains_required_caseguide_surfaces():
     assert "maybeAutoAdvance" in app
     assert "CDSS" in app
     assert "@media" in css
+
+
+def test_frontend_presents_all_modules_and_mined_rules():
+    root = Path("frontend")
+    index = (root / "index.html").read_text(encoding="utf-8")
+    app = (root / "app.js").read_text(encoding="utf-8")
+    mined = (root / "mined_rules.js").read_text(encoding="utf-8")
+
+    # 模块导航：所有模块都在 UI 呈现
+    assert "moduleNav" in index and "moduleNav" in app
+    for label in ["总览看板", "智能问诊", "规则挖掘", "证据回溯", "医师审核", "评估与安全", "设置"]:
+        assert label in app
+    assert "mined_rules.js" in index
+    assert "MINED_RULES" in app and "window.MINED_RULES" in mined
+
+    # 挖掘产物必须是脱敏聚合：含统计字段、不含 PII 字段名
+    for key in ["rule_candidates", "support", "confidence", "lift", "pending_expert_review"]:
+        assert key in mined
+    for pii in ["病案号", "patient_name", "地址：", "电话"]:
+        assert pii not in mined
+
+    # 安全边界在挖掘/审核模块同样呈现
+    assert "不构成诊断或处方依据" in app
+    assert "pending_expert_review" in app
