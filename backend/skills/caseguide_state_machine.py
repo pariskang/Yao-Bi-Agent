@@ -15,6 +15,7 @@ from backend.skills.clinician_review_package_skill import clinician_review_packa
 from backend.skills.cdss_recommendation_skill import cdss_recommendation_skill
 from backend.skills.comorbidity_medication_skill import comorbidity_medication_skill
 from backend.skills.consent_privacy_skill import consent_privacy_skill
+from backend.skills.mined_evidence_skill import mined_evidence_skill
 from backend.skills.neuro_ortho_screen_skill import neuro_ortho_screen_skill
 from backend.skills.pain_profile_skill import pain_profile_skill
 from backend.skills.red_flag_screen_skill import red_flag_screen_skill
@@ -50,6 +51,7 @@ STATE_QUESTION_KEYS = {
 }
 
 MAX_FOLLOWUPS_PER_STATE = 3
+MAX_QUESTIONS_PER_TURN = 3
 
 
 @dataclass
@@ -57,13 +59,28 @@ class CaseGuideSession:
     state: str = "S0_CONSENT"
     case_state: dict[str, Any] | None = None
     max_followups_per_state: int = MAX_FOLLOWUPS_PER_STATE
+    questions_per_turn: int = MAX_QUESTIONS_PER_TURN
     use_llm_questions: bool = False
     dao_client: DaoClient | None = None
 
     def __post_init__(self) -> None:
         if self.case_state is None:
             self.case_state = empty_case_state()
+        self.max_followups_per_state = max(1, int(self.max_followups_per_state))
+        self.questions_per_turn = max(1, int(self.questions_per_turn))
         self.case_state.setdefault("fsm", {"state_turn_counts": {}, "last_answers": {}, "last_question_ids": []})
+
+    def set_max_followups(self, count: int) -> int:
+        """Runtime adjustment of the per-state follow-up budget (minimum 1)."""
+
+        self.max_followups_per_state = max(1, int(count))
+        return self.max_followups_per_state
+
+    def set_questions_per_turn(self, count: int) -> int:
+        """Runtime adjustment of how many questions each follow-up turn may ask (minimum 1)."""
+
+        self.questions_per_turn = max(1, int(count))
+        return self.questions_per_turn
 
     def start(self, raw_input: str = "", user_role: str = "patient") -> dict[str, Any]:
         consent = consent_privacy_skill(user_role=user_role, raw_input=raw_input)
@@ -83,7 +100,9 @@ class CaseGuideSession:
         self.case_state["red_flags"] = {"status": result["red_flag_status"], "positive_items": result["positive_flags"]}
         if result["red_flag_status"] == "urgent":
             self.state = "S_EMERGENCY_NOTICE"
-        elif end_state or self._state_turn_limit_reached("S1_REDFLAG") or not self._deterministic_next_questions():
+        elif not self._deterministic_next_questions():
+            # Red-flag screening is a hard gate: neither end_state nor the
+            # follow-up budget may skip unanswered red-flag questions.
             self._advance_state()
         return {"state": self.state, **result, **self._question_payload()}
 
@@ -120,7 +139,74 @@ class CaseGuideSession:
         self._advance_state()
         return {"state": self.state, "case_state": self.case_state, **self._question_payload(), "manual_end_accepted": True}
 
-    def next_questions(self, max_questions: int = 3) -> list[dict[str, Any]]:
+    BASIC_ALIAS_KEYS = (
+        "age", "sex", "occupation", "physical_labor",
+        "main_symptom", "duration", "recurrent_status", "acute_worsening", "associated_symptom",
+    )
+
+    def run_scripted_interview(
+        self,
+        answers: dict[str, Any],
+        raw_input: str = "",
+        user_role: str = "patient",
+        max_total_turns: int = 60,
+    ) -> dict[str, Any]:
+        """Autonomously drive the full FSM interview from a prepared answer pool.
+
+        每轮由状态机（规则优先；开启 use_llm_questions 时叠加 Tao 改写）给出
+        next_questions，从 answers 池里提交可用回答；当前状态没有可回答的问题时
+        自动结束追问并进入下一状态（红旗未答完或命中急诊时硬停止）。到达
+        S9_CASE_SUMMARY 后自动生成最终报告。
+        """
+
+        transcript: list[dict[str, Any]] = []
+        consumed: set[str] = set()
+        if self.state == "S0_CONSENT":
+            payload = self.start(raw_input, user_role=user_role)
+        else:
+            payload = {"state": self.state, **self._question_payload()}
+        for _ in range(max(1, int(max_total_turns))):
+            if self.state == "S_EMERGENCY_NOTICE":
+                return {**payload, "state": self.state, "stopped_reason": "red_flag_urgent", "transcript": transcript}
+            if self.state in {"S9_CASE_SUMMARY", "S10_FINAL_REPORT"}:
+                final = self.final_report()
+                return {**final, "stopped_reason": "completed", "transcript": transcript}
+            questions = payload.get("next_questions") or []
+            turn_answers: dict[str, Any] = {}
+            for question in questions:
+                qid = question.get("id")
+                if qid and qid in answers and qid not in consumed:
+                    turn_answers[qid] = answers[qid]
+            if self.state == "S2_BASIC":
+                for key in self.BASIC_ALIAS_KEYS:
+                    if key in answers and key not in consumed:
+                        turn_answers[key] = answers[key]
+            state_before = self.state
+            if turn_answers:
+                consumed.update(turn_answers)
+                handler = self.answer_red_flags if self.state == "S1_REDFLAG" else self.answer_stage
+                payload = handler(turn_answers)
+                transcript.append({
+                    "state": state_before,
+                    "asked": [question.get("id") for question in questions],
+                    "answered": sorted(turn_answers),
+                    "next_state": self.state,
+                })
+            else:
+                payload = self.end_current_state()
+                transcript.append({
+                    "state": state_before,
+                    "action": "auto_end_followups",
+                    "accepted": payload.get("manual_end_accepted", True),
+                    "next_state": self.state,
+                })
+                if payload.get("manual_end_accepted") is False:
+                    return {**payload, "stopped_reason": "blocked_unanswered_red_flags", "transcript": transcript}
+        return {"state": self.state, "stopped_reason": "max_total_turns_reached", "transcript": transcript, **self._question_payload()}
+
+    def next_questions(self, max_questions: int | None = None) -> list[dict[str, Any]]:
+        if max_questions is None:
+            max_questions = self.questions_per_turn
         deterministic = self._deterministic_next_questions(max_questions)
         planned = tao_question_planner_skill(
             self.case_state,
@@ -133,7 +219,9 @@ class CaseGuideSession:
         self.case_state.setdefault("fsm", {})["tao_question_runtime"] = planned["tao_question_runtime"]
         return planned["questions"]
 
-    def _deterministic_next_questions(self, max_questions: int = 3) -> list[dict[str, Any]]:
+    def _deterministic_next_questions(self, max_questions: int | None = None) -> list[dict[str, Any]]:
+        if max_questions is None:
+            max_questions = self.questions_per_turn
         if self.state == "S6_SHEN_SIGNAL":
             self.case_state = shen_rule_signal_skill(self.case_state)["case_state"]
             planner = adaptive_question_planner_skill(self.case_state, max_questions=max_questions, patient_burden_count=self._current_turn_count())
@@ -181,8 +269,9 @@ class CaseGuideSession:
             safety,
             user_role="clinician",
         )
+        mined = mined_evidence_skill(normalized_tags, routed["syndrome_candidates"])
         self.state = "S10_FINAL_REPORT"
-        return {"state": self.state, "case_state": self.case_state, "shen_signals": shen["shen_signals"], "high_value_missing": shen["high_value_missing"], **quality, **routed, **formula, **modules, "safety": safety, **structured, **handoff, **review_package, **cdss}
+        return {"state": self.state, "case_state": self.case_state, "shen_signals": shen["shen_signals"], "high_value_missing": shen["high_value_missing"], **quality, **routed, **formula, **modules, "safety": safety, **structured, **handoff, **review_package, **cdss, "mined_evidence": mined["mined_evidence"], "mined_evidence_disclaimer": mined["disclaimer"]}
 
     def _question_payload(self) -> dict[str, Any]:
         return {
@@ -191,6 +280,7 @@ class CaseGuideSession:
                 "state_goal": STATES.get(self.state, {}).get("goal"),
                 "turn_index": self._current_turn_count(),
                 "max_followups_per_state": self.max_followups_per_state,
+                "questions_per_turn": self.questions_per_turn,
                 "remaining_followups": max(0, self.max_followups_per_state - self._current_turn_count()),
                 "can_end_state": self.state in STATES and self.state not in {"S0_CONSENT", "S_EMERGENCY_NOTICE", "S10_FINAL_REPORT"},
                 "rule_context": self.current_rule_context(),

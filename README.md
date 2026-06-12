@@ -54,11 +54,26 @@ TAO_BACKEND=transformers TAO_MAX_NEW_TOKENS=512 python -m backend.main --tao-cha
 
 本项目现在同时包含 `YaoBi_CaseGuide_Hermes_Agent`，用于自动导引患者生成高质量腰痹医案。该模块提供 12 个问诊 Skill：知情脱敏、红旗筛查、主诉生成、疼痛特征、神经骨科、中医四诊、沈老规则信号、合并病用药、动态补问、医案结构化、质量评分和医生交接。
 
-`CaseGuideSession` 按有限状态机运行，每个状态最多 3 轮追问、每轮最多返回 1–3 个高价值问题；每轮都会叠加上一轮答案、当前规则标签、沈老经验信号、候选证型和方剂路线信号深化补问。v0.3 支持可选 Tao 问诊叠加：确定性规则先给出候选问题 id，Tao 只能在 JSON 合约内重排、患者友好化改写和解释追问理由，不能新增问题 id、诊断、处方或剂量；失败或违规则回退规则问题。调用方可通过 `end_current_state()` 手动结束当前状态进入下一状态；若红旗筛查命中 urgent，会停止后续问诊并提示线下/急诊评估。最终输出标准化医案、结构化标签、风险提示、沈老经验规则线索和医生复核清单。
+`CaseGuideSession` 按有限状态机运行，默认每个状态最多 3 轮追问、每轮最多返回 1–3 个高价值问题；追问预算可配置（`CaseGuideSession(max_followups_per_state=N, questions_per_turn=M)` 或运行中 `set_max_followups(N)` / `set_questions_per_turn(M)`）。每轮都会叠加上一轮答案、当前规则标签、沈老经验信号、候选证型和方剂路线信号深化补问。v0.3 支持可选 Tao 问诊叠加：确定性规则先给出候选问题 id，Tao 只能在 JSON 合约内重排、患者友好化改写和解释追问理由，不能新增问题 id、诊断、处方或剂量；失败或违规则回退规则问题。v0.4 新增自主问诊驱动器 `run_scripted_interview(answers)`：状态机自主推进全部问诊状态，无可答问题或追问预算用尽时自动终止当前状态的追问，并返回完整 transcript 供审计回放。调用方也可通过 `end_current_state()` 手动结束当前状态进入下一状态；红旗问题未答完时（任何方式）不允许离开红旗筛查状态，若命中 urgent 会硬停止后续问诊并提示线下/急诊评估。最终输出标准化医案、结构化标签、风险提示、沈老经验规则线索和医生复核清单。
 
 > 若用户要求“诊断和处方”，系统只输出候选证型/方剂路线信号与药物模块解释，并全部标注为“待医生复核/非处方”；不得生成最终诊断、临床处方、患者自服剂量或替代医生治疗建议。
 
 
+
+## xlsx 医案规则挖掘（脱敏）
+
+`backend/mining/xlsx_case_miner.py` 可将门诊 xlsx 导出转化为可审核的候选规则：
+
+```bash
+pip install .[mining]
+python -m backend.mining.xlsx_case_miner --xlsx data/private/门诊导出.xlsx \
+    --yaml rules/11_mined_rule_candidates.yaml --frontend frontend/mined_rules.js
+```
+
+- **脱敏优先**：姓名、病案号、地址、医师工号、就诊序号在内存中即被丢弃，自由文本只做关键词扫描后丢弃；产物仅含聚合统计与 xlsx 行号引用。原始 xlsx 放在 `data/private/`（已 gitignore，`*.xlsx` 全局禁入仓库）。
+- **挖掘内容**：证型/症状/西医诊断分布、药物频次、功效模块、签名方剂命中（独活寄生汤、当归四逆汤、桂枝芍药知母汤、黄芪桂枝五物汤、小柴胡类、四物/八珍底盘）、症状↔方药关联规则（support/confidence/lift）、重点药物剂量分布（细辛、附片、全蝎、蜈蚣、麻黄等）。
+- **审核边界**：所有候选规则 `status: pending_expert_review`、`clinician_only: true`，仅作为医师端研究证据由 `mined_evidence_skill` 注入 `final_report`，不参与自动决策、不向患者输出；剂量分布仅为经验研究信号，不构成可执行剂量。
+- **数据质量诚实声明**：门诊导出的"中医四诊"栏多为模板文本，舌脉信息不可用于挖掘，产物中以 `data_quality.tongue_pulse_usable=false` 明示。
 
 ## CDSS 草案模块
 
@@ -84,12 +99,15 @@ TAO_BACKEND=transformers TAO_MAX_NEW_TOKENS=512 python -m backend.main --tao-cha
 ## 目录结构
 
 ```text
-config/       Hermes、模型和安全配置
-rules/        YAML 规则库
-backend/      轻量 Python 技能、规则引擎和 CLI
-backend/llm/  Dao1/Tao Runtime、JSON repair、输出安全校验与提示模板
-docs/         Protocol、UI 与安全政策
-tests/        规则与安全回归测试
+config/          Hermes、模型和安全配置
+rules/           YAML 规则库（含 11_mined_rule_candidates.yaml 挖掘候选规则）
+backend/         轻量 Python 技能、规则引擎和 CLI
+backend/llm/     Dao1/Tao Runtime、JSON repair、输出安全校验与提示模板
+backend/mining/  xlsx 医案脱敏挖掘管道（频次/关联规则/签名方剂/剂量分布）
+frontend/        零依赖静态 UI：总览看板、智能问诊、规则挖掘、证据回溯、医师审核、评估与安全、设置
+data/private/    本地原始 xlsx（gitignore，绝不入库）
+docs/            Protocol、UI 与安全政策
+tests/           规则、安全、挖掘与前端回归测试
 ```
 
 
