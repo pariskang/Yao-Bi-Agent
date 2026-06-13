@@ -1,6 +1,8 @@
 const modules = [
   { id: 'dashboard', label: '总览看板', icon: '◧' },
   { id: 'intake', label: '智能问诊', icon: '✚' },
+  { id: 'reasoning', label: '经验推理', icon: '❖' },
+  { id: 'summary', label: '经验总结', icon: '✎' },
   { id: 'mining', label: '规则挖掘', icon: '⛏' },
   { id: 'evidence', label: '证据回溯', icon: '⌖' },
   { id: 'review', label: '医师审核', icon: '✒' },
@@ -24,6 +26,9 @@ const steps = [
 
 const featureMatrix = [
   ['CaseGuide FSM', '有限状态机分阶段问诊，默认每个状态最多 3 轮追问（可设置 1–5 轮）、每轮最多 3 问，答完可自动进入下一状态。'],
+  ['Tao 自动追问', '在规则约束下由 Tao 生成本状态主题内的澄清式追问，仅作补充线索、不驱动状态跳转，违规即回退。'],
+  ['经验辨证推理', '规则派生辨证推理链（症状→证候→治法→方剂→安全），Tao 语言化叠加并经 Output Guard 校验。'],
+  ['案例经验总结', '自动生成单案医案按语与脱敏经验规律总结，研究教学用，非诊断非处方。'],
   ['Rule Engine', '结构化标签、候选证型、方剂路线、模块命中和冲突检查。'],
   ['Tao Direct Runtime', '本地 Transformers 直接推理：TAO_BACKEND=transformers，无需 FastAPI 包装。'],
   ['JSON Repair', '修复模型 JSON 围栏、尾逗号、单引号等常见格式错误。'],
@@ -223,6 +228,8 @@ function render() {
   document.querySelector('.app-shell').classList.toggle('wide', !intake);
   if (!intake) {
     if (state.module === 'dashboard') return renderDashboard();
+    if (state.module === 'reasoning') return renderReasoningModule();
+    if (state.module === 'summary') return renderSummaryModule();
     if (state.module === 'mining') return renderMiningModule();
     if (state.module === 'evidence') return renderEvidenceModule();
     if (state.module === 'review') return renderReviewModule();
@@ -278,14 +285,18 @@ function renderQuestionStage(stage) {
         <select id="maxRoundsSelect">${[1, 2, 3, 4, 5].map(n => `<option value="${n}" ${n === maxRounds() ? 'selected' : ''}>${n}</option>`).join('')}</select>
       </label>
       <label class="fsm-setting"><input type="checkbox" id="autoAdvanceToggle" ${state.fsm.autoAdvance ? 'checked' : ''} />答完自动进入下一状态</label>
+      <label class="fsm-setting"><input type="checkbox" id="taoProbeToggle" ${taoEnabled() ? 'checked' : ''} />Tao 自动追问</label>
       <button class="ghost-btn" id="endStateBtn" type="button">手动结束本状态</button>
     </section>
     <div class="card-grid"></div>
     <div class="footer-actions"><button class="ghost-btn" id="prevBtn">上一步</button><button class="ghost-btn" id="deepenBtn" ${exhausted ? 'disabled title="已达到本状态追问轮数上限"' : ''}>本状态深化追问</button><button class="primary-btn" id="nextBtn">进入下一个状态</button></div>`;
   const grid = screen.querySelector('.card-grid');
   list.forEach(q => grid.appendChild(renderQuestion(q, stage)));
+  const probes = taoProbesFor(stage);
+  probes.forEach(q => grid.appendChild(renderQuestion(q, stage)));
   document.querySelector('#maxRoundsSelect').addEventListener('change', e => { setMaxRounds(e.target.value); render(); });
   document.querySelector('#autoAdvanceToggle').addEventListener('change', e => { state.fsm.autoAdvance = e.target.checked; save(); });
+  document.querySelector('#taoProbeToggle').addEventListener('change', e => { state.fsm.taoProbes = e.target.checked; save(); render(); });
   document.querySelector('#prevBtn').addEventListener('click', () => { state.step = Math.max(0, state.step - 1); render(); });
   document.querySelector('#deepenBtn').addEventListener('click', () => { if (exhausted) return; state.fsm.lastAnswers[stage] = { ...state.answers }; setStageRound(stage, round + 1); render(); });
   document.querySelector('#endStateBtn').addEventListener('click', () => {
@@ -302,10 +313,18 @@ function renderQuestion(q, stage) {
   const tpl = document.querySelector('#questionTemplate').content.cloneNode(true);
   const card = tpl.querySelector('.question-card');
   card.classList.toggle('redflag', stage === 'redflag');
-  tpl.querySelector('.question-meta').textContent = `${stage.toUpperCase()} · ${q.id} · ${q.reason || '规则深化追问'}`;
+  card.classList.toggle('tao-probe', !!q.probe);
+  const metaPrefix = q.probe ? 'TAO 自动追问' : `${stage.toUpperCase()} · ${q.id}`;
+  tpl.querySelector('.question-meta').textContent = `${metaPrefix} · ${q.reason || '规则深化追问'}`;
   tpl.querySelector('h3').textContent = q.q;
   const options = tpl.querySelector('.options');
   const current = answerValue(q.id);
+  if (q.probe || q.type === 'free') {
+    options.innerHTML = `<input class="free-note" type="text" placeholder="可简要回答，作为补充线索（非必填）" value="${current || ''}" />`;
+    options.querySelector('input').addEventListener('input', e => setAnswer(q.id, e.target.value));
+    tpl.querySelector('.free-note:last-child')?.remove();
+    return card;
+  }
   if (q.type === 'number') {
     options.innerHTML = `<input class="free-note" type="number" placeholder="${q.placeholder || ''}" value="${current || ''}" />`;
     options.querySelector('input').addEventListener('input', e => setAnswer(q.id, Number(e.target.value)));
@@ -395,6 +414,8 @@ function renderFinal() {
   const report = buildReport();
   const tabs = {
     case: report.markdown,
+    reasoning: report.reasoning,
+    summary: report.summary,
     handoff: report.handoff,
     tao: report.tao,
     cdss: report.cdss,
@@ -403,6 +424,8 @@ function renderFinal() {
   };
   screen.innerHTML = `<section class="result-panel"><div class="report-tabs">
     <button class="tab-btn active" data-tab="case">标准医案</button>
+    <button class="tab-btn" data-tab="reasoning">经验推理</button>
+    <button class="tab-btn" data-tab="summary">经验按语</button>
     <button class="tab-btn" data-tab="handoff">医生复核</button>
     <button class="tab-btn" data-tab="tao">Tao 教学解释</button>
     <button class="tab-btn" data-tab="cdss">CDSS 草案</button>
@@ -424,7 +447,10 @@ function buildReport() {
   const tao = `# Tao 教学解释叠加\n\n运行方式：TAO_BACKEND=transformers python -m backend.main --tao-chat "请解释本案规则线索" --stream\n\nTao Direct Runtime 负责把规则证据转写为教学解释；输出需通过 JSON Repair 和 Output Guard，不允许最终诊断、完整处方或患者可执行剂量。`;
   const cdss = `# CDSS 草案\n\n状态：draft_for_clinician_review；patient_visible=false；complete_prescription_generated=false；patient_executable_dose_generated=false。\n\n候选方向：${c.tags.includes('lower_limb_numbness') ? '腰腿痛/神经根相关风险待复核' : '腰痛待鉴别'}；候选证型：${c.tags.includes('osteoporosis') ? '肝肾不足背景' : '气血痹阻夹湿候选'}。`;
   const physician = `# 医师审核签名\n\n最终诊断、完整处方、剂量、煎服法、疗程只能由 licensed physician 手工录入。系统输出仅为规则证据和草案，医生确认后方可锁定。`;
-  return { markdown: md, handoff, tao, cdss, physician, json: { answers: state.answers, tags: c.tags, modules: c.modules, red_flags: c.red, runtime: 'Tao Direct Transformers Runtime', guards: ['JSON Repair', 'Output Guard'], cdss_status: 'draft_for_clinician_review' } };
+  const r = buildReasoningChain();
+  const reasoning = `# 医师经验辨证推理（规则派生）\n\n` + r.chain.map((s, i) => `## ${i + 1}. ${s.t}\n${s.c}`).join('\n\n') + `\n\n> 倾向性表述，非最终诊断/处方；后端开启 Tao 后由 physician_reasoning_skill 语言化并经 Output Guard 校验。`;
+  const summary = `# 医案按语（教学复盘）\n\n## 辨证要点\n证候倾向「${r.top.name}」，证据：${r.top.ev.join('、')}。\n\n## 治法治则\n${r.therapy}（待医师审定）。\n\n## 选方用药思路\n${c.modules.join('、') || '待补充'}。具体方药、加减与用量由医师审定。\n\n## 沈老经验体现\n温通经络、益气养血、顾护肝肾脾胃与少阳枢机。\n\n> 科研教学复盘，非诊断非处方；后端由 case_experience_summary_skill 生成并经安全校验。`;
+  return { markdown: md, reasoning, summary, handoff, tao, cdss, physician, json: { answers: state.answers, tags: c.tags, modules: c.modules, red_flags: c.red, syndrome_tendency: r.top.name, therapy: r.therapy, tao_probe_answers: Object.fromEntries(Object.entries(state.answers).filter(([k]) => k.startsWith('TAO_PROBE_'))), runtime: 'Tao Direct Transformers Runtime', guards: ['JSON Repair', 'Output Guard'], cdss_status: 'draft_for_clinician_review' } };
 }
 
 function fmt(v) { return Array.isArray(v) ? (v.join('、') || '未详') : (v || '未详'); }
@@ -447,6 +473,116 @@ function updatePreview() {
   document.querySelector('#qualityHint').textContent = score >= 80 ? '已可生成医生复核摘要。' : '建议继续补充关键字段。';
 }
 function download(name, text) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/markdown' })); a.download = name; a.click(); URL.revokeObjectURL(a.href); }
+
+// ---------------------------------------------------------------------------
+// Tao auto follow-up probes (rule-constrained, advisory)
+// ---------------------------------------------------------------------------
+
+function taoEnabled() { return state.fsm.taoProbes !== false; }
+const PROBE_BUDGET = 2;
+const PROBE_THEME = { pain: '疼痛特征', neuro: '神经骨科线索', tcm: '中医四诊', comorbidity: '合并病与用药' };
+
+function taoProbesFor(stage) {
+  if (!taoEnabled() || !PROBE_THEME[stage]) return [];
+  const t = getTags();
+  const out = [];
+  if (stage === 'pain') {
+    if (t.includes('cold_aggravation')) out.push('受凉或天气变化时，疼痛是几分钟内就加重，还是过一阵才明显？热敷大约多久能舒服一些？');
+    out.push('一天中什么时候最痛——晨起、久坐后，还是夜里翻身时？');
+  } else if (stage === 'neuro') {
+    if (t.includes('lower_limb_numbness')) out.push('腿麻是一直都在，还是走一段路才出现？停下来休息能不能缓解？');
+    out.push('咳嗽、打喷嚏或用力时，腿部的串痛或发麻会不会明显加重？');
+  } else if (stage === 'tcm') {
+    if (t.includes('bitter_taste') || t.includes('insomnia')) out.push('口苦是晨起明显，还是情绪紧张时更明显？睡不好和腰痛，哪个先出现的？');
+    out.push('最近胃口、大便和精神状态，跟腰痛发作有没有一起变化？');
+  } else if (stage === 'comorbidity') {
+    out.push('以前吃过的止痛药，有没有出现过胃部不适、反酸或别的不舒服？');
+  }
+  return out.slice(0, PROBE_BUDGET).map((q, i) => ({
+    id: `TAO_PROBE_${stage}_${i + 1}`, q, probe: true,
+    reason: `在「${PROBE_THEME[stage]}」主题内的规则约束追问，仅作补充线索、待医师复核`,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Client-side reasoning + experience mirror (backend remains source of truth)
+// ---------------------------------------------------------------------------
+
+const SYNDROME_THERAPY_CN = {
+  '气血痹阻证': '益气养血、通络止痛', '气滞血瘀证': '行气活血、化瘀通络', '寒湿痹阻证': '温经散寒、祛湿通络',
+  '湿热痹阻证': '清热利湿、通络止痛', '肝肾不足证': '补益肝肾、强筋壮骨', '肾阳不足证': '温补肾阳、散寒止痛',
+  '脾虚不运证': '健脾益气、化湿和中', '少阳证类': '和解少阳、疏利枢机', '气血不足证': '补益气血、荣筋止痛',
+};
+
+function inferSyndromes() {
+  const t = getTags();
+  const cands = [];
+  if (t.includes('lower_limb_numbness') || t.includes('radiating_leg_pain')) cands.push({ name: '气血痹阻证', score: 6, ev: ['下肢麻木/放射痛'] });
+  if (t.includes('dark_tongue')) cands.push({ name: '气滞血瘀证', score: 5, ev: ['舌质暗紫'] });
+  if (t.includes('cold_aggravation') && t.includes('warmth_relieves')) cands.push({ name: '寒湿痹阻证', score: 4, ev: ['遇冷加重、得温则减'] });
+  if (t.includes('osteoporosis') || t.includes('elderly')) cands.push({ name: '肝肾不足证', score: 4, ev: ['高龄/骨质疏松'] });
+  if (t.includes('bitter_taste') && t.includes('insomnia')) cands.push({ name: '少阳证类', score: 3, ev: ['口苦+失眠'] });
+  if (t.includes('poor_appetite')) cands.push({ name: '脾虚不运证', score: 3, ev: ['纳差'] });
+  if (!cands.length) cands.push({ name: '气血痹阻证', score: 2, ev: ['默认主导证候，待补充四诊'] });
+  return cands.sort((a, b) => b.score - a.score);
+}
+
+function buildReasoningChain() {
+  const c = buildCase();
+  const syn = inferSyndromes();
+  const top = syn[0];
+  const therapy = SYNDROME_THERAPY_CN[top.name] || '待辨证确立';
+  const chain = [
+    { t: '四诊与症状采集要点', c: `主诉「${c.chief || '腰痛'}」，关键线索：${c.tags.map(tagLabel).join('、') || '待补充'}。` },
+    { t: '辨证倾向（供医师审定）', c: `证候倾向「${top.name}」，证据：${top.ev.join('、')}${syn[1] ? `；次选：${syn.slice(1, 3).map(s => s.name).join('、')}` : ''}。` },
+    { t: '治法（倾向）', c: `可考虑：${therapy}（待医师审定）。` },
+    { t: '方剂路线信号（路线倾向）', c: `${c.modules.join('、') || '信息待补充'}。仅为路线倾向，方药、加减与用量由医师审定。` },
+    { t: '安全与禁忌复核', c: `红旗状态：${c.red.status}；附片/细辛/全蝎/蜈蚣等高风险药需医师重点复核。` },
+  ];
+  return { chain, top, therapy, syn, c };
+}
+
+function renderReasoningModule() {
+  pageTitle.textContent = '经验推理 · 基于规则 + Tao 的医师辨证推理';
+  const { chain } = buildReasoningChain();
+  const narrative = chain.map(s => `## ${s.t}\n${s.c}`).join('\n\n') + '\n\n> 规则派生推理链，全部为倾向性、非最终口吻；最终诊断、处方与用量须由执业医师审核签名。';
+  screen.innerHTML = `
+    <div class="panel-grid">
+      <section class="result-panel"><p class="eyebrow">draft_for_clinician_review · 非患者可见 · 非最终诊断</p>
+        <h3>辨证推理链（规则派生，可回溯）</h3>
+        <ol class="reason-chain">${chain.map(s => `<li><strong>${s.t}</strong><p>${s.c}</p></li>`).join('')}</ol>
+      </section>
+      <section class="result-panel"><h3>Tao 推理叠加层</h3>
+        <p class="muted">在「智能问诊」开启 <strong>Tao 自动追问</strong> 并配置后端 <code>TAO_BACKEND=transformers</code> 后，<code>physician_reasoning_skill</code> 会把推理链语言化为辨证教学解释，经 JSON Repair + Output Guard 校验；出现最终诊断/处方/用量即回退规则链。以下为规则派生示例叙述：</p>
+        <pre class="report-box">${narrative}</pre>
+      </section>
+    </div>`;
+}
+
+function renderSummaryModule() {
+  pageTitle.textContent = '经验总结 · 单案医案按语 + 脱敏经验规律';
+  const { top, therapy, c } = buildReasoningChain();
+  const caseMd = `# 医案按语（教学复盘 · 非诊断非处方）\n\n## 一、辨证要点\n关键线索：${c.tags.map(tagLabel).join('、') || '待补充'}；证候倾向「${top.name}」。\n\n## 二、治法治则\n${therapy}（待医师审定）。\n\n## 三、选方用药思路\n${c.modules.join('、') || '待补充'}。具体方药、加减与用量由医师审定。\n\n## 四、沈老经验体现\n温通经络、益气养血、顾护肝肾脾胃与少阳枢机的整体思路。\n\n## 五、随访复诊要点\n关注疼痛/麻木变化、睡眠与胃纳，有无新发无力或二便异常。`;
+  let expHtml = '<p class="muted">未加载挖掘数据，运行挖掘管道后展示脱敏经验规律。</p>';
+  if (MINED) {
+    const s = MINED.dataset_stats || {};
+    const routes = (MINED.formula_signature_hits || []).slice(0, 5).map(h => h.formula).join('、');
+    const assoc = (MINED.rule_candidates || []).filter(r => String(r.rule_type).includes('association')).slice(0, 6);
+    expHtml = `
+      <p>脱敏病例 <strong>${s.n_cases || '—'}</strong> 例，含处方 <strong>${s.n_with_prescription || '—'}</strong> 例。</p>
+      <p><strong>高频证候</strong>：${Object.keys(s.zheng_distribution || {}).slice(0, 4).join('、') || '—'}</p>
+      <p><strong>核心方剂路线</strong>：${routes || '—'}</p>
+      <p><strong>症状—方药关联规律（部分）</strong></p>
+      <ul>${assoc.map(r => `<li>${cnTag(r.if.tag)} → ${Object.values(r.then)[0]}（lift ${r.statistics.lift}，n=${r.statistics.n_both}）</li>`).join('') || '<li>—</li>'}</ul>
+      <p class="muted">全部为脱敏聚合统计与待专家审核的研究信号，剂量分布见证据回溯页，非可执行医嘱。</p>`;
+  }
+  screen.innerHTML = `
+    <div class="panel-grid">
+      <section class="result-panel"><p class="eyebrow">draft_for_clinician_review · 单案模式</p><h3>医案按语（当前病例）</h3><pre class="report-box">${caseMd}</pre></section>
+      <section class="result-panel"><p class="eyebrow">experience 模式 · 脱敏统计</p><h3>沈钦荣腰痹经验规律总结</h3>${expHtml}</section>
+    </div>
+    <section class="result-panel"><h3>Tao 自动生成说明</h3><p class="muted"><code>case_experience_summary_skill</code> 在后端把上述结构化要点交给 Tao 润色为按语/经验总结，经 Output Guard 校验，不得新增数据外结论、不得产出最终诊断或可执行处方；失败回退确定性模板。</p></section>`;
+}
 
 // ---------------------------------------------------------------------------
 // Module views (xlsx mining / evidence / review / safety / settings)

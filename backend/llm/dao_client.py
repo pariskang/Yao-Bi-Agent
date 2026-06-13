@@ -9,7 +9,14 @@ from dataclasses import dataclass
 from threading import Lock, Thread
 from typing import Any, Literal
 
-from backend.llm.prompt_templates import QUESTION_PROMPT_TEMPLATE, REPORT_PROMPT_TEMPLATE, SYSTEM_PROMPT
+from backend.llm.prompt_templates import (
+    EXPERIENCE_SUMMARY_PROMPT_TEMPLATE,
+    FOLLOWUP_PROBE_PROMPT_TEMPLATE,
+    QUESTION_PROMPT_TEMPLATE,
+    REASONING_PROMPT_TEMPLATE,
+    REPORT_PROMPT_TEMPLATE,
+    SYSTEM_PROMPT,
+)
 
 DaoBackend = Literal["disabled", "mock", "http", "transformers"]
 
@@ -109,6 +116,43 @@ class DaoClient:
             return self._generate_transformers(prompt)
         raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
 
+    def _dispatch(self, prompt: str, mock_value: str, task: str) -> str:
+        """Backend dispatch shared by structured generation tasks.
+
+        Deterministic callers remain responsible for guarding output before it
+        can surface as clinical text; this only routes prompt → backend.
+        """
+
+        if self.config.backend == "disabled":
+            raise DaoRuntimeError(f"Tao {task} runtime is disabled. Set TAO_BACKEND=http or transformers to enable.")
+        if self.config.backend == "mock":
+            return mock_value
+        if self.config.backend == "http":
+            return self._generate_http(prompt)
+        if self.config.backend == "transformers":
+            return self._generate_transformers(prompt)
+        raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
+
+    def generate_followup_probes(self, probe_context: dict[str, Any]) -> str:
+        max_probes = int(probe_context.get("max_probes", 2))
+        body = FOLLOWUP_PROBE_PROMPT_TEMPLATE.format(
+            max_probes=max_probes,
+            probe_context=json.dumps(probe_context, ensure_ascii=False, indent=2, default=str),
+        )
+        return self._dispatch(self.build_prompt(body), self._mock_followup_probes(probe_context), "follow-up probe")
+
+    def generate_reasoning(self, reasoning_context: dict[str, Any]) -> str:
+        body = REASONING_PROMPT_TEMPLATE.format(
+            reasoning_context=json.dumps(reasoning_context, ensure_ascii=False, indent=2, default=str)
+        )
+        return self._dispatch(self.build_prompt(body), self._mock_reasoning(reasoning_context), "reasoning")
+
+    def generate_experience_summary(self, summary_context: dict[str, Any]) -> str:
+        body = EXPERIENCE_SUMMARY_PROMPT_TEMPLATE.format(
+            summary_context=json.dumps(summary_context, ensure_ascii=False, indent=2, default=str)
+        )
+        return self._dispatch(self.build_prompt(body), self._mock_experience_summary(summary_context), "experience summary")
+
     def chat(
         self,
         history: list[dict[str, str]],
@@ -164,6 +208,64 @@ class DaoClient:
             })
         return json.dumps({
             "questions": questions,
+            "final_diagnosis": None,
+            "complete_prescription": None,
+            "patient_executable_dose": None,
+            "administration_instruction": None,
+        }, ensure_ascii=False)
+
+    def _mock_followup_probes(self, probe_context: dict[str, Any]) -> str:
+        allowed = probe_context.get("allowed_fields") or []
+        theme = probe_context.get("current_state_theme", "本状态主题")
+        max_probes = int(probe_context.get("max_probes", 2))
+        probes = []
+        for field in allowed[:max_probes]:
+            probes.append({
+                "probe_text": f"围绕{theme}，能否再具体描述与“{field}”相关的细节？",
+                "field_hint": field,
+                "reason": "Tao结合上一轮回答，在本状态主题内补充澄清，用于区分鉴别线索（待医师复核）。",
+            })
+        if not probes:
+            probes.append({
+                "probe_text": f"关于{theme}，还有没有补充的细节想告诉医生？",
+                "field_hint": None,
+                "reason": "Tao在本状态主题内做开放补充，仅作为线索，不做判断。",
+            })
+        return json.dumps({
+            "probes": probes[:max_probes],
+            "final_diagnosis": None,
+            "complete_prescription": None,
+            "patient_executable_dose": None,
+            "administration_instruction": None,
+        }, ensure_ascii=False)
+
+    def _mock_reasoning(self, reasoning_context: dict[str, Any]) -> str:
+        chain = reasoning_context.get("reasoning_chain") or []
+        lines = ["# Tao 辨证推理教学解释（叠加层）", ""]
+        for step in chain:
+            lines.append(f"- **{step.get('title', '')}**：{step.get('content', '')}")
+        lines.append("")
+        lines.append("以上为基于规则结论的推理过程语言化表达，全部为倾向性、非最终口吻，需医师结合查体、影像、舌脉审定。")
+        return json.dumps({
+            "reasoning_markdown": "\n".join(lines),
+            "final_diagnosis": None,
+            "complete_prescription": None,
+            "patient_executable_dose": None,
+            "administration_instruction": None,
+        }, ensure_ascii=False)
+
+    def _mock_experience_summary(self, summary_context: dict[str, Any]) -> str:
+        mode = summary_context.get("mode", "case")
+        points = list(summary_context.get("key_points_seed") or [])
+        if mode == "experience":
+            body = "# 沈钦荣腰痹经验规律总结（脱敏统计，教学用）\n\n以上规律来自脱敏聚合统计，体现高频证候、核心方剂路线与用药特色，均为待专家审核的研究信号。"
+        else:
+            body = "# 医案按语（教学复盘）\n\n本案辨证、治法与方剂路线倾向见上，体现沈老益气养血、温通经络、顾护肝肾脾胃的思路，仅作教学复盘，需医师审核。"
+        if not points:
+            points = ["辨证以证候倾向为纲，结合腰腿症状与神经线索", "治法体现温通与扶正并重", "用药特色需结合安全复核"]
+        return json.dumps({
+            "summary_markdown": body,
+            "key_points": points,
             "final_diagnosis": None,
             "complete_prescription": None,
             "patient_executable_dose": None,

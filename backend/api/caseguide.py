@@ -16,13 +16,19 @@ from backend.skills.red_flag_screen_skill import red_flag_screen_skill
 from backend.skills.shen_rule_signal_skill import shen_rule_signal_skill
 from backend.skills.tcm_four_diagnosis_skill import tcm_four_diagnosis_skill
 from backend.skills.tao_question_planner_skill import tao_question_planner_skill
+from backend.skills.tao_followup_probe_skill import tao_followup_probe_skill
+from backend.skills.physician_reasoning_skill import physician_reasoning_skill
+from backend.skills.case_experience_summary_skill import case_experience_summary_skill
 
 __all__ = [
     "CaseGuideSession",
     "adaptive_question_planner_skill",
     "case_quality_check_skill",
     "case_structuring_skill",
+    "case_experience_summary_skill",
     "cdss_recommendation_skill",
+    "physician_reasoning_skill",
+    "tao_followup_probe_skill",
     "chief_complaint_skill",
     "clinician_handoff_skill",
     "clinician_review_package_skill",

@@ -75,6 +75,16 @@ python -m backend.mining.xlsx_case_miner --xlsx data/private/门诊导出.xlsx \
 - **审核边界**：所有候选规则 `status: pending_expert_review`、`clinician_only: true`，仅作为医师端研究证据由 `mined_evidence_skill` 注入 `final_report`，不参与自动决策、不向患者输出；剂量分布仅为经验研究信号，不构成可执行剂量。
 - **数据质量诚实声明**：门诊导出的"中医四诊"栏多为模板文本，舌脉信息不可用于挖掘，产物中以 `data_quality.tongue_pulse_usable=false` 明示。
 
+## Tao 模型增强：自动追问 / 经验推理 / 经验总结
+
+在“确定性规则为准、Tao 仅叠加、失败回退”的统一安全管线下（JSON Repair + Output Guard），新增三项基于 Tao 的能力：
+
+1. **规则约束内自动追问**（`tao_followup_probe_skill`）：与只能重排/改写既有规则问题的 `tao_question_planner_skill` 不同，本技能允许 Tao 在“当前状态临床主题”内**生成新的澄清式追问**，但施加硬约束——只在临床内容状态启用（红旗筛查/知情/人口学不开放生成式追问）、每轮最多 `tao_probe_budget` 个、`field_hint` 必须取自本状态允许字段或为 null、**不驱动状态跳转**（仅作为补充线索记入 `tao_probe_answers`）、出现诊断/处方/剂量即整轮作废回退。`CaseGuideSession(use_llm_questions=True, tao_probe_budget=2)` 开启。
+2. **医师经验辨证推理**（`physician_reasoning_skill`）：先由规则构建确定性推理链（症状/标签 → 证候倾向 → 治法 → 方剂路线 → 药物模块 → 安全复核 → 沈老经验信号），Tao 仅把推理链“语言化”为辨证教学解释，不得新增规则层没有的证型/方剂/药物，全部为倾向性、非最终口吻；患者角色一律拦截。
+3. **案例经验总结自动生成**（`case_experience_summary_skill`）：`mode="case"` 生成单案「医案按语」，`mode="experience"` 基于脱敏挖掘统计生成「经验规律总结」；确定性总结为事实来源，Tao 仅润色，不得新增数据外结论，不得产出最终诊断/可执行处方/剂量。
+
+三项能力均以 `draft_for_clinician_review`、`patient_visible=false` 输出，并随 `final_report` 一并返回。UI 在左侧导航新增「经验推理」「经验总结」模块，问诊页提供「Tao 自动追问」开关，最终报告新增「经验推理」「经验按语」标签页。
+
 ## CDSS 草案模块
 
 项目新增 `cdss_recommendation_skill`，用于医生端 CDSS 自动生成候选诊断、候选证型、方剂路线和药物模块草案。该草案状态固定为 `draft_for_clinician_review`，不是最终诊断、不是签名处方、不是患者可见医嘱，也不会生成患者可执行剂量；最终医嘱仍需 `physician_review_skill` 医师手工录入并签名。

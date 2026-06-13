@@ -45,3 +45,84 @@ JSON schema：
 问诊上下文：
 {question_context}
 """
+
+
+FOLLOWUP_PROBE_PROMPT_TEMPLATE = """
+你是腰痹问诊助手。规则引擎已给出本状态的标准问题，现在请你结合患者上一轮回答，
+在“当前状态的临床主题范围内”生成最多 {max_probes} 个高信息量的“追问”，用于澄清细节、
+区分鉴别线索，而不是重复已问过的标准问题。
+
+硬性约束（违反任意一条则该轮所有追问作废，回退为不追问）：
+1. 追问只能停留在 current_state_theme 描述的临床主题内（例如疼痛特征状态只追问疼痛相关细节）。
+2. 每个追问的 field_hint 必须取自 allowed_fields，或为 null（表示只作为补充文字线索）。
+3. 不得给出任何诊断结论、证型判定、方药、处方、剂量、煎服法或患者自用建议。
+4. 追问应引用患者上一轮回答或当前规则线索，体现“为什么此刻深入问这一点”。
+5. 必须输出 JSON object，不要输出 markdown 代码围栏。
+
+JSON schema：
+{{
+  "probes": [
+    {{"probe_text": "患者能直接回答的一句话追问", "field_hint": "allowed_fields之一或null", "reason": "为什么追问，引用线索但不做诊断"}}
+  ],
+  "final_diagnosis": null,
+  "complete_prescription": null,
+  "patient_executable_dose": null,
+  "administration_instruction": null
+}}
+
+追问上下文：
+{probe_context}
+"""
+
+
+REASONING_PROMPT_TEMPLATE = """
+请基于以下确定性规则引擎输出，撰写“医师经验辨证推理”教学解释，体现沈钦荣腰痹诊疗思路。
+规则层已给出证候候选、方剂路线、药物模块和安全提示，你只能在这些既有结论上做“推理过程的语言化表达”。
+
+硬性约束：
+1. 只能解释“从症状/体征/标签 → 证候倾向 → 治法 → 方剂路线 → 药物模块 → 安全复核”的推理链条，
+   必须与 reasoning_context 中的规则结论一致，不得新增规则层没有的证型、方剂或药物。
+2. 不得给出最终诊断（不要使用“诊断为/明确诊断”等表述）、完整处方、剂量、煎服法或患者自用建议。
+3. 全部表述为“倾向/提示/可考虑/待医师审定”的非最终口吻，面向医师复核与教学。
+4. 必须输出 JSON object，不要输出 markdown 代码围栏。
+
+JSON schema：
+{{
+  "reasoning_markdown": "辨证推理过程的教学解释 Markdown，非最终诊断、非处方、非剂量",
+  "final_diagnosis": null,
+  "complete_prescription": null,
+  "patient_executable_dose": null,
+  "administration_instruction": null
+}}
+
+推理上下文：
+{reasoning_context}
+"""
+
+
+EXPERIENCE_SUMMARY_PROMPT_TEMPLATE = """
+请基于以下确定性结构化数据，自动生成“中医师案例经验总结/医案按语”，用于科研与教学复盘。
+mode=case 时面向单个医案，mode=experience 时面向多医案脱敏统计规律。
+
+硬性约束：
+1. 只能基于 summary_context 中已有的证候、治法、方剂路线、药物模块、统计规律（support/confidence/lift）撰写，
+   不得新增数据中没有的结论。
+2. 不得给出针对当前患者的最终诊断、完整处方、可执行剂量、煎服法或自用医嘱；
+   剂量只能作为“经验剂量分布/区间”的研究性描述，不得写成可执行医嘱。
+3. 表述为经验总结、用药特色、辨证思路、复诊要点等教学口吻，强调需医师审核。
+4. 必须输出 JSON object，不要输出 markdown 代码围栏。
+
+JSON schema：
+{{
+  "summary_markdown": "案例经验总结/医案按语 Markdown，研究教学用，非诊断非处方",
+  "key_points": ["要点1", "要点2"],
+  "final_diagnosis": null,
+  "complete_prescription": null,
+  "patient_executable_dose": null,
+  "administration_instruction": null
+}}
+
+总结上下文：
+{summary_context}
+"""
+

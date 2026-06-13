@@ -56,3 +56,33 @@ def test_frontend_presents_all_modules_and_mined_rules():
     # 安全边界在挖掘/审核模块同样呈现
     assert "不构成诊断或处方依据" in app
     assert "pending_expert_review" in app
+
+
+def test_frontend_presents_tao_reasoning_and_summary_modules():
+    root = Path("frontend")
+    app = (root / "app.js").read_text(encoding="utf-8")
+
+    # 新增模块导航与视图
+    for label in ["经验推理", "经验总结"]:
+        assert label in app
+    assert "renderReasoningModule" in app
+    assert "renderSummaryModule" in app
+
+    # Tao 规则约束内自动追问
+    assert "Tao 自动追问" in app
+    assert "taoProbesFor" in app
+    assert "TAO_PROBE_" in app
+    assert "tao-probe" in app
+
+    # 推理链与经验总结呈现
+    assert "辨证推理链" in app
+    assert "buildReasoningChain" in app
+    assert "医案按语" in app
+
+    # 最终报告新增推理/按语标签
+    assert 'data-tab="reasoning"' in app
+    assert 'data-tab="summary"' in app
+
+    # 安全边界仍在
+    assert "draft_for_clinician_review" in app
+    assert "非最终诊断" in app
