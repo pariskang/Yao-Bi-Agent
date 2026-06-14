@@ -49,6 +49,11 @@ TAO_BACKEND=mock python -m backend.main --text "患者女，68岁，腰痛反复
 TAO_BACKEND=transformers TAO_MAX_NEW_TOKENS=512 python -m backend.main --tao-chat "请基于规则线索解释本案" --stream
 ```
 
+## Colab 一键复现（含 ngrok 公网 UI）
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pariskang/Yao-Bi-Agent/blob/claude/focused-planck-3dv9we/colab/YaoBi_Skill_Colab.ipynb)
+
+[`colab/YaoBi_Skill_Colab.ipynb`](colab/YaoBi_Skill_Colab.ipynb) 在 Google Colab 上一键复现全部功能，并通过 **ngrok** 把完整前端 UI（11 个模块）暴露为公网链接：依次运行单元格即可托管 `frontend/` 静态站点、获取 `https://xxxx.ngrok-free.app` 公网链接，并复现后端规则管线、多智能体协作、全量测试（85 项）、脱敏挖掘与可选 Tao 叠加。详见 [`colab/README.md`](colab/README.md)。前端是零依赖静态 SPA、逻辑在浏览器端自洽运行、不依赖后端 API，所以"复现 UI"即用 `http.server` 托管 `frontend/` 并经 ngrok 映射。
 
 ## 自动问诊：YaoBi-CaseGuide Skill
 
