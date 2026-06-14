@@ -1,6 +1,7 @@
 const modules = [
   { id: 'dashboard', label: '总览看板', icon: '◧' },
   { id: 'intake', label: '智能问诊', icon: '✚' },
+  { id: 'agents', label: '智能体协作', icon: '⇄' },
   { id: 'reasoning', label: '经验推理', icon: '❖' },
   { id: 'summary', label: '经验总结', icon: '✎' },
   { id: 'mining', label: '规则挖掘', icon: '⛏' },
@@ -25,6 +26,7 @@ const steps = [
 ];
 
 const featureMatrix = [
+  ['多智能体协作', '11 个智能体在共享黑板上自主接力：规则智能体为主、语言模型智能体受守卫，红旗智能体可自主中止下游。'],
   ['CaseGuide FSM', '有限状态机分阶段问诊，默认每个状态最多 3 轮追问（可设置 1–5 轮）、每轮最多 3 问，答完可自动进入下一状态。'],
   ['Tao 自动追问', '在规则约束下由 Tao 生成本状态主题内的澄清式追问，仅作补充线索、不驱动状态跳转，违规即回退。'],
   ['经验辨证推理', '规则派生辨证推理链（症状→证候→治法→方剂→安全），Tao 语言化叠加并经 Output Guard 校验。'],
@@ -228,6 +230,7 @@ function render() {
   document.querySelector('.app-shell').classList.toggle('wide', !intake);
   if (!intake) {
     if (state.module === 'dashboard') return renderDashboard();
+    if (state.module === 'agents') return renderAgentsModule();
     if (state.module === 'reasoning') return renderReasoningModule();
     if (state.module === 'summary') return renderSummaryModule();
     if (state.module === 'mining') return renderMiningModule();
@@ -540,6 +543,99 @@ function buildReasoningChain() {
     { t: '安全与禁忌复核', c: `红旗状态：${c.red.status}；附片/细辛/全蝎/蜈蚣等高风险药需医师重点复核。` },
   ];
   return { chain, top, therapy, syn, c };
+}
+
+// ---------------------------------------------------------------------------
+// Multi-agent collaboration (mirrors backend AgentOrchestrator trace)
+// ---------------------------------------------------------------------------
+
+const AGENTS = [
+  { name: 'CaseStructuringAgent', role: '病例结构化与质量', kind: 'rule', handoff: 'RedFlagAgent' },
+  { name: 'RedFlagAgent', role: '红旗硬门控', kind: 'rule', handoff: 'OrthoRiskAgent' },
+  { name: 'OrthoRiskAgent', role: '骨伤科风险分层', kind: 'rule', handoff: 'TcmSyndromeAgent' },
+  { name: 'TcmSyndromeAgent', role: '中医证候路由', kind: 'rule', handoff: 'FormulaReasoningAgent' },
+  { name: 'FormulaReasoningAgent', role: '方剂路径推理', kind: 'rule', handoff: 'HerbModuleAgent' },
+  { name: 'HerbModuleAgent', role: '药物功效模块', kind: 'rule', handoff: 'ConflictSafetyAgent' },
+  { name: 'ConflictSafetyAgent', role: '冲突与安全审查', kind: 'rule', handoff: 'EvidenceTraceAgent' },
+  { name: 'EvidenceTraceAgent', role: '证据回溯', kind: 'rule', handoff: 'ReasoningAgent' },
+  { name: 'ReasoningAgent', role: '医师经验辨证推理', kind: 'llm', handoff: 'ExperienceAgent' },
+  { name: 'ExperienceAgent', role: '案例经验总结', kind: 'llm', handoff: 'PhysicianReviewAgent' },
+  { name: 'PhysicianReviewAgent', role: '医师审核装配', kind: 'rule', handoff: 'licensed_physician(human)' },
+];
+
+function buildAgentTrace() {
+  const c = buildCase();
+  const syn = inferSyndromes();
+  const urgent = getRedFlagStatus().status === 'urgent';
+  const llm = taoEnabled();
+  const summary = {
+    CaseStructuringAgent: `结构化 ${c.tags.length} 个标签，刷新沈老经验信号。`,
+    RedFlagAgent: urgent ? '命中红旗危险信号，自主中止下游临床协作。' : '未见急诊级红旗，放行下游协作。',
+    OrthoRiskAgent: c.tags.includes('osteoporosis') ? '骨折风险背景升级，需医师重点复核。' : '四类骨伤科风险均为低风险背景。',
+    TcmSyndromeAgent: `证候倾向「${syn[0].name}」，共 ${syn.length} 个候选。`,
+    FormulaReasoningAgent: `主方路线信号：${c.modules[0] || '待补充'}。`,
+    HerbModuleAgent: `组合 ${c.modules.length} 个功效模块草案，待安全审查。`,
+    ConflictSafetyAgent: `安全状态：${c.red.status}；高风险药需医师复核。`,
+    EvidenceTraceAgent: MINED ? '匹配 xlsx 脱敏挖掘证据（待专家审核）。' : '挖掘数据未加载。',
+    ReasoningAgent: llm ? 'Tao 语言化辨证推理链（经 Output Guard 校验）。' : '规则派生辨证推理链（Tao 未启用）。',
+    ExperienceAgent: llm ? 'Tao 润色医案按语（经 Output Guard 校验）。' : '确定性医案按语（Tao 未启用）。',
+    PhysicianReviewAgent: '装配医生复核包与 CDSS 草案，移交医师签名（人类终审）。',
+  };
+  const conf = {
+    CaseStructuringAgent: 0.8, RedFlagAgent: 1.0, OrthoRiskAgent: 1.0,
+    TcmSyndromeAgent: Math.min(1, syn[0].score / 8), FormulaReasoningAgent: 0.6,
+    HerbModuleAgent: 1.0, ConflictSafetyAgent: 1.0, EvidenceTraceAgent: 1.0,
+    ReasoningAgent: 0.7, ExperienceAgent: 0.7, PhysicianReviewAgent: 1.0,
+  };
+  const trace = AGENTS.map((a, i) => {
+    let status = 'ok';
+    if (a.name === 'RedFlagAgent' && urgent) status = 'halt';
+    else if (urgent && i > 1) status = 'skipped';
+    else if (a.name === 'OrthoRiskAgent' && c.tags.includes('osteoporosis')) status = 'escalate';
+    else if (a.name === 'ConflictSafetyAgent' && c.red.status !== 'safe') status = 'escalate';
+    return { ...a, status, used_llm: a.kind === 'llm' && llm && !urgent, summary: summary[a.name], confidence: conf[a.name] };
+  });
+  if (urgent) trace.push({ name: 'EmergencyNoticeAgent', role: '急诊转诊提示', kind: 'rule', handoff: 'licensed_physician(human)', status: 'blocked', used_llm: false, summary: '已生成急诊/线下评估提示，停止常规辨证与方药协作。', confidence: 1.0 });
+  return { trace, llm, urgent };
+}
+
+function renderAgentsModule() {
+  pageTitle.textContent = '智能体协作 · 多智能体在共享黑板上的自主协作';
+  const { trace, llm, urgent } = buildAgentTrace();
+  const usedLlm = trace.filter(t => t.used_llm).map(t => t.name);
+  const statusCn = { ok: '完成', halt: '自主中止', skipped: '已跳过', escalate: '升级复核', blocked: '阻断' };
+  screen.innerHTML = `
+    <div class="stat-grid">
+      <article class="stat-card"><p class="eyebrow">参与智能体</p><strong>${trace.length}</strong><span>规则 + 语言模型协同</span></article>
+      <article class="stat-card"><p class="eyebrow">语言模型在环</p><strong>${llm && !urgent ? '是' : '否'}</strong><span>${usedLlm.join('、') || 'Tao 未启用/被中止'}</span></article>
+      <article class="stat-card"><p class="eyebrow">自主控制</p><strong>${urgent ? '红旗中止' : '正常放行'}</strong><span>红旗智能体可中止下游</span></article>
+      <article class="stat-card"><p class="eyebrow">协作机制</p><strong>共享黑板</strong><span>读上游 / 写本体 / 显式接力</span></article>
+    </div>
+    <section class="result-panel"><p class="eyebrow">draft_for_clinician_review · 确定性为准 · 语言模型受守卫</p>
+      <h3>协作时间轴（与后端 AgentOrchestrator 一致）</h3>
+      <ol class="agent-timeline">${trace.map((t, i) => `
+        <li class="agent-step ${t.status}">
+          <div class="agent-head">
+            <span class="agent-order">${i + 1}</span>
+            <strong>${t.name}</strong>
+            <span class="kind-badge ${t.kind}">${t.kind === 'llm' ? '语言模型' : '规则'}</span>
+            ${t.used_llm ? '<span class="kind-badge llm-on">Tao 在环</span>' : ''}
+            <span class="agent-status ${t.status}">${statusCn[t.status] || t.status}</span>
+            ${t.confidence != null ? `<span class="agent-conf">置信度 ${t.confidence.toFixed(2)}</span>` : ''}
+          </div>
+          <p class="agent-role">${t.role}</p>
+          <p class="agent-summary">${t.summary}</p>
+          <p class="agent-handoff">→ 接力：${t.handoff}</p>
+        </li>`).join('')}</ol>
+    </section>
+    <section class="result-panel"><h3>自主协作机制说明</h3>
+      <ul>
+        <li><strong>共享黑板</strong>：上游智能体把结论写入黑板，下游读取并续接，形成自主接力（后端 <code>Blackboard</code>）。</li>
+        <li><strong>自主控制流</strong>：<code>RedFlagAgent</code> 命中急诊红旗时自主中止下游临床智能体，仅 <code>EmergencyNoticeAgent</code> 续跑。</li>
+        <li><strong>语言模型在环</strong>：仅 <code>ReasoningAgent</code>、<code>ExperienceAgent</code> 调用 Tao，且必经 JSON Repair + Output Guard，违规回退规则结论。</li>
+        <li><strong>人类终审</strong>：<code>PhysicianReviewAgent</code> 仅装配草案，最终诊断/处方/剂量交执业医师签名。</li>
+      </ul>
+    </section>`;
 }
 
 function renderReasoningModule() {

@@ -75,6 +75,18 @@ python -m backend.mining.xlsx_case_miner --xlsx data/private/门诊导出.xlsx \
 - **审核边界**：所有候选规则 `status: pending_expert_review`、`clinician_only: true`，仅作为医师端研究证据由 `mined_evidence_skill` 注入 `final_report`，不参与自动决策、不向患者输出；剂量分布仅为经验研究信号，不构成可执行剂量。
 - **数据质量诚实声明**：门诊导出的"中医四诊"栏多为模板文本，舌脉信息不可用于挖掘，产物中以 `data_quality.tongue_pulse_usable=false` 明示。
 
+## 多智能体自主协作编排
+
+`backend/agents/` 把原本"顺序调用 skill"的隐式流程，显式化为"多个智能体在共享黑板上自主协作"：
+
+- **共享黑板**（`Blackboard`）：智能体的共享工作记忆与消息载体；上游智能体写入结论，下游读取并续接，形成自主接力。
+- **智能体编排器**（`AgentOrchestrator`）：按依赖顺序运行 11 个智能体——`CaseStructuringAgent → RedFlagAgent → OrthoRiskAgent → TcmSyndromeAgent → FormulaReasoningAgent → HerbModuleAgent → ConflictSafetyAgent → EvidenceTraceAgent → ReasoningAgent → ExperienceAgent → PhysicianReviewAgent`，并记录完整 `collaboration_trace`（角色、规则/语言模型、置信度、证据、语言模型守卫状态、显式 handoff）。
+- **自主控制流**：`RedFlagAgent` 命中急诊红旗时**自主中止**下游临床智能体（其余记为 skipped），仅 `EmergencyNoticeAgent` 续跑——这是基于内容的真实自主决策，而非固定流水线。
+- **语言模型在环**：仅 `ReasoningAgent`、`ExperienceAgent` 调用 Tao，且每个智能体都声明 `used_llm` 与语言模型运行时/守卫状态；其余为确定性规则智能体。
+- **人类终审**：`PhysicianReviewAgent` 仅装配草案，最终诊断/处方/剂量交执业医师签名。
+
+每个智能体只是**包装已有的、经测试的 skill**，因此确定性输出仍是事实来源，语言模型输出仍受守卫且可选。`CaseGuideSession.run_agent_collaboration()` 是独立入口；`final_report()` 现以编排器为唯一"大脑"，在保留全部既有返回键的同时附带 `agent_collaboration` 协作轨迹。UI 左侧「智能体协作」模块以时间轴可视化整个协作过程。
+
 ## Tao 模型增强：自动追问 / 经验推理 / 经验总结
 
 在“确定性规则为准、Tao 仅叠加、失败回退”的统一安全管线下（JSON Repair + Output Guard），新增三项基于 Tao 的能力：
@@ -112,6 +124,7 @@ python -m backend.mining.xlsx_case_miner --xlsx data/private/门诊导出.xlsx \
 config/          Hermes、模型和安全配置
 rules/           YAML 规则库（含 11_mined_rule_candidates.yaml 挖掘候选规则）
 backend/         轻量 Python 技能、规则引擎和 CLI
+backend/agents/  多智能体编排层：共享黑板、智能体定义、AgentOrchestrator 协作轨迹
 backend/llm/     Dao1/Tao Runtime、JSON repair、输出安全校验与提示模板
 backend/mining/  xlsx 医案脱敏挖掘管道（频次/关联规则/签名方剂/剂量分布）
 frontend/        零依赖静态 UI：总览看板、智能问诊、规则挖掘、证据回溯、医师审核、评估与安全、设置

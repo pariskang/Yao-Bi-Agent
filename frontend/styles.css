@@ -144,6 +144,28 @@ h1 { font-size: 19px; margin: 0; letter-spacing: .01em; }
 .reason-chain li::before { content: counter(rc); position: absolute; left: 12px; top: 12px; width: 22px; height: 22px; border-radius: 7px; background: var(--brand); color: #fff; display: grid; place-items: center; font-size: 12px; font-weight: 800; }
 .reason-chain strong { font-size: 13.5px; }
 .reason-chain p { margin: 4px 0 0; color: var(--ink-2); font-size: 13px; line-height: 1.6; }
+.agent-timeline { list-style: none; padding: 0; margin: 0; display: grid; gap: 0; }
+.agent-step { position: relative; padding: 14px 14px 14px 18px; border-left: 2px solid var(--line-strong); margin-left: 8px; }
+.agent-step::before { content: ''; position: absolute; left: -7px; top: 18px; width: 12px; height: 12px; border-radius: 50%; background: var(--brand); border: 2px solid var(--panel); }
+.agent-step.llm::before, .agent-step .kind-badge.llm::before { }
+.agent-step.halt { border-left-color: var(--red); } .agent-step.halt::before { background: var(--red); }
+.agent-step.skipped { opacity: .5; } .agent-step.skipped::before { background: var(--muted); }
+.agent-step.escalate::before { background: var(--amber); }
+.agent-step.blocked { border-left-color: var(--red); } .agent-step.blocked::before { background: var(--red); }
+.agent-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.agent-order { width: 20px; height: 20px; border-radius: 6px; background: var(--bg-deep); display: grid; place-items: center; font-size: 11px; font-weight: 800; }
+.agent-head strong { font-size: 14px; }
+.kind-badge { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; border: 1px solid var(--line-strong); }
+.kind-badge.rule { background: var(--bg-deep); color: var(--ink-2); }
+.kind-badge.llm { background: var(--pine-soft); color: var(--pine); border-color: #bfe0d0; }
+.kind-badge.llm-on { background: var(--brand); color: #fff; border-color: var(--brand); }
+.agent-status { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+.agent-status.ok { color: var(--green); } .agent-status.halt, .agent-status.blocked { color: var(--red); }
+.agent-status.escalate { color: var(--amber); } .agent-status.skipped { color: var(--muted); }
+.agent-conf { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.agent-role { margin: 6px 0 2px; font-size: 12px; color: var(--brand); font-weight: 600; }
+.agent-summary { margin: 0; font-size: 13px; color: var(--ink-2); line-height: 1.55; }
+.agent-handoff { margin: 4px 0 0; font-size: 11.5px; color: var(--muted); }
 .question-card h3 { margin-bottom: 14px; font-size: 16.5px; line-height: 1.45; }
 .question-meta { color: var(--brand); font-size: 11px; font-weight: 700; letter-spacing: .06em; margin-bottom: 8px; line-height: 1.6; }
 .options { display: flex; flex-wrap: wrap; gap: 8px; }

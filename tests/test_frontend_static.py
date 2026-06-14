@@ -86,3 +86,19 @@ def test_frontend_presents_tao_reasoning_and_summary_modules():
     # 安全边界仍在
     assert "draft_for_clinician_review" in app
     assert "非最终诊断" in app
+
+
+def test_frontend_presents_agent_collaboration_module():
+    root = Path("frontend")
+    app = (root / "app.js").read_text(encoding="utf-8")
+
+    assert "智能体协作" in app
+    assert "renderAgentsModule" in app
+    assert "buildAgentTrace" in app
+    # 协作机制要素：共享黑板、自主中止、语言模型在环、人类终审
+    for token in ["共享黑板", "自主中止", "语言模型在环", "EmergencyNoticeAgent", "PhysicianReviewAgent"]:
+        assert token in app
+    # 规则/语言模型标识与时间轴
+    assert "agent-timeline" in app
+    assert "kind-badge" in app
+    assert "ReasoningAgent" in app and "ExperienceAgent" in app

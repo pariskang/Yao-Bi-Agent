@@ -5,6 +5,7 @@ from typing import Any
 
 from backend.llm.dao_client import DaoClient
 
+from backend.agents.orchestrator import AgentOrchestrator
 from backend.skills.adaptive_question_planner_skill import adaptive_question_planner_skill
 from backend.skills.case_quality_check_skill import case_quality_check_skill
 from backend.skills.case_structuring_skill import case_structuring_skill
@@ -269,58 +270,57 @@ class CaseGuideSession:
             candidates.append(self._enrich_question(question, self._question_reason(question)))
         return candidates[:max_questions]
 
+    def run_agent_collaboration(self, use_llm: bool | None = None) -> dict[str, Any]:
+        """Run the multi-agent orchestrator over the current case and return its trace.
+
+        Agents collaborate on a shared blackboard (rules first, language model guarded and
+        optional); the red-flag agent may autonomously halt downstream clinical agents.
+        """
+
+        orchestration = AgentOrchestrator().run(
+            self.case_state,
+            use_llm=self.use_llm_questions if use_llm is None else use_llm,
+            dao_client=self.dao_client,
+        )
+        self.case_state = orchestration["case_state"]
+        return orchestration
+
     def final_report(self) -> dict[str, Any]:
-        shen = shen_rule_signal_skill(self.case_state)
-        self.case_state = shen["case_state"]
-        quality = case_quality_check_skill(self.case_state)
-        self.case_state = quality["case_state"]
-        normalized_tags = self.case_state.get("normalized_tags", [])
-        routed = syndrome_router_skill(normalized_tags)
-        formula = formula_base_selector_skill(normalized_tags, routed["syndrome_candidates"])
-        modules = herb_module_composer_skill(normalized_tags, formula.get("primary_route"))
-        safety = safety_guard_skill({"evidence": {"raw_text": ""}, "red_flags": self.case_state.get("red_flags", {}).get("positive_items", [])}, modules["matched_modules"], normalized_tags)
-        structured = case_structuring_skill(self.case_state)
-        handoff = clinician_handoff_skill(self.case_state, formula.get("formula_routes"), modules["matched_modules"], safety)
-        review_package = clinician_review_package_skill(
-            self.case_state,
-            routed["syndrome_candidates"],
-            formula.get("formula_routes"),
-            modules["matched_modules"],
-            safety,
-        )
-        cdss = cdss_recommendation_skill(
-            self.case_state,
-            routed["syndrome_candidates"],
-            formula.get("formula_routes"),
-            modules["matched_modules"],
-            safety,
-            user_role="clinician",
-        )
-        mined = mined_evidence_skill(normalized_tags, routed["syndrome_candidates"])
-        reasoning = physician_reasoning_skill(
-            self.case_state,
-            routed["syndrome_candidates"],
-            formula.get("formula_routes"),
-            modules["matched_modules"],
-            safety,
-            shen_signals=shen["shen_signals"],
-            mined_evidence=mined["mined_evidence"],
-            dao_client=self.dao_client,
-            use_llm=self.use_llm_questions,
-            user_role="clinician",
-        )
-        experience = case_experience_summary_skill(
-            self.case_state,
-            routed["syndrome_candidates"],
-            formula.get("formula_routes"),
-            modules["matched_modules"],
-            mode="case",
-            dao_client=self.dao_client,
-            use_llm=self.use_llm_questions,
-            user_role="clinician",
-        )
+        orchestration = self.run_agent_collaboration()
+        bb = orchestration["blackboard"]
+        shen = bb.get("shen", {})
+        mined = bb.get("mined", {})
+        agent_collaboration = {
+            "collaboration_trace": orchestration["collaboration_trace"],
+            "agent_roster": orchestration["agent_roster"],
+            "halted": orchestration["halted"],
+            "halt_reason": orchestration["halt_reason"],
+            "used_llm_agents": orchestration["used_llm_agents"],
+            "llm_in_loop": orchestration["llm_in_loop"],
+            "agent_count": orchestration["agent_count"],
+        }
         self.state = "S10_FINAL_REPORT"
-        return {"state": self.state, "case_state": self.case_state, "shen_signals": shen["shen_signals"], "high_value_missing": shen["high_value_missing"], **quality, **routed, **formula, **modules, "safety": safety, **structured, **handoff, **review_package, **cdss, "mined_evidence": mined["mined_evidence"], "mined_evidence_disclaimer": mined["disclaimer"], **reasoning, **experience}
+        return {
+            "state": self.state,
+            "case_state": self.case_state,
+            "shen_signals": shen.get("shen_signals", {}),
+            "high_value_missing": shen.get("high_value_missing", []),
+            **bb.get("quality", {}),
+            **bb.get("routed", {}),
+            **bb.get("formula", {}),
+            **bb.get("modules", {}),
+            **bb.get("conflicts", {}),
+            "safety": bb.get("safety", {}),
+            **bb.get("structured", {}),
+            **bb.get("handoff", {}),
+            **bb.get("review_package", {}),
+            **bb.get("cdss", {}),
+            "mined_evidence": mined.get("mined_evidence", []),
+            "mined_evidence_disclaimer": mined.get("disclaimer", ""),
+            **bb.get("reasoning", {}),
+            **bb.get("experience", {}),
+            "agent_collaboration": agent_collaboration,
+        }
 
     def _question_payload(self) -> dict[str, Any]:
         return {
