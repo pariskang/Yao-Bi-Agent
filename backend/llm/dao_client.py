@@ -15,6 +15,7 @@ from backend.llm.prompt_templates import (
     QUESTION_PROMPT_TEMPLATE,
     REASONING_PROMPT_TEMPLATE,
     REPORT_PROMPT_TEMPLATE,
+    SKILL_PLAN_PROMPT_TEMPLATE,
     SKILL_ROUTING_PROMPT_TEMPLATE,
     SYSTEM_PROMPT,
 )
@@ -160,6 +161,14 @@ class DaoClient:
         )
         return self._dispatch(self.build_prompt(body), self._mock_route_skill(routing_context), "skill routing")
 
+    def plan_skills(self, plan_context: dict[str, Any]) -> str:
+        max_steps = int(plan_context.get("max_steps", 4))
+        body = SKILL_PLAN_PROMPT_TEMPLATE.format(
+            max_steps=max_steps,
+            plan_context=json.dumps(plan_context, ensure_ascii=False, indent=2, default=str),
+        )
+        return self._dispatch(self.build_prompt(body), self._mock_plan_skills(plan_context), "skill planning")
+
     def chat(
         self,
         history: list[dict[str, str]],
@@ -286,6 +295,15 @@ class DaoClient:
         hint = routing_context.get("hint_intent")
         intent = hint if hint in allowed else (allowed[0] if allowed else "capabilities")
         return json.dumps({"intent": intent, "reason": "Tao 依据问题语义选择该技能（mock 沿用关键词提示）。"}, ensure_ascii=False)
+
+    def _mock_plan_skills(self, plan_context: dict[str, Any]) -> str:
+        # Honour the deterministic hint plan so multi-step planning stays testable;
+        # a real backend would decompose the question into ordered intents itself.
+        allowed = set(plan_context.get("allowed_intents") or [])
+        hint = [s for s in (plan_context.get("hint_plan") or []) if s.get("intent") in allowed]
+        if not hint:
+            hint = [{"intent": (plan_context.get("allowed_intents") or ["capabilities"])[0], "reason": "默认单步"}]
+        return json.dumps({"plan": hint}, ensure_ascii=False)
 
     def _generate_http(self, prompt: str) -> str:
         if not self.config.endpoint_url:

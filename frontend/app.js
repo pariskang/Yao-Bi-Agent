@@ -627,35 +627,65 @@ function groupedStarters() {
   return Object.values(groups);
 }
 
+function chatPlan(q) {
+  const text = q.toLowerCase();
+  const scored = CHAT_INTENTS.filter(i => i.id !== 'capabilities')
+    .map(i => ({ i, hits: i.kw.filter(k => text.includes(k.toLowerCase())) }))
+    .filter(x => x.hits.length).sort((a, b) => b.hits.length - a.hits.length);
+  let plan = scored.slice(0, 3).map(x => ({ intent: x.i.id, label: x.i.label, reason: `问题含「${x.hits.slice(0, 2).join('、')}」线索，需要${x.i.label}` }));
+  if (!plan.length) { const r = chatRoute(q); plan = [{ intent: r.id, label: r.label, reason: '按默认路由调用' }]; }
+  return plan;
+}
+
 function chatAsk(q) {
   if (!q || !q.trim()) return;
-  const route = chatRoute(q.trim());
-  const ans = chatAnswer(route.id, q.trim());
-  const others = CHAT_INTENTS.filter(i => i.id !== route.id).slice(0, 4).map(i => i.examples[0]);
-  state.chat.history.push({
-    q: q.trim(), intent: route.id, label: route.label, method: route.method,
-    md: ans.md, skills: ans.skills, usedLlm: !!ans.usedLlm && route.id !== 'safety_block',
-    followups: others,
-  });
+  q = q.trim();
+  if (!state.doctorMode && BLOCK_KW.some(k => q.includes(k))) {
+    const a = chatAnswer('safety_block', q);
+    state.chat.history.push({ q, intent: 'safety_block', label: '安全拦截', method: 'guard', md: a.md, skills: a.skills, followups: ['有哪些危险信号需要排查？', '可以考虑哪些方剂路线？'] });
+    return renderChatModule();
+  }
+  const others = CHAT_INTENTS.filter(i => i.id !== 'capabilities').slice(0, 4).map(i => i.examples[0]);
+  if (state.chat.autonomous) {
+    const plan = chatPlan(q);
+    const steps = plan.map((p, i) => { const a = chatAnswer(p.intent, q); return { step: i + 1, intent: p.intent, label: p.label, reason: p.reason, md: a.md, skills: a.skills, usedLlm: !!a.usedLlm }; });
+    const md = steps.length > 1
+      ? `为回答此问题，自主规划了 ${steps.length} 步并委派子智能体：${steps.map(s => s.label).join(' → ')}。`
+      : steps[0].md;
+    state.chat.history.push({ q, autonomous: true, plan, steps, label: '自主多步', method: taoEnabled() ? 'llm' : 'keyword', md, multiStep: steps.length > 1, usedLlm: steps.some(s => s.usedLlm), followups: others });
+    return renderChatModule();
+  }
+  const route = chatRoute(q);
+  const ans = chatAnswer(route.id, q);
+  state.chat.history.push({ q, intent: route.id, label: route.label, method: route.method, md: ans.md, skills: ans.skills, usedLlm: !!ans.usedLlm && route.id !== 'safety_block', followups: others });
   renderChatModule();
 }
 
 function renderChatModule() {
   pageTitle.textContent = '智能问答 · 语言模型自主选择技能并按提问挖掘';
   const h = state.chat.history;
-  const bubbles = h.map(t => `
+  const bubbles = h.map(t => {
+    const planHtml = t.autonomous && t.multiStep ? `
+        <div class="plan-strip"><span class="plan-label">自主计划</span>${t.plan.map((p, i) => `<span class="plan-step">${i + 1}. ${p.label}</span>${i < t.plan.length - 1 ? '<span class="plan-arrow">→</span>' : ''}`).join('')}</div>` : '';
+    const stepsHtml = t.autonomous && t.multiStep ? t.steps.map(s => `
+        <div class="substep"><div class="substep-head"><span class="substep-no">${s.step}</span><strong>${s.label}</strong><span class="route-tag">委派 → ${s.intent}</span>${s.usedLlm ? '<span class="kind-badge llm-on">Tao</span>' : ''}</div><div class="substep-reason">${escapeHtml(s.reason)}</div><div class="bot-body">${mdLite(s.md)}</div></div>`).join('') : `<div class="bot-body">${mdLite(t.md)}</div>`;
+    return `
     <div class="chat-turn">
       <div class="bubble user">${escapeHtml(t.q)}</div>
       <div class="bubble bot">
         <div class="bot-meta"><span class="kind-badge ${t.intent === 'safety_block' ? 'rule' : 'llm'}">${t.label}</span>
-          <span class="route-tag">路由：${t.method === 'llm' ? 'Tao 选择' : t.method === 'guard' ? '安全护栏' : '关键词'}</span>
-          ${t.usedLlm ? '<span class="kind-badge llm-on">Tao 措辞</span>' : ''}
-          <span class="route-tag">技能：${(t.skills || []).join(' / ')}</span>
+          <span class="route-tag">${t.autonomous ? '规划' : '路由'}：${t.method === 'llm' ? 'Tao 选择' : t.method === 'guard' ? '安全护栏' : '关键词'}</span>
+          ${t.autonomous && t.multiStep ? `<span class="route-tag">子智能体 ${t.steps.length} 个</span>` : ''}
+          ${t.usedLlm ? '<span class="kind-badge llm-on">Tao 在环</span>' : ''}
+          ${!t.autonomous ? `<span class="route-tag">技能：${(t.skills || []).join(' / ')}</span>` : ''}
         </div>
-        <div class="bot-body">${mdLite(t.md)}</div>
+        ${planHtml}
+        ${t.autonomous && t.multiStep ? `<div class="bot-body synth">${mdLite(t.md)}</div>` : ''}
+        ${stepsHtml}
         ${t.followups && t.followups.length ? `<div class="chip-row followups">${t.followups.map(f => `<button class="chip-btn" data-q="${escapeHtml(f)}">${f}</button>`).join('')}</div>` : ''}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   const starters = groupedStarters().map(g => `
     <div class="starter-group"><span class="starter-title">${g.group}</span>
       <div class="chip-row">${g.items.map(i => `<button class="chip-btn" data-q="${escapeHtml(i.examples[0])}" title="${i.label}">${i.examples[0]}</button>`).join('')}</div>
@@ -663,14 +693,16 @@ function renderChatModule() {
   screen.innerHTML = `
     <section class="result-panel">
       <p class="eyebrow">draft_for_clinician_review · 语言模型仅用于技能选择与措辞 · 确定性规则/挖掘数据作答</p>
-      <div class="chat-window">${bubbles || '<p class="muted">向我提问腰痹辨证、方药、安全、数据挖掘或经验总结。语言模型会自主选择对应技能，并用规则与脱敏数据作答。</p>'}</div>
-      <div class="chat-input"><input id="chatInput" type="text" placeholder="输入问题，如：气血痹阻证最常用什么方？" /><button class="primary-btn" id="chatSend">发送</button>${h.length ? '<button class="ghost-btn" id="chatClear">清空</button>' : ''}</div>
+      <div class="chat-window">${bubbles || '<p class="muted">向我提问腰痹辨证、方药、安全、数据挖掘或经验总结。语言模型会自主选择对应技能，并用规则与脱敏数据作答。开启「自主多步」可让智能体把复杂问题拆解、委派给多个子智能体并综合作答。</p>'}</div>
+      <div class="chat-toolbar"><label class="fsm-setting"><input type="checkbox" id="autoModeToggle" ${state.chat.autonomous ? 'checked' : ''} />自主多步（规划+子智能体委派）</label><span class="muted">复合问题（如“是什么证型、用什么方、有何风险”）会被拆成多步</span></div>
+      <div class="chat-input"><input id="chatInput" type="text" placeholder="输入问题，如：这个病人是什么证型、用什么方、有什么风险？" /><button class="primary-btn" id="chatSend">发送</button>${h.length ? '<button class="ghost-btn" id="chatClear">清空</button>' : ''}</div>
     </section>
     <section class="result-panel"><h3>你可以这样问（点击直接提问）</h3>${starters}
       <p class="muted">语言模型只能从上述受限技能集中选择，越界或解析失败回退关键词路由；患者端请求最终诊断/处方/剂量会被安全护栏拦截。</p>
     </section>`;
   const input = document.querySelector('#chatInput');
   const send = () => { chatAsk(input.value); };
+  document.querySelector('#autoModeToggle').addEventListener('change', e => { state.chat.autonomous = e.target.checked; });
   document.querySelector('#chatSend').addEventListener('click', send);
   input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
   const clr = document.querySelector('#chatClear');

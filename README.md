@@ -75,6 +75,22 @@ python -m backend.mining.xlsx_case_miner --xlsx data/private/门诊导出.xlsx \
 - **审核边界**：所有候选规则 `status: pending_expert_review`、`clinician_only: true`，仅作为医师端研究证据由 `mined_evidence_skill` 注入 `final_report`，不参与自动决策、不向患者输出；剂量分布仅为经验研究信号，不构成可执行剂量。
 - **数据质量诚实声明**：门诊导出的"中医四诊"栏多为模板文本，舌脉信息不可用于挖掘，产物中以 `data_quality.tongue_pulse_usable=false` 明示。
 
+## 自主多步智能体：规划 → 子智能体委派 → 综合（ReAct / Plan-and-Execute）
+
+`backend/agents/autonomous_agent.py` 在单意图问答之上提供前沿 agent 范式的自由问答智能体：
+
+- **Plan（规划）**：`plan_question` 把一个问题分解为**有序的多步计划**（每步 = 一个技能 intent + 理由）。确定性关键词规划始终可用；开启 Tao 时 `DaoClient.plan_skills` 可重排/扩展计划，但每个 intent 只能取自 `ALLOWED_INTENTS`，越界/解析失败回退确定性计划。
+- **Delegate（子智能体委派）**：`AutonomousQAAgent.run` 把每个计划步骤委派给负责该 intent 的**子智能体**（`ConversationSession.invoke`），因此一个问题可自主调用多个技能，后续步骤可基于前序观察。
+- **Synthesize（综合）**：把各子智能体的观察综合为一条回答，并输出 **ReAct 式推理轨迹**（thought → action(delegate→subagent) → observation），可审计、可在 UI 呈现。
+- **安全不变量**：子智能体只运行注册技能、基于确定性规则/脱敏数据作答；患者请求最终诊断/处方/剂量被拦截；语言模型只负责"选择与编排技能"，不产出临床结论。
+
+```bash
+python -m backend.main --ask "这个病人是什么证型、用什么方、有什么风险？" --autonomous
+# [autonomous plan: 证候辨析 → 方剂路线 → 安全审查] 逐步委派子智能体并综合作答
+```
+
+UI「智能问答」模块提供「自主多步」开关：开启后展示自主计划链、各子智能体的委派与观察、以及综合结论。
+
 ## 多轮智能问答：语言模型自主调用技能
 
 `backend/agents/skill_router.py` + `conversation.py` 提供对话式入口：用户多轮自由提问，

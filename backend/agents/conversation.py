@@ -208,6 +208,27 @@ class ConversationSession:
             return self._h_dose(question)
         return handlers.get(intent, self._h_capabilities)()
 
+    def invoke(self, intent: str, question: str = "") -> dict[str, Any]:
+        """Public subagent entry: run one skill handler for a given intent.
+
+        Used by the autonomous multi-step agent to delegate a sub-task to the
+        subagent responsible for ``intent`` (constrained to the registered set).
+        """
+
+        if intent not in INTENT_BY_ID:
+            intent = "capabilities"
+        result = self._dispatch(intent, question)
+        meta = INTENT_BY_ID.get(intent, {})
+        return {
+            "intent": intent,
+            "label": meta.get("label", intent),
+            "group": meta.get("group"),
+            "answer": result["answer"],
+            "skills": result.get("skills", []),
+            "evidence": result.get("evidence", []),
+            "used_llm": bool(result.get("used_llm")),
+        }
+
     def starters(self) -> list[dict[str, Any]]:
         return suggested_questions()
 

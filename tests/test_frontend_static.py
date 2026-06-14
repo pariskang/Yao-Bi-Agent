@@ -120,3 +120,19 @@ def test_frontend_presents_conversational_qa_module():
     # 覆盖多种功能意图
     for intent in ["syndrome_inquiry", "formula_inquiry", "mining_inquiry", "evidence_inquiry", "agent_inquiry"]:
         assert intent in app
+
+
+def test_frontend_presents_autonomous_multistep_chat():
+    root = Path("frontend")
+    app = (root / "app.js").read_text(encoding="utf-8")
+
+    # 自主多步：规划 + 子智能体委派 + 综合
+    assert "自主多步" in app
+    assert "chatPlan" in app
+    assert "autoModeToggle" in app
+    assert "state.chat.autonomous" in app
+    assert "子智能体" in app
+    assert "委派" in app
+    assert "自主规划了" in app
+    css = (root / "styles.css").read_text(encoding="utf-8")
+    assert "plan-strip" in css and "substep" in css
