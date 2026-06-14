@@ -102,6 +102,15 @@ def test_frontend_calls_backend_for_genuine_llm():
     assert "Tao 选择" in app
     assert "关键词回退" in app or "关键词（离线）" in app
 
+
+def test_frontend_has_conversational_interview():
+    """智能问诊 must offer the Tao-driven conversational interview backed by /api/interview."""
+    app = (Path("frontend") / "app.js").read_text(encoding="utf-8")
+    assert "renderConversationalInterview" in app
+    assert "/api/interview" in app
+    assert "interviewSend" in app
+    assert "对话式" in app and "表单式" in app  # mode switch between LLM chat and the form FSM
+
     # 安全边界仍在
     assert "draft_for_clinician_review" in app
     assert "非最终诊断" in app

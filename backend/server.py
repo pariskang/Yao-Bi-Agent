@@ -30,6 +30,7 @@ from backend.agents.autonomous_agent import AutonomousQAAgent
 from backend.agents.conversation import ConversationSession
 from backend.agents.orchestrator import AgentOrchestrator
 from backend.agents.skill_router import suggested_questions
+from backend.agents.yaobi_interview import YaoBiCaseState, YaoBiInterviewEngine
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.skills.case_extract_skill import case_extract_skill
 from backend.skills.case_normalize_skill import case_normalize_skill
@@ -171,6 +172,27 @@ def handle_collaboration(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# In-memory interview sessions (ephemeral; keyed by session_id from the UI).
+_INTERVIEWS: dict[str, YaoBiCaseState] = {}
+
+
+def handle_interview(data: dict[str, Any]) -> dict[str, Any]:
+    """One turn of the Tao-driven conversational interview (extract → FSM → ask → report)."""
+
+    session_id = str(data.get("session_id") or "default")
+    if data.get("reset"):
+        _INTERVIEWS.pop(session_id, None)
+        return {"reset": True, "session_id": session_id, "tao": tao_info()}
+    case = _INTERVIEWS.get(session_id)
+    if case is None:
+        case = YaoBiCaseState(session_id=session_id)
+        _INTERVIEWS[session_id] = case
+    engine = YaoBiInterviewEngine(dao_client=CLIENT, use_llm=TAO_ENABLED)
+    result = engine.run_turn(case, str(data.get("message") or ""))
+    result["tao"] = tao_info()
+    return result
+
+
 def handle_warmup(_data: dict[str, Any]) -> dict[str, Any]:
     if not TAO_ENABLED or CLIENT.config.backend == "disabled":
         return {"ok": False, "reason": "Tao backend disabled (set TAO_BACKEND).", "tao": tao_info()}
@@ -190,6 +212,7 @@ ROUTES_POST = {
     "/api/reasoning": handle_reasoning,
     "/api/summary": handle_summary,
     "/api/collaboration": handle_collaboration,
+    "/api/interview": handle_interview,
     "/api/warmup": handle_warmup,
 }
 

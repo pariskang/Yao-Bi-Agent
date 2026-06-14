@@ -153,6 +153,8 @@ const state = {
   step: 0,
   doctorMode: true,
   chat: { history: [] },
+  intakeMode: localStorage.getItem('yaobi-intake-mode') || 'chat',
+  interview: null,
   answers: JSON.parse(localStorage.getItem('yaobi-case') || '{}'),
   fsm: JSON.parse(localStorage.getItem('yaobi-fsm') || '{\"rounds\":{},\"lastAnswers\":{}}'),
 };
@@ -281,13 +283,18 @@ function renderModuleNav() {
   }));
 }
 
+function intakeMode() { return state.intakeMode === 'form' ? 'form' : 'chat'; }
+function setIntakeMode(mode) { state.intakeMode = mode; localStorage.setItem('yaobi-intake-mode', mode); render(); }
+
 function render() {
   renderModuleNav();
   renderTaoBadge();
   const intake = state.module === 'intake';
-  document.querySelector('#stepper').style.display = intake ? '' : 'none';
-  document.querySelector('.case-sidebar').style.display = intake ? '' : 'none';
-  document.querySelector('.app-shell').classList.toggle('wide', !intake);
+  const chatIntake = intake && intakeMode() === 'chat';
+  document.querySelector('#stepper').style.display = (intake && !chatIntake) ? '' : 'none';
+  document.querySelector('.case-sidebar').style.display = (intake && !chatIntake) ? '' : 'none';
+  document.querySelector('.app-shell').classList.toggle('wide', !intake || chatIntake);
+  if (chatIntake) return renderConversationalInterview();
   if (!intake) {
     if (state.module === 'dashboard') return renderDashboard();
     if (state.module === 'chat') return renderChatModule();
@@ -309,8 +316,123 @@ function render() {
   renderQuestionStage(id);
 }
 
+// ---------------------------------------------------------------------------
+// Conversational interview (Tao-driven FSM: extract → ask → report)
+// ---------------------------------------------------------------------------
+
+function ensureInterview() {
+  if (!state.interview) {
+    state.interview = { sessionId: 'iv-' + Math.random().toString(36).slice(2, 10), history: [], info: null, report: null, pending: false, kicked: false };
+  }
+  return state.interview;
+}
+
+async function interviewSend(message) {
+  const iv = ensureInterview();
+  if (iv.pending) return;
+  if (message) iv.history.push({ role: 'user', content: message });
+  iv.pending = true;
+  renderConversationalInterview();
+  try {
+    const res = await api.post('/api/interview', { session_id: iv.sessionId, message: message || '' });
+    iv.pending = false;
+    iv.info = res;
+    iv.report = res.report || null;
+    iv.history.push({ role: 'assistant', content: res.report || res.message, state: res.state, done: res.done });
+  } catch (e) {
+    iv.pending = false;
+    await api.health(); renderTaoBadge();
+    iv.history.push({ role: 'assistant', content: '（连接后端失败，无法继续对话式问诊。请确认服务在线，或切换到表单式问诊。）', error: true });
+  }
+  renderConversationalInterview();
+}
+
+function interviewReset() {
+  const iv = ensureInterview();
+  api.post('/api/interview', { session_id: iv.sessionId, reset: true }).catch(() => {});
+  state.interview = null;
+  ensureInterview().kicked = true;
+  interviewSend('');   // fresh opening question
+}
+
+function renderConversationalInterview() {
+  pageTitle.textContent = '智能问诊 · Tao 驱动的对话式腰痹问诊';
+  const iv = ensureInterview();
+  if (!taoOnline()) {
+    screen.innerHTML = `
+      <section class="result-panel">
+        <div class="intake-switch"><strong>问诊方式</strong>
+          <button class="option-pill selected" data-mode="chat">对话式（Tao）</button>
+          <button class="option-pill" data-mode="form">表单式</button>
+        </div>
+        <h3>对话式问诊需要连接 Tao 后端</h3>
+        <p class="muted">对话式问诊由语言模型实时抽取信息、自主追问并生成报告。请启动后端服务（Colab 用 ngrok 暴露），或切换到「表单式」问诊。</p>
+      </section>`;
+    screen.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => setIntakeMode(b.dataset.mode)));
+    return;
+  }
+  if (!iv.kicked && iv.history.length === 0) { iv.kicked = true; interviewSend(''); }
+
+  const info = iv.info || {};
+  const patterns = info.candidate_patterns || [];
+  const topP = Math.max(...patterns.map(p => p.prob || 0), 0.001);
+  const bubbles = iv.history.map(m => {
+    if (m.role === 'user') return `<div class="chat-turn"><div class="bubble user">${escapeHtml(m.content)}</div></div>`;
+    const tag = m.done ? '<span class="kind-badge llm-on">问诊小结</span>' : '<span class="kind-badge llm">Tao 追问</span>';
+    return `<div class="chat-turn"><div class="bubble bot"><div class="bot-meta">${tag}${m.state ? `<span class="route-tag">${escapeHtml(m.state)}</span>` : ''}</div><div class="bot-body">${mdLite(m.content)}</div></div></div>`;
+  }).join('');
+  const pendingHtml = iv.pending ? `<div class="chat-turn"><div class="bubble bot"><div class="bot-body muted">⏳ Tao 正在分析并组织下一步追问…（${escapeHtml(taoRuntimeTag())}）</div></div></div>` : '';
+
+  const redFlags = (info.red_flags || []);
+  const sidePanel = `
+    <section class="result-panel interview-side">
+      <h3>问诊状态</h3>
+      <p class="eyebrow">${escapeHtml(info.state || 'SAFETY_TRIAGE')} · 第 ${info.turn_count || 0} 轮</p>
+      <p class="muted">${escapeHtml(info.state_goal || '安全筛查与信息采集')}</p>
+      ${redFlags.length ? `<div class="redflag-box"><strong>⚠ 风险信号</strong><ul>${redFlags.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul></div>` : ''}
+      <h4>候选证候（规则评分，模型据此追问）</h4>
+      ${patterns.length ? patterns.slice(0, 5).map(p => `
+        <div class="bar-row"><span class="bar-label">${escapeHtml(p.pattern)}</span>
+          <span class="bar-track"><span class="bar-fill" style="width:${Math.round((p.prob || 0) / topP * 100)}%"></span></span>
+          <span class="bar-value">${Math.round((p.prob || 0) * 100)}%</span></div>`).join('') : '<p class="muted">待补充信息</p>'}
+      <p class="muted">不确定度：${info.uncertainty != null ? info.uncertainty : '—'}</p>
+      ${(info.target_slots || []).length ? `<h4>本轮关注</h4><div class="chip-cloud">${info.target_slots.map(s => `<span class="chip">${escapeHtml(s)}</span>`).join('')}</div>` : ''}
+    </section>`;
+
+  screen.innerHTML = `
+    <div class="intake-switch">
+      <strong>问诊方式</strong>
+      <button class="option-pill selected" data-mode="chat">对话式（Tao）</button>
+      <button class="option-pill" data-mode="form">表单式</button>
+      <span class="muted">由 ${escapeHtml(taoRuntimeTag())} 实时抽取信息、自主追问、生成报告</span>
+      <button class="ghost-btn" id="ivReset" type="button">重新开始</button>
+    </div>
+    <div class="panel-grid interview-grid">
+      <section class="result-panel">
+        <p class="eyebrow">draft_for_clinician_review · 语言模型抽取→规则红旗/证候→Tao 自主追问→会诊报告</p>
+        <div class="chat-window">${bubbles || '<p class="muted">请描述您目前最主要的腰部不适（部位、多久、是否放射到腿、有无麻木无力）。</p>'}${pendingHtml}</div>
+        <div class="chat-input"><input id="ivInput" type="text" placeholder="像跟医生说话一样描述症状，例如：腰痛半年，弯腰加重，左腿发麻……" /><button class="primary-btn" id="ivSend">发送</button></div>
+      </section>
+      ${sidePanel}
+    </div>`;
+  screen.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => setIntakeMode(b.dataset.mode)));
+  document.querySelector('#ivReset').addEventListener('click', interviewReset);
+  const input = document.querySelector('#ivInput');
+  const send = () => { const v = input.value.trim(); if (v) { input.value = ''; interviewSend(v); } };
+  document.querySelector('#ivSend').addEventListener('click', send);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  const win = screen.querySelector('.chat-window');
+  if (win) win.scrollTop = win.scrollHeight;
+}
+
 function renderStart() {
   screen.innerHTML = `
+    <div class="intake-switch">
+      <strong>问诊方式</strong>
+      <button class="option-pill" data-mode="chat">对话式（Tao）</button>
+      <button class="option-pill selected" data-mode="form">表单式</button>
+      <span class="muted">对话式由语言模型实时抽取、自主追问；表单式为固定问卷流程</span>
+    </div>
     <section class="hero">
       <div class="hero-grid">
         <div>
@@ -328,6 +450,7 @@ function renderStart() {
       <pre class="runtime-code">TAO_BACKEND=transformers python -m backend.main --tao-chat "请解释本案规则线索" --stream</pre>
     </section>`;
   document.querySelector('#startBtn').addEventListener('click', () => { state.step = 1; render(); });
+  screen.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => setIntakeMode(b.dataset.mode)));
 }
 
 function renderQuestionStage(stage) {

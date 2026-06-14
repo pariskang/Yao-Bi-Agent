@@ -13,6 +13,8 @@ from backend.llm.prompt_templates import (
     CONSULTATION_PROMPT_TEMPLATE,
     EXPERIENCE_SUMMARY_PROMPT_TEMPLATE,
     FOLLOWUP_PROBE_PROMPT_TEMPLATE,
+    INTERVIEW_EXTRACTION_PROMPT_TEMPLATE,
+    INTERVIEW_QUESTION_PROMPT_TEMPLATE,
     PROBE_FREEFORM_PROMPT_TEMPLATE,
     QUESTION_PROMPT_TEMPLATE,
     REASONING_PROMPT_TEMPLATE,
@@ -182,6 +184,24 @@ class DaoClient:
         )
         return self._dispatch(self.build_prompt(body), self._mock_consultation(consultation_context), "consultation")
 
+    def extract_slots(self, user_text: str) -> str:
+        """Tao extracts structured YaoBi slots from one free-text turn (JSON object)."""
+
+        body = INTERVIEW_EXTRACTION_PROMPT_TEMPLATE.format(user_text=user_text)
+        return self._dispatch(self.build_prompt(body), self._mock_extract_slots(user_text), "slot extraction")
+
+    def generate_interview_question(self, interview_context: dict[str, Any]) -> str:
+        """Tao autonomously asks the next follow-up turn, grounded in stage/slots/patterns."""
+
+        body = INTERVIEW_QUESTION_PROMPT_TEMPLATE.format(
+            stage=interview_context.get("stage", ""),
+            stage_goal=interview_context.get("stage_goal", ""),
+            target_slots=", ".join(interview_context.get("target_slots", []) or []) or "（无指定，按鉴别价值自选）",
+            candidate_patterns=json.dumps(interview_context.get("candidate_patterns", []), ensure_ascii=False, default=str),
+            case_summary=json.dumps(interview_context.get("case_summary", {}), ensure_ascii=False, default=str),
+        )
+        return self._dispatch(self.build_prompt(body), self._mock_interview_question(interview_context), "interview question")
+
     def generate_probe_questions(self, probe_context: dict[str, Any]) -> str:
         """Tao-primary follow-up: the model freely asks the next clarifying questions."""
 
@@ -349,8 +369,8 @@ class DaoClient:
         modules = ev.get("herb_modules") or []
         tags = ev.get("normalized_tags") or []
         safety = ev.get("safety") or {}
-        top = syns[0]["name"] if syns else "气血痹阻、筋脉失养"
-        alt = "、".join(s.get("name", "") for s in syns[1:3]) or "寒湿痹阻、肝肾不足"
+        top = (syns[0].get("name") or syns[0].get("pattern")) if syns else "气血痹阻、筋脉失养"
+        alt = "、".join((s.get("name") or s.get("pattern") or "") for s in syns[1:3]) or "寒湿痹阻、肝肾不足"
         route = (routes[0].get("name") if routes else None) or "独活寄生汤加减"
         mods = "、".join(m.get("name", "") for m in modules[:4]) or "祛风湿通络、益气养血、补益肝肾"
         clue = "、".join(tags[:8]) or "待四诊补充"
@@ -394,6 +414,166 @@ class DaoClient:
         if not chosen:
             chosen = ["关于" + theme + "，还有哪些细节想补充给医生？", "这些症状最近有没有新的变化？"]
         return "\n".join(chosen[: int(ctx.get("max_probes", 2))])
+
+    def _mock_extract_slots(self, user_text: str) -> str:
+        import re as _re
+
+        t = user_text or ""
+        def has(*ks: str) -> bool:
+            return any(k in t for k in ks)
+
+        def tri(*ks: str) -> bool | None:
+            # negation-aware tri-state: True (present) / False (explicitly denied) / None (unmentioned),
+            # so "没有无力 / 无发热 / 否认外伤" records an answered-absent slot rather than a missing one.
+            found_pos = found_neg = False
+            for k in ks:
+                for m in _re.finditer(_re.escape(k), t):
+                    pre = t[max(0, m.start() - 3):m.start()]
+                    if any(n in pre for n in ("无", "没", "否", "非", "排除", "未")):
+                        found_neg = True
+                    else:
+                        found_pos = True
+            return True if found_pos else (False if found_neg else None)
+
+        demo: dict[str, Any] = {}
+        pain: dict[str, Any] = {}
+        ortho: dict[str, Any] = {}
+        tcm: dict[str, Any] = {}
+        hist: dict[str, Any] = {}
+
+        m = _re.search(r"(\d{1,3})\s*岁", t)
+        if m:
+            demo["age"] = int(m.group(1))
+        elif "青年" in t:
+            demo["age"] = 28
+        if "女" in t:
+            demo["sex"] = "女"
+        elif "男" in t:
+            demo["sex"] = "男"
+
+        if has("腰腿", "腿痛", "下肢"):
+            pain["pain_location"] = "腰部及下肢"
+        elif has("腰"):
+            pain["pain_location"] = "腰部"
+        for key, kws in (
+            ("radiation", ("放射", "串", "窜")), ("numbness", ("麻", "麻木")),
+            ("weakness", ("无力", "乏力", "抬不起")), ("night_pain", ("夜间痛", "夜里痛", "夜间加重", "夜痛")),
+            ("cold_damp_trigger", ("遇冷", "受寒", "受凉", "阴雨", "涉水", "天冷")),
+            ("trauma_history", ("跌", "摔", "扭", "外伤", "跌扑", "闪了", "搬")),
+        ):
+            v = tri(*kws)
+            if v is not None:
+                pain[key] = v
+        for nature in ("刺痛", "冷痛", "胀痛", "灼痛", "酸痛"):
+            if nature in t:
+                pain["pain_nature"] = nature
+                break
+        md = _re.search(r"(\d+\s*[年月周天])", t)
+        if md:
+            pain["duration"] = md.group(1)
+        elif "反复" in t:
+            pain["onset"] = "反复发作"
+
+        for key, kws in (
+            ("bowel_bladder_dysfunction", ("大小便", "失禁", "尿不", "解不出")), ("saddle_anesthesia", ("会阴", "鞍区")),
+            ("progressive_weakness", ("进行性", "越来越无力", "越来越没力")), ("fever", ("发热", "发烧", "寒战")),
+            ("tumor_history", ("肿瘤", "癌")), ("unexplained_weight_loss", ("消瘦", "体重下降", "变瘦")),
+            ("severe_trauma", ("车祸", "高处坠", "重物砸", "严重外伤")),
+        ):
+            v = tri(*kws)
+            if v is not None:
+                ortho[key] = v
+
+        if has("怕冷", "畏寒"):
+            tcm["cold_heat"] = "怕冷"
+        elif has("怕热", "五心烦热"):
+            tcm["cold_heat"] = "怕热"
+        if has("冷痛"):
+            tcm["cold_pain"] = True
+        if has("困重", "沉重"):
+            tcm["limb_heaviness"] = True
+        if has("定处", "固定"):
+            tcm["fixed_pain"] = True
+        if has("腰膝酸软", "酸软"):
+            tcm["waist_knee_soreness"] = True
+        if has("口干", "口渴"):
+            tcm["thirst"] = "口干"
+        if has("失眠", "睡不", "多梦", "早醒"):
+            tcm["sleep"] = "欠佳"
+        if has("纳差", "胃口差", "食少"):
+            tcm["appetite"] = "纳差"
+        if "舌淡" in t:
+            tcm["tongue_body"] = "淡"
+        elif has("舌暗", "暗紫", "紫暗"):
+            tcm["tongue_body"] = "暗紫"
+        elif "舌红" in t:
+            tcm["tongue_body"] = "红"
+        if "薄白" in t:
+            tcm["tongue_coating"] = "薄白"
+        elif "白腻" in t:
+            tcm["tongue_coating"] = "白腻"
+        elif "黄腻" in t:
+            tcm["tongue_coating"] = "黄腻"
+        for pulse in ("细", "弦", "沉", "滑", "数", "紧"):
+            if f"脉{pulse}" in t or f"脉象{pulse}" in t:
+                tcm["pulse"] = pulse
+                break
+
+        if "骨质疏松" in t:
+            hist["osteoporosis"] = True
+        if has("椎间盘", "椎管狭窄", "滑脱"):
+            hist["western_diagnosis"] = t[:60]
+        if has("MRI", "CT", "X线", "X光", "核磁", "片子", "磁共振"):
+            hist["imaging"] = "有影像检查"
+
+        out: dict[str, Any] = {}
+        if demo:
+            out["demographics"] = demo
+        if "腰" in t:
+            out["chief_complaint"] = t[:40]
+        if pain:
+            out["pain_slots"] = pain
+        if ortho:
+            out["ortho_neuro_slots"] = ortho
+        if tcm:
+            out["tcm_slots"] = tcm
+        if hist:
+            out["history_slots"] = hist
+        return json.dumps(out, ensure_ascii=False)
+
+    def _mock_interview_question(self, ctx: dict[str, Any]) -> str:
+        targets = ctx.get("target_slots", []) or []
+        phrase = {
+            "chief_complaint": "目前最主要的不适是什么，痛了多久了",
+            "bowel_bladder_dysfunction": "最近有没有大小便控制困难、或突然解不出来",
+            "saddle_anesthesia": "会阴部（坐着接触座位的部位）有没有发麻",
+            "progressive_weakness": "下肢力气是不是越来越差、走路发软或拖步",
+            "severe_trauma": "这次发作前有没有明显的摔伤、扭伤或外伤",
+            "fever": "有没有发热、寒战或近期感染",
+            "tumor_history": "既往有没有肿瘤病史，近期有没有不明原因消瘦",
+            "night_pain": "夜里痛得明显吗，会不会痛醒",
+            "radiation": "腰痛会不会向臀部或腿脚放射",
+            "numbness": "腿脚有没有发麻",
+            "weakness": "腿有没有发软、使不上劲",
+            "cold_damp_trigger": "受凉或阴雨天会不会加重，热敷能不能缓解",
+            "pain_nature": "疼痛更像酸痛、胀痛、刺痛还是冷痛",
+            "duration": "这次腰痛大概持续多久了，是急性还是反复发作",
+            "tongue_body": "方便的话看下舌头，舌质偏淡、偏红还是偏暗紫",
+            "tongue_coating": "舌苔是薄白、白腻还是黄腻",
+            "pulse": "如果量过脉，脉象偏细、偏弦还是偏沉",
+            "cold_heat": "平时是怕冷还是怕热",
+            "waist_knee_soreness": "有没有腰膝酸软、乏力的感觉",
+            "sleep": "睡眠怎么样",
+            "stool": "大便情况如何",
+            "urine": "小便清长还是偏黄",
+            "western_diagnosis": "之前医院有没有诊断过（如椎间盘突出、椎管狭窄）",
+            "imaging": "做过腰椎 X 线、CT 或核磁吗",
+            "osteoporosis": "有没有骨质疏松",
+        }
+        chosen = [phrase[s] for s in targets if s in phrase][:4]
+        if not chosen:
+            chosen = ["还可以多说说目前最困扰你的症状，以及加重或缓解的因素"]
+        return "为了更准确地帮医生判断，我想再了解几点：" + "；".join(chosen) + "？"
 
     def _generate_http(self, prompt: str) -> str:
         if not self.config.endpoint_url:

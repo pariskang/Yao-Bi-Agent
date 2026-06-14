@@ -66,6 +66,7 @@ TAO_BACKEND=transformers TAO_MODEL_ID=CMLM/Dao1-30b-a3b TAO_LOAD_IN_4BIT=true \
 | 智能问答 | `POST /api/chat` | `route_skill` 在受限技能集内真实选择 skill（JSON 修复 + 越界回退） |
 | 自主多步 | `POST /api/autonomous` | `plan_skills` 真实规划多步并委派子智能体 |
 | Tao 自动追问 | `POST /api/followup_probe` | 规则约束内真实生成澄清式追问（经 Output Guard） |
+| 对话式智能问诊 | `POST /api/interview` | Tao 抽取槽位→FSM 判阶段/红旗→模型自主追问→会诊报告（`YaoBiInterviewEngine`） |
 | 智能体协作 | `POST /api/collaboration` | `ReasoningAgent`/`ExperienceAgent` 真实调用 Tao |
 
 只有模型真正路由时 UI 才标 `Tao 选择 ✓`，否则如实标 `关键词回退`/`离线`；安全护栏与 Output Guard 服务端强制。`TAO_LOAD_IN_4BIT`/`TAO_LOAD_IN_8BIT` 让 30B MoE 适配单卡 A100/L4（需 `bitsandbytes`）。未连接后端时前端自动回退到本地规则镜像并如实标注。

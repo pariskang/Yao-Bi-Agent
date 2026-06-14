@@ -110,3 +110,47 @@ def test_followup_probe_is_model_generated_freeform(monkeypatch):
     assert runtime.get("mode") == "freeform"
     assert res["probes"]
     assert all(p["source"] == "tao_probe" for p in res["probes"])
+
+
+def _interview(server, sid, msg):
+    return server.handle_interview({"session_id": sid, "message": msg})
+
+
+def test_interview_is_llm_driven_fsm_to_report(monkeypatch):
+    # Tao extracts slots, the FSM advances, Tao asks follow-ups, then emits a report.
+    server = _server(monkeypatch)
+    server.handle_interview({"session_id": "iv", "reset": True})
+    msgs = [
+        "腰痛反复多年，舌暗紫，苔白腻，遇冷加重",
+        "腰部酸胀痛，向左腿放射，左小腿发麻，没有无力",
+        "怕冷，腰膝酸软，热敷舒服，脉细",
+        "之前诊断腰椎间盘突出，做过核磁，没有大小便异常，无发热无肿瘤史",
+    ]
+    states, last = [], None
+    for m in msgs:
+        last = _interview(server, "iv", m)
+        states.append(last["state"])
+        if last["done"]:
+            break
+    assert "PAIN_PROFILE" in states  # FSM moved past chief complaint
+    assert last["done"] is True
+    assert last["report_source"] == "tao_primary_grounded"
+    assert last["report"] and len(last["report"]) > 200
+    assert last["candidate_patterns"]
+
+
+def test_interview_red_flag_hard_stop(monkeypatch):
+    server = _server(monkeypatch)
+    server.handle_interview({"session_id": "rf", "reset": True})
+    res = _interview(server, "rf", "腰痛伴大小便失禁，会阴麻木，下肢进行性无力")
+    assert res["state"] == "SAFETY_REFERRAL"
+    assert res["safety_level"] == "high"
+    assert res["red_flags"]
+
+
+def test_interview_negation_does_not_trigger_red_flag(monkeypatch):
+    server = _server(monkeypatch)
+    server.handle_interview({"session_id": "ng", "reset": True})
+    res = _interview(server, "ng", "腰痛，没有大小便异常，无发热，无外伤")
+    assert res["safety_level"] == "low"
+    assert res["state"] != "SAFETY_REFERRAL"
