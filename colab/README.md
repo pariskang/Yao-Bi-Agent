@@ -13,6 +13,7 @@
 | 智能问答 | `POST /api/chat` | `route_skill` 在受限技能集内**真实选择** skill（JSON 修复 + 越界回退） |
 | 自主多步 | `POST /api/autonomous` | `plan_skills` **真实规划**多步并委派子智能体 |
 | Tao 自动追问 | `POST /api/followup_probe` | 规则约束内**真实生成**澄清式追问（经 Output Guard） |
+| 对话式智能问诊 | `POST /api/interview` | Tao 抽取槽位→FSM 判阶段/红旗→**模型自主追问**→会诊报告 |
 | 智能体协作 | `POST /api/collaboration` | `ReasoningAgent`/`ExperienceAgent` **真实调用 Tao** |
 | 经验推理/总结 | `POST /api/reasoning` `…/summary` | `physician_reasoning_skill` / `case_experience_summary_skill` 真实润色 |
 
