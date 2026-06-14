@@ -48,10 +48,15 @@ def test_followup_probe_generates_rule_constrained_probes():
         assert probe["field_hint"] in {None, "pain_profile.location", "pain_profile.radiation"}
 
 
-def test_followup_probe_rejects_out_of_field_hint_and_unsafe_text():
+def test_followup_probe_rejects_unsafe_text_on_both_paths():
+    # The model is now primary (free-form questions); unsafe content must be rejected on the
+    # free-form path AND on the secondary structured-JSON path, falling back to no probe.
     class UnsafeProbeDao(DaoClient):
         def __init__(self):
             super().__init__(DaoGenerationConfig(backend="mock"))
+
+        def generate_probe_questions(self, probe_context):
+            return "最终诊断为腰椎间盘突出，处方如下水煎服每次10克"
 
         def generate_followup_probes(self, probe_context):
             return '{"probes":[{"probe_text":"最终诊断为腰椎间盘突出，处方如下水煎服","field_hint":"comorbidity.diseases","reason":"诊断"}]}'
@@ -178,3 +183,40 @@ def test_final_report_includes_reasoning_and_experience_summary():
     assert final["physician_reasoning"]["reasoning_chain"]
     assert "case_experience_summary" in final
     assert "医案按语" in final["case_experience_summary"]["summary_markdown"]
+
+
+# ---------------------------------------------------- Tao-primary consultation
+
+def test_guard_consultation_is_role_aware():
+    from backend.llm.output_guard import guard_consultation
+
+    # clinician draft may name formulas / experience dose ranges
+    assert guard_consultation("可考虑独活寄生汤加减，经验剂量范围由医师审定。", "clinician")["allowed"] is True
+    # but never patient self-administration / skip-the-doctor
+    assert guard_consultation("你回家自行服用，无需就医。", "clinician")["allowed"] is False
+    # patient role stays strict: dose/prescription blocked
+    assert guard_consultation("细辛3克水煎服", "patient")["allowed"] is False
+
+
+def test_consultation_skill_falls_back_when_disabled():
+    from backend.skills.tao_consultation_skill import tao_consultation_skill
+
+    out = tao_consultation_skill("q", "证候辨析", {}, fallback_text="规则答案", use_llm=False)
+    assert out["answer"] == "规则答案"
+    assert out["used_llm"] is False
+    assert out["source"] == "deterministic_rules"
+
+
+def test_consultation_skill_is_model_primary_when_enabled():
+    from backend.llm.dao_client import DaoClient, DaoGenerationConfig
+    from backend.skills.tao_consultation_skill import tao_consultation_skill
+
+    out = tao_consultation_skill(
+        "跌扑后腰痛遇冷加重，舌淡脉细", "证候辨析与病机分析",
+        {"syndrome_candidates": [{"name": "气血痹阻证", "score": 5}], "formula_routes": [{"name": "独活寄生汤加减"}]},
+        fallback_text="规则答案", dao_client=DaoClient(DaoGenerationConfig(backend="mock")), use_llm=True, user_role="clinician",
+    )
+    assert out["used_llm"] is True
+    assert out["source"] == "tao_primary_grounded"
+    assert len(out["answer"]) > 100
+    assert "执业医师" in out["answer"]

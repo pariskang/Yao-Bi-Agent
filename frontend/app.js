@@ -14,6 +14,62 @@ const modules = [
 
 const MINED = typeof window !== 'undefined' && window.MINED_RULES ? window.MINED_RULES : null;
 
+// ---------------------------------------------------------------------------
+// Backend API client — when the YaoBi server is reachable, the language model
+// genuinely drives skill selection / planning / follow-up probes (server-side).
+// When offline, the UI falls back to the client-side rule logic and labels it
+// honestly as 关键词/规则 (no fake "Tao" claims).
+// ---------------------------------------------------------------------------
+const API_BASE = (typeof window !== 'undefined' && window.YAOBI_API_BASE) || '';
+const api = {
+  state: { checked: false, online: false, tao: null },
+  // `ngrok-skip-browser-warning` stops ngrok's free interstitial HTML from breaking fetch JSON.
+  async health() {
+    try {
+      const r = await fetch(`${API_BASE}/api/health`, { cache: 'no-store', headers: { 'ngrok-skip-browser-warning': 'true' } });
+      if (!r.ok) throw new Error(String(r.status));
+      const j = await r.json();
+      this.state = { checked: true, online: true, tao: j.tao || null };
+    } catch (e) {
+      this.state = { checked: true, online: false, tao: null };
+    }
+    return this.state;
+  },
+  async post(path, body) {
+    const r = await fetch(`${API_BASE}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' }, body: JSON.stringify(body || {}) });
+    if (!r.ok) throw new Error(`${path} -> ${r.status}`);
+    return r.json();
+  },
+};
+function taoOnline() { return !!(api.state.online && api.state.tao && api.state.tao.enabled); }
+function taoRuntimeTag() {
+  const t = api.state.tao;
+  if (!t) return '';
+  return `${t.backend} · ${t.model_id}${t.quantization && t.quantization !== 'none' ? ' · ' + t.quantization : ''}`;
+}
+function casePayload(extra = {}) {
+  const c = buildCase();
+  return { tags: c.tags, red_flags: { status: c.red.status, positive_items: c.red.positives }, doctor_mode: state.doctorMode, ...extra };
+}
+function renderTaoBadge() {
+  let el = document.querySelector('#taoBadge');
+  if (!el) {
+    const actions = document.querySelector('.topbar-actions');
+    if (!actions) return;
+    el = document.createElement('span');
+    el.id = 'taoBadge';
+    el.className = 'tao-badge';
+    actions.insertBefore(el, actions.firstChild);
+  }
+  const online = taoOnline();
+  el.classList.toggle('on', online);
+  el.classList.toggle('off', !online);
+  el.title = online ? `语言模型在线：${taoRuntimeTag()}` : '未连接 Tao 后端：离线规则模式（标签如实显示为关键词）';
+  el.innerHTML = online
+    ? `<span class="dot"></span>Tao 在线 · ${api.state.tao.backend}`
+    : `<span class="dot"></span>离线 · 规则模式`;
+}
+
 const steps = [
   { id: 'start', label: '开始与知情', title: '自动导引患者生成标准腰痹医案' },
   { id: 'redflag', label: '红旗筛查', title: '先排除需要立即线下评估的危险信号' },
@@ -227,6 +283,7 @@ function renderModuleNav() {
 
 function render() {
   renderModuleNav();
+  renderTaoBadge();
   const intake = state.module === 'intake';
   document.querySelector('#stepper').style.display = intake ? '' : 'none';
   document.querySelector('.case-sidebar').style.display = intake ? '' : 'none';
@@ -292,15 +349,14 @@ function renderQuestionStage(stage) {
         <select id="maxRoundsSelect">${[1, 2, 3, 4, 5].map(n => `<option value="${n}" ${n === maxRounds() ? 'selected' : ''}>${n}</option>`).join('')}</select>
       </label>
       <label class="fsm-setting"><input type="checkbox" id="autoAdvanceToggle" ${state.fsm.autoAdvance ? 'checked' : ''} />答完自动进入下一状态</label>
-      <label class="fsm-setting"><input type="checkbox" id="taoProbeToggle" ${taoEnabled() ? 'checked' : ''} />Tao 自动追问</label>
+      <label class="fsm-setting" title="${taoOnline() ? 'Tao 在线：' + taoRuntimeTag() : '需连接后端服务'}"><input type="checkbox" id="taoProbeToggle" ${taoEnabled() ? 'checked' : ''} />Tao 自动追问${taoOnline() ? ' ·在线' : ' ·需后端'}</label>
       <button class="ghost-btn" id="endStateBtn" type="button">手动结束本状态</button>
     </section>
     <div class="card-grid"></div>
     <div class="footer-actions"><button class="ghost-btn" id="prevBtn">上一步</button><button class="ghost-btn" id="deepenBtn" ${exhausted ? 'disabled title="已达到本状态追问轮数上限"' : ''}>本状态深化追问</button><button class="primary-btn" id="nextBtn">进入下一个状态</button></div>`;
   const grid = screen.querySelector('.card-grid');
   list.forEach(q => grid.appendChild(renderQuestion(q, stage)));
-  const probes = taoProbesFor(stage);
-  probes.forEach(q => grid.appendChild(renderQuestion(q, stage)));
+  loadTaoProbes(stage, grid);   // genuine Tao follow-up probes when the backend is online
   document.querySelector('#maxRoundsSelect').addEventListener('change', e => { setMaxRounds(e.target.value); render(); });
   document.querySelector('#autoAdvanceToggle').addEventListener('change', e => { state.fsm.autoAdvance = e.target.checked; save(); });
   document.querySelector('#taoProbeToggle').addEventListener('change', e => { state.fsm.taoProbes = e.target.checked; save(); render(); });
@@ -489,26 +545,36 @@ function taoEnabled() { return state.fsm.taoProbes !== false; }
 const PROBE_BUDGET = 2;
 const PROBE_THEME = { pain: '疼痛特征', neuro: '神经骨科线索', tcm: '中医四诊', comorbidity: '合并病与用药' };
 
-function taoProbesFor(stage) {
-  if (!taoEnabled() || !PROBE_THEME[stage]) return [];
-  const t = getTags();
-  const out = [];
-  if (stage === 'pain') {
-    if (t.includes('cold_aggravation')) out.push('受凉或天气变化时，疼痛是几分钟内就加重，还是过一阵才明显？热敷大约多久能舒服一些？');
-    out.push('一天中什么时候最痛——晨起、久坐后，还是夜里翻身时？');
-  } else if (stage === 'neuro') {
-    if (t.includes('lower_limb_numbness')) out.push('腿麻是一直都在，还是走一段路才出现？停下来休息能不能缓解？');
-    out.push('咳嗽、打喷嚏或用力时，腿部的串痛或发麻会不会明显加重？');
-  } else if (stage === 'tcm') {
-    if (t.includes('bitter_taste') || t.includes('insomnia')) out.push('口苦是晨起明显，还是情绪紧张时更明显？睡不好和腰痛，哪个先出现的？');
-    out.push('最近胃口、大便和精神状态，跟腰痛发作有没有一起变化？');
-  } else if (stage === 'comorbidity') {
-    out.push('以前吃过的止痛药，有没有出现过胃部不适、反酸或别的不舒服？');
+// Genuine Tao follow-up probes: the model generates rule-bounded clarifying questions
+// server-side (tao_followup_probe_skill) and they pass JSON-repair + Output Guard. When the
+// backend is offline we show an honest note instead of fabricating "Tao" probes.
+async function loadTaoProbes(stage, grid) {
+  if (!taoEnabled() || !PROBE_THEME[stage]) return;
+  if (!taoOnline()) {
+    const note = document.createElement('article');
+    note.className = 'question-card tao-probe';
+    note.innerHTML = `<div class="question-meta">TAO 自动追问 · 离线</div><h3>Tao 自动追问需连接后端</h3><p class="muted">启动后端服务（Colab 用 ngrok 暴露）后，本状态会由 Tao 在「${PROBE_THEME[stage]}」主题内生成澄清式追问——规则约束、不驱动状态跳转、经 Output Guard 校验。</p>`;
+    grid.appendChild(note);
+    return;
   }
-  return out.slice(0, PROBE_BUDGET).map((q, i) => ({
-    id: `TAO_PROBE_${stage}_${i + 1}`, q, probe: true,
-    reason: `在「${PROBE_THEME[stage]}」主题内的规则约束追问，仅作补充线索、待医师复核`,
-  }));
+  try {
+    const res = await api.post('/api/followup_probe', casePayload({ stage, last_answers: state.fsm.lastAnswers[stage] || {}, budget: PROBE_BUDGET }));
+    const rt = res.tao_probe_runtime || {};
+    const probes = res.probes || [];
+    if (!probes.length) {
+      const note = document.createElement('article');
+      note.className = 'question-card tao-probe';
+      note.innerHTML = `<div class="question-meta">TAO 自动追问 · ${escapeHtml(rt.status || 'no_probe')}（${escapeHtml((res.tao || {}).backend || '')}）</div><h3>本轮无新增追问</h3><p class="muted">Tao 在规则约束内未生成新的追问，或被 Output Guard 回退到规则。</p>`;
+      grid.appendChild(note);
+      return;
+    }
+    probes.forEach(p => {
+      const q = { id: p.id, q: p.question, probe: true, reason: `${p.reason || '本状态主题内的澄清式追问'} · Tao ${rt.status}（${(res.tao || {}).backend || ''}）` };
+      grid.appendChild(renderQuestion(q, stage));
+    });
+  } catch (e) {
+    await api.health(); renderTaoBadge();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -637,34 +703,84 @@ function chatPlan(q) {
   return plan;
 }
 
-function chatAsk(q) {
+async function chatAsk(q) {
   if (!q || !q.trim()) return;
   q = q.trim();
+  const others = CHAT_INTENTS.filter(i => i.id !== 'capabilities').slice(0, 4).map(i => i.examples[0]);
+
+  // Backend-first: the language model genuinely routes / plans and invokes skills server-side.
+  if (taoOnline()) {
+    state.chat.history.push({ q, pending: true });
+    renderChatModule();
+    try {
+      const endpoint = state.chat.autonomous ? '/api/autonomous' : '/api/chat';
+      const res = await api.post(endpoint, casePayload({ question: q }));
+      state.chat.history.pop();
+      state.chat.history.push(state.chat.autonomous ? adaptAuto(q, res) : adaptChat(q, res));
+      return renderChatModule();
+    } catch (e) {
+      state.chat.history.pop();
+      await api.health();           // backend may have dropped; refresh status then fall back
+      renderTaoBadge();
+    }
+  }
+
+  // Offline fallback: client-side rules, labelled honestly (no fake Tao claims).
   if (!state.doctorMode && BLOCK_KW.some(k => q.includes(k))) {
     const a = chatAnswer('safety_block', q);
-    state.chat.history.push({ q, intent: 'safety_block', label: '安全拦截', method: 'guard', md: a.md, skills: a.skills, followups: ['有哪些危险信号需要排查？', '可以考虑哪些方剂路线？'] });
+    state.chat.history.push({ q, intent: 'safety_block', label: '安全拦截', method: 'guard', md: a.md, skills: a.skills, real: false, followups: ['有哪些危险信号需要排查？', '可以考虑哪些方剂路线？'] });
     return renderChatModule();
   }
-  const others = CHAT_INTENTS.filter(i => i.id !== 'capabilities').slice(0, 4).map(i => i.examples[0]);
   if (state.chat.autonomous) {
     const plan = chatPlan(q);
-    const steps = plan.map((p, i) => { const a = chatAnswer(p.intent, q); return { step: i + 1, intent: p.intent, label: p.label, reason: p.reason, md: a.md, skills: a.skills, usedLlm: !!a.usedLlm }; });
+    const steps = plan.map((p, i) => { const a = chatAnswer(p.intent, q); return { step: i + 1, intent: p.intent, label: p.label, reason: p.reason, md: a.md, skills: a.skills, usedLlm: false }; });
     const md = steps.length > 1
       ? `为回答此问题，自主规划了 ${steps.length} 步并委派子智能体：${steps.map(s => s.label).join(' → ')}。`
       : steps[0].md;
-    state.chat.history.push({ q, autonomous: true, plan, steps, label: '自主多步', method: taoEnabled() ? 'llm' : 'keyword', md, multiStep: steps.length > 1, usedLlm: steps.some(s => s.usedLlm), followups: others });
+    state.chat.history.push({ q, autonomous: true, plan, steps, label: '自主多步', method: 'keyword', md, multiStep: steps.length > 1, usedLlm: false, real: false, followups: others });
     return renderChatModule();
   }
   const route = chatRoute(q);
   const ans = chatAnswer(route.id, q);
-  state.chat.history.push({ q, intent: route.id, label: route.label, method: route.method, md: ans.md, skills: ans.skills, usedLlm: !!ans.usedLlm && route.id !== 'safety_block', followups: others });
+  state.chat.history.push({ q, intent: route.id, label: route.label, method: 'keyword', md: ans.md, skills: ans.skills, usedLlm: false, real: false, followups: others });
   renderChatModule();
+}
+
+// Adapt backend turn payloads into the chat-history shape the renderer expects.
+function adaptChat(q, res) {
+  const t = res.turn || {}; const tao = res.tao || {}; const rt = t.llm_routing || {};
+  return {
+    q, intent: t.intent, label: t.intent_label || t.label || t.intent, method: t.method,
+    md: t.answer, skills: t.skills || [], usedLlm: !!t.used_llm, real: true,
+    routingStatus: rt.status, backend: tao.backend, model: tao.model_id,
+    followups: t.suggested_followups || [],
+  };
+}
+function adaptAuto(q, res) {
+  const t = res.turn || {}; const tao = res.tao || {}; const rt = t.plan_runtime || {};
+  return {
+    q, autonomous: true, multiStep: !!t.multi_step, label: '自主多步', method: t.plan_method,
+    plan: (t.plan || []).map(p => ({ label: p.label })),
+    steps: (t.steps || []).map(s => ({ step: s.step, intent: s.intent, label: s.label, reason: s.reason, md: s.answer, usedLlm: !!s.used_llm })),
+    md: t.answer, usedLlm: !!t.used_llm, real: true, routingStatus: rt.status, backend: tao.backend, model: tao.model_id,
+    followups: CHAT_INTENTS.filter(i => i.id !== 'capabilities').slice(0, 4).map(i => i.examples[0]),
+  };
 }
 
 function renderChatModule() {
   pageTitle.textContent = '智能问答 · 语言模型自主选择技能并按提问挖掘';
   const h = state.chat.history;
   const bubbles = h.map(t => {
+    if (t.pending) {
+      return `<div class="chat-turn"><div class="bubble user">${escapeHtml(t.q)}</div><div class="bubble bot"><div class="bot-body muted">⏳ 正在调用语言模型选择技能并作答…（${escapeHtml(taoRuntimeTag())}）</div></div></div>`;
+    }
+    const isGuard = t.method === 'guard' || String(t.method || '').includes('guard') || t.intent === 'safety_block';
+    const realLlm = t.real && t.method === 'llm';
+    const routeWord = t.autonomous ? '规划' : '路由';
+    const routeTag = isGuard ? '安全护栏'
+      : t.real ? (realLlm ? `${routeWord}：Tao 选择 ✓${t.routingStatus ? '（' + t.routingStatus + '）' : ''}` : `${routeWord}：关键词回退`)
+      : `${routeWord}：关键词（离线）`;
+    const backendTag = t.real && t.backend ? `<span class="route-tag" title="语言模型运行时">${escapeHtml(t.backend)}${t.model ? ' · ' + escapeHtml(t.model) : ''}</span>` : '';
     const planHtml = t.autonomous && t.multiStep ? `
         <div class="plan-strip"><span class="plan-label">自主计划</span>${t.plan.map((p, i) => `<span class="plan-step">${i + 1}. ${p.label}</span>${i < t.plan.length - 1 ? '<span class="plan-arrow">→</span>' : ''}`).join('')}</div>` : '';
     const stepsHtml = t.autonomous && t.multiStep ? t.steps.map(s => `
@@ -673,11 +789,12 @@ function renderChatModule() {
     <div class="chat-turn">
       <div class="bubble user">${escapeHtml(t.q)}</div>
       <div class="bubble bot">
-        <div class="bot-meta"><span class="kind-badge ${t.intent === 'safety_block' ? 'rule' : 'llm'}">${t.label}</span>
-          <span class="route-tag">${t.autonomous ? '规划' : '路由'}：${t.method === 'llm' ? 'Tao 选择' : t.method === 'guard' ? '安全护栏' : '关键词'}</span>
+        <div class="bot-meta"><span class="kind-badge ${isGuard ? 'rule' : (realLlm ? 'llm' : 'rule')}">${t.label}</span>
+          <span class="route-tag">${routeTag}</span>
+          ${backendTag}
           ${t.autonomous && t.multiStep ? `<span class="route-tag">子智能体 ${t.steps.length} 个</span>` : ''}
           ${t.usedLlm ? '<span class="kind-badge llm-on">Tao 在环</span>' : ''}
-          ${!t.autonomous ? `<span class="route-tag">技能：${(t.skills || []).join(' / ')}</span>` : ''}
+          ${!t.autonomous && t.skills ? `<span class="route-tag">技能：${(t.skills || []).join(' / ')}</span>` : ''}
         </div>
         ${planHtml}
         ${t.autonomous && t.multiStep ? `<div class="bot-body synth">${mdLite(t.md)}</div>` : ''}
@@ -690,10 +807,13 @@ function renderChatModule() {
     <div class="starter-group"><span class="starter-title">${g.group}</span>
       <div class="chip-row">${g.items.map(i => `<button class="chip-btn" data-q="${escapeHtml(i.examples[0])}" title="${i.label}">${i.examples[0]}</button>`).join('')}</div>
     </div>`).join('');
+  const statusLine = taoOnline()
+    ? `Tao 在线（${taoRuntimeTag()}）· 语言模型自主选择技能，并结合沈氏经验规则与脱敏数据进行辨证论治分析（供执业医师审核）`
+    : '离线·规则模式（未连接 Tao 后端）· 仅显示确定性规则要点 · 启动后端服务后由语言模型给出深度分析';
   screen.innerHTML = `
     <section class="result-panel">
-      <p class="eyebrow">draft_for_clinician_review · 语言模型仅用于技能选择与措辞 · 确定性规则/挖掘数据作答</p>
-      <div class="chat-window">${bubbles || '<p class="muted">向我提问腰痹辨证、方药、安全、数据挖掘或经验总结。语言模型会自主选择对应技能，并用规则与脱敏数据作答。开启「自主多步」可让智能体把复杂问题拆解、委派给多个子智能体并综合作答。</p>'}</div>
+      <p class="eyebrow">draft_for_clinician_review · ${statusLine}</p>
+      <div class="chat-window">${bubbles || '<p class="muted">向我提问腰痹辨证、方药、安全、数据挖掘或经验总结。连接 Tao 后端后，语言模型会自主选择对应技能并用规则与脱敏数据作答；开启「自主多步」可让智能体把复杂问题拆解、委派给多个子智能体并综合作答。</p>'}</div>
       <div class="chat-toolbar"><label class="fsm-setting"><input type="checkbox" id="autoModeToggle" ${state.chat.autonomous ? 'checked' : ''} />自主多步（规划+子智能体委派）</label><span class="muted">复合问题（如“是什么证型、用什么方、有何风险”）会被拆成多步</span></div>
       <div class="chat-input"><input id="chatInput" type="text" placeholder="输入问题，如：这个病人是什么证型、用什么方、有什么风险？" /><button class="primary-btn" id="chatSend">发送</button>${h.length ? '<button class="ghost-btn" id="chatClear">清空</button>' : ''}</div>
     </section>
@@ -713,7 +833,26 @@ function renderChatModule() {
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-function mdLite(s) { return escapeHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br/>'); }
+// Small Markdown renderer: headings / bullet lists / blockquotes / bold — for the long,
+// professional Tao consultation answers (not just **bold** + line breaks).
+function mdLite(s) {
+  const lines = escapeHtml(String(s == null ? '' : s)).split('\n');
+  const out = [];
+  let inList = false;
+  const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+  for (const raw of lines) {
+    const line = raw.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    const bullet = line.match(/^\s*[-•]\s+(.*)$/);
+    if (h) { closeList(); const lvl = Math.min(6, h[1].length + 3); out.push(`<h${lvl} class="md-h">${h[2]}</h${lvl}>`); }
+    else if (bullet) { if (!inList) { out.push('<ul class="md-ul">'); inList = true; } out.push(`<li>${bullet[1]}</li>`); }
+    else if (/^&gt;\s*/.test(line)) { closeList(); out.push(`<blockquote class="md-quote">${line.replace(/^&gt;\s*/, '')}</blockquote>`); }
+    else if (line.trim() === '') { closeList(); out.push('<div class="md-gap"></div>'); }
+    else { closeList(); out.push(`<p class="md-p">${line}</p>`); }
+  }
+  closeList();
+  return out.join('');
+}
 
 // ---------------------------------------------------------------------------
 // Multi-agent collaboration (mirrors backend AgentOrchestrator trace)
@@ -737,7 +876,7 @@ function buildAgentTrace() {
   const c = buildCase();
   const syn = inferSyndromes();
   const urgent = getRedFlagStatus().status === 'urgent';
-  const llm = taoEnabled();
+  const llm = false;   // offline client mirror: Tao is only ever in the loop via the backend
   const summary = {
     CaseStructuringAgent: `结构化 ${c.tags.length} 个标签，刷新沈老经验信号。`,
     RedFlagAgent: urgent ? '命中红旗危险信号，自主中止下游临床协作。' : '未见急诊级红旗，放行下游协作。',
@@ -771,18 +910,37 @@ function buildAgentTrace() {
 
 function renderAgentsModule() {
   pageTitle.textContent = '智能体协作 · 多智能体在共享黑板上的自主协作';
-  const { trace, llm, urgent } = buildAgentTrace();
-  const usedLlm = trace.filter(t => t.used_llm).map(t => t.name);
+  paintAgents(buildAgentTrace(), false);   // immediate paint (offline client mirror)
+  if (taoOnline()) {                        // then replace with the real backend orchestrator run
+    api.post('/api/collaboration', casePayload()).then(res => {
+      const trace = (res.collaboration_trace || []).map(t => ({
+        name: t.agent, role: t.role, kind: t.kind, status: t.status, summary: t.summary,
+        confidence: t.confidence, used_llm: !!t.used_llm, handoff: (t.handoff_to || []).join('、'),
+      }));
+      paintAgents({ trace, llm: !!res.llm_in_loop, urgent: !!res.halted, usedLlm: res.used_llm_agents || [], real: true, tao: res.tao }, true);
+    }).catch(async () => { await api.health(); renderTaoBadge(); });
+  }
+}
+
+function paintAgents(model, real) {
+  if (state.module !== 'agents') return;   // user navigated away before the fetch resolved
+  const trace = model.trace || [];
+  const urgent = model.urgent;
+  const usedLlm = (model.usedLlm && model.usedLlm.length) ? model.usedLlm : trace.filter(t => t.used_llm).map(t => t.name);
+  const llmInLoop = real ? model.llm : false;   // offline mirror can never claim Tao is in the loop
   const statusCn = { ok: '完成', halt: '自主中止', skipped: '已跳过', escalate: '升级复核', blocked: '阻断' };
+  const source = real
+    ? `后端 AgentOrchestrator 实时返回 · ${escapeHtml((model.tao || {}).backend || '')} · ${escapeHtml((model.tao || {}).model_id || '')}`
+    : (taoOnline() ? '正在向后端请求实时协作…' : '离线·客户端镜像（未连接后端，Tao 不在环）');
   screen.innerHTML = `
     <div class="stat-grid">
       <article class="stat-card"><p class="eyebrow">参与智能体</p><strong>${trace.length}</strong><span>规则 + 语言模型协同</span></article>
-      <article class="stat-card"><p class="eyebrow">语言模型在环</p><strong>${llm && !urgent ? '是' : '否'}</strong><span>${usedLlm.join('、') || 'Tao 未启用/被中止'}</span></article>
+      <article class="stat-card"><p class="eyebrow">语言模型在环</p><strong>${llmInLoop ? '是' : '否'}</strong><span>${usedLlm.join('、') || (real ? 'Tao 被守卫回退/中止' : '离线未调用')}</span></article>
       <article class="stat-card"><p class="eyebrow">自主控制</p><strong>${urgent ? '红旗中止' : '正常放行'}</strong><span>红旗智能体可中止下游</span></article>
-      <article class="stat-card"><p class="eyebrow">协作机制</p><strong>共享黑板</strong><span>读上游 / 写本体 / 显式接力</span></article>
+      <article class="stat-card"><p class="eyebrow">数据来源</p><strong>${real ? '实时后端' : (taoOnline() ? '加载中' : '离线')}</strong><span>${real ? '确定性为准·语言模型受守卫' : '客户端镜像'}</span></article>
     </div>
-    <section class="result-panel"><p class="eyebrow">draft_for_clinician_review · 确定性为准 · 语言模型受守卫</p>
-      <h3>协作时间轴（与后端 AgentOrchestrator 一致）</h3>
+    <section class="result-panel"><p class="eyebrow">draft_for_clinician_review · ${source}</p>
+      <h3>协作时间轴（后端 AgentOrchestrator）</h3>
       <ol class="agent-timeline">${trace.map((t, i) => `
         <li class="agent-step ${t.status}">
           <div class="agent-head">
@@ -791,7 +949,7 @@ function renderAgentsModule() {
             <span class="kind-badge ${t.kind}">${t.kind === 'llm' ? '语言模型' : '规则'}</span>
             ${t.used_llm ? '<span class="kind-badge llm-on">Tao 在环</span>' : ''}
             <span class="agent-status ${t.status}">${statusCn[t.status] || t.status}</span>
-            ${t.confidence != null ? `<span class="agent-conf">置信度 ${t.confidence.toFixed(2)}</span>` : ''}
+            ${t.confidence != null ? `<span class="agent-conf">置信度 ${Number(t.confidence).toFixed(2)}</span>` : ''}
           </div>
           <p class="agent-role">${t.role}</p>
           <p class="agent-summary">${t.summary}</p>
@@ -819,10 +977,25 @@ function renderReasoningModule() {
         <ol class="reason-chain">${chain.map(s => `<li><strong>${s.t}</strong><p>${s.c}</p></li>`).join('')}</ol>
       </section>
       <section class="result-panel"><h3>Tao 推理叠加层</h3>
-        <p class="muted">在「智能问诊」开启 <strong>Tao 自动追问</strong> 并配置后端 <code>TAO_BACKEND=transformers</code> 后，<code>physician_reasoning_skill</code> 会把推理链语言化为辨证教学解释，经 JSON Repair + Output Guard 校验；出现最终诊断/处方/用量即回退规则链。以下为规则派生示例叙述：</p>
-        <pre class="report-box">${narrative}</pre>
+        <p class="muted" id="taoReasoningNote">配置后端 <code>TAO_BACKEND=transformers</code>（或 mock/http）后，<code>physician_reasoning_skill</code> 会把推理链语言化为辨证教学解释，经 JSON Repair + Output Guard 校验；出现最终诊断/处方/用量即回退规则链。${taoOnline() ? '正在请求后端实时推理…' : '当前离线，以下为规则派生示例叙述：'}</p>
+        <pre class="report-box" id="taoReasoningBox">${narrative}</pre>
       </section>
     </div>`;
+  if (taoOnline()) enhanceWithBackend('/api/reasoning', 'taoReasoningBox', 'taoReasoningNote');
+}
+
+// Replace a client-side mirror panel with the genuine backend (Tao-in-the-loop) output.
+async function enhanceWithBackend(path, boxId, noteId) {
+  try {
+    const res = await api.post(path, casePayload());
+    const r = res.result || {};
+    const box = document.querySelector('#' + boxId);
+    if (box && r.answer) box.textContent = r.answer;
+    const note = noteId && document.querySelector('#' + noteId);
+    if (note) note.innerHTML = `后端实时返回：<code>${escapeHtml((res.tao || {}).backend || '')} · ${escapeHtml((res.tao || {}).model_id || '')}</code>${r.used_llm ? ' · <strong>Tao 在环（已采纳）</strong>' : ' · Tao 未采纳/已回退规则'}${r.skills && r.skills.length ? ' · 技能：' + escapeHtml(r.skills.join(' / ')) : ''}`;
+  } catch (e) {
+    await api.health(); renderTaoBadge();
+  }
 }
 
 function renderSummaryModule() {
@@ -844,10 +1017,11 @@ function renderSummaryModule() {
   }
   screen.innerHTML = `
     <div class="panel-grid">
-      <section class="result-panel"><p class="eyebrow">draft_for_clinician_review · 单案模式</p><h3>医案按语（当前病例）</h3><pre class="report-box">${caseMd}</pre></section>
+      <section class="result-panel"><p class="eyebrow">draft_for_clinician_review · 单案模式</p><h3>医案按语（当前病例）</h3><pre class="report-box" id="summaryCaseBox">${caseMd}</pre></section>
       <section class="result-panel"><p class="eyebrow">experience 模式 · 脱敏统计</p><h3>沈钦荣腰痹经验规律总结</h3>${expHtml}</section>
     </div>
-    <section class="result-panel"><h3>Tao 自动生成说明</h3><p class="muted"><code>case_experience_summary_skill</code> 在后端把上述结构化要点交给 Tao 润色为按语/经验总结，经 Output Guard 校验，不得新增数据外结论、不得产出最终诊断或可执行处方；失败回退确定性模板。</p></section>`;
+    <section class="result-panel"><h3>Tao 自动生成说明</h3><p class="muted" id="summaryNote"><code>case_experience_summary_skill</code> 在后端把上述结构化要点交给 Tao 润色为按语/经验总结，经 Output Guard 校验，不得新增数据外结论、不得产出最终诊断或可执行处方；失败回退确定性模板。${taoOnline() ? '正在请求后端实时生成…' : '（当前离线，显示规则派生模板）'}</p></section>`;
+  if (taoOnline()) enhanceWithBackend('/api/summary', 'summaryCaseBox', 'summaryNote');
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,4 +1204,12 @@ function renderSettingsModule() {
 
 document.querySelector('#doctorModeBtn').addEventListener('click', () => { state.doctorMode = !state.doctorMode; alert(state.doctorMode ? '已进入医生/研究者模式' : '已进入患者简洁模式'); });
 document.querySelector('#exportJsonBtn').addEventListener('click', () => download('yaobi-case.json', JSON.stringify(buildReport().json, null, 2)));
-render(); updatePreview();
+render(); updatePreview(); renderTaoBadge();
+
+// Detect the backend on load; if the Tao server is reachable, the UI switches from the
+// offline rule mirror to genuine language-model-driven skill calls and re-renders honestly.
+(async function initBackend() {
+  await api.health();
+  renderTaoBadge();
+  render();   // re-render the current module now that online/offline status is known
+})();

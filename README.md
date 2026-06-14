@@ -49,11 +49,32 @@ TAO_BACKEND=mock python -m backend.main --text "患者女，68岁，腰痛反复
 TAO_BACKEND=transformers TAO_MAX_NEW_TOKENS=512 python -m backend.main --tao-chat "请基于规则线索解释本案" --stream
 ```
 
+## 本地 / 服务器运行（真·Tao 在环 UI）
+
+`backend/server.py` 是一个零额外依赖（stdlib `http.server`）的 HTTP 服务，**同源提供前端 UI 与 `/api/*` 接口**。前端不再用浏览器端关键词规则模拟，而是调用后端，让语言模型**真正自主选择并调用 skill、自主问诊、并作为主推理者给出深度专业回答**：语言模型把候选证型/方剂/用药/安全等规则证据作为依据，结合自身中医知识输出长篇辨证论治分析（`tao_consultation_skill` + `generate_consultation`），追问由模型自主生成（`generate_probe_questions`）。安全采用**角色感知守卫** `guard_consultation`：医师/科研草案可含方剂、方义与经验剂量范围，但任何角色都不得出现"患者自行服用/无需就医"，患者角色保持严格（无诊断/处方/可执行剂量），违规即回退确定性规则。
+
+```bash
+pip install -e .
+# 选 Tao 运行时（默认 disabled）：mock 验证 / 本地 transformers / 外部 http 接口
+TAO_BACKEND=transformers TAO_MODEL_ID=CMLM/Dao1-30b-a3b TAO_LOAD_IN_4BIT=true \
+  python -m backend.server --port 8000
+# 打开 http://localhost:8000 —— 右上角显示「Tao 在线」徽章；method=llm 即模型真实路由
+```
+
+| UI 模块 | 端点 | 语言模型真实职责 |
+|---|---|---|
+| 智能问答 | `POST /api/chat` | `route_skill` 在受限技能集内真实选择 skill（JSON 修复 + 越界回退） |
+| 自主多步 | `POST /api/autonomous` | `plan_skills` 真实规划多步并委派子智能体 |
+| Tao 自动追问 | `POST /api/followup_probe` | 规则约束内真实生成澄清式追问（经 Output Guard） |
+| 智能体协作 | `POST /api/collaboration` | `ReasoningAgent`/`ExperienceAgent` 真实调用 Tao |
+
+只有模型真正路由时 UI 才标 `Tao 选择 ✓`，否则如实标 `关键词回退`/`离线`；安全护栏与 Output Guard 服务端强制。`TAO_LOAD_IN_4BIT`/`TAO_LOAD_IN_8BIT` 让 30B MoE 适配单卡 A100/L4（需 `bitsandbytes`）。未连接后端时前端自动回退到本地规则镜像并如实标注。
+
 ## Colab 一键复现（含 ngrok 公网 UI）
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pariskang/Yao-Bi-Agent/blob/claude/focused-planck-3dv9we/colab/YaoBi_Skill_Colab.ipynb)
 
-[`colab/YaoBi_Skill_Colab.ipynb`](colab/YaoBi_Skill_Colab.ipynb) 在 Google Colab 上一键复现全部功能，并通过 **ngrok** 把完整前端 UI（11 个模块）暴露为公网链接：依次运行单元格即可托管 `frontend/` 静态站点、获取 `https://xxxx.ngrok-free.app` 公网链接，并复现后端规则管线、多智能体协作、全量测试（85 项）、脱敏挖掘与可选 Tao 叠加。详见 [`colab/README.md`](colab/README.md)。前端是零依赖静态 SPA、逻辑在浏览器端自洽运行、不依赖后端 API，所以"复现 UI"即用 `http.server` 托管 `frontend/` 并经 ngrok 映射。
+[`colab/YaoBi_Skill_Colab.ipynb`](colab/YaoBi_Skill_Colab.ipynb) 在 Google Colab 上一键复现全部功能：启动 `backend.server`（默认本地 4-bit 加载 `CMLM/Dao1-30b-a3b`，需 A100/L4）、经 **ngrok** 暴露 `https://xxxx.ngrok-free.app` 公网链接，UI 即可**真正调用语言模型**自主选择技能与问诊，并复现规则管线、多智能体协作、全量测试与脱敏挖掘。无 GPU 时可在笔记本第 ② 步切换 mock / 小模型 / 外部 HTTP 接口。详见 [`colab/README.md`](colab/README.md)。
 
 ## 自动问诊：YaoBi-CaseGuide Skill
 
@@ -170,6 +191,7 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 config/          Hermes、模型和安全配置
 rules/           YAML 规则库（含 11_mined_rule_candidates.yaml 挖掘候选规则）
 backend/         轻量 Python 技能、规则引擎和 CLI
+backend/server.py 零依赖 HTTP 服务：同源托管前端 UI 与真·Tao /api/* 接口
 backend/agents/  多智能体编排层：共享黑板、智能体定义、AgentOrchestrator 协作轨迹
 backend/llm/     Dao1/Tao Runtime、JSON repair、输出安全校验与提示模板
 backend/mining/  xlsx 医案脱敏挖掘管道（频次/关联规则/签名方剂/剂量分布）

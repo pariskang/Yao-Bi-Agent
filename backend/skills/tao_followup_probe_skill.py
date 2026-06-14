@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
-from backend.llm.output_guard import guard_tao_output
+from backend.llm.output_guard import guard_probe, guard_tao_output
 
 # 各状态的临床主题（约束 Tao 追问只能停留在本状态主题内）。
 STATE_THEME = {
@@ -20,6 +21,39 @@ STATE_THEME = {
 PROBE_ENABLED_STATES = set(STATE_THEME)
 
 
+def _parse_question_lines(raw: str | None, max_n: int) -> list[str]:
+    """Robustly pull clarifying questions out of the model's free-form output."""
+
+    out: list[str] = []
+    for line in (raw or "").splitlines():
+        s = re.sub(r"^[\-\*•·\d\.\、\)\）\s]+", "", line).strip()
+        if len(s) < 5:
+            continue
+        out.append(s)
+        if len(out) >= max_n:
+            break
+    return out
+
+
+def _freeform_probes(raw: str | None, state: str, max_probes: int) -> list[dict[str, Any]]:
+    probes: list[dict[str, Any]] = []
+    for index, question in enumerate(_parse_question_lines(raw, max_probes)):
+        if not guard_probe(question)["allowed"]:
+            continue  # a question that leaked diagnosis/dose is dropped
+        probes.append({
+            "id": f"TAO_PROBE_{state}_{index + 1}",
+            "question": question,
+            "field_hint": None,
+            "reason": "Tao 结合患者已述信息，在本状态主题内自主提出的澄清式追问（待医师复核）。",
+            "source": "tao_probe",
+            "rule_constrained": True,
+            "state": state,
+            "input_type": "free_text",
+            "advisory_only": True,
+        })
+    return probes[:max_probes]
+
+
 def tao_followup_probe_skill(
     case_state: dict[str, Any],
     state: str,
@@ -30,15 +64,15 @@ def tao_followup_probe_skill(
     dao_client: DaoClient | None = None,
     use_llm: bool = False,
 ) -> dict[str, Any]:
-    """Let Tao generate bounded, rule-constrained follow-up probes.
+    """Let Tao **autonomously generate** rule-bounded follow-up probes (model is primary).
 
-    与 ``tao_question_planner_skill``（只能重排/改写既有规则问题）不同，本技能允许 Tao
-    在“当前状态临床主题”内**生成新的澄清式追问**，但施加硬约束：
+    The model freely asks the next clarifying questions for the current clinical theme
+    (parsed robustly from free-form output and guarded so no diagnosis/prescription/dose
+    leaks); a structured JSON contract is kept as a secondary path. Hard constraints remain:
 
-    * 只在 clinical-content 状态启用（红旗筛查/知情/基础人口学不开放生成式追问）；
-    * 每轮最多 ``max_probes`` 个追问，且不驱动状态跳转（仅作为补充线索）；
-    * ``field_hint`` 必须取自 ``allowed_fields`` 或为 null；
-    * 输出经 JSON 修复与 ``guard_tao_output`` 校验，出现诊断/处方/剂量即整轮作废回退。
+    * only enabled in clinical-content states (red-flag / consent / demographics are off);
+    * at most ``max_probes`` per turn, advisory only — they never drive a state jump;
+    * each probe passes ``guard_probe``; on any failure it falls back to no probe.
     """
 
     meta: dict[str, Any] = {
@@ -72,13 +106,24 @@ def tao_followup_probe_skill(
     }
     client = dao_client or DaoClient()
     meta["backend"] = client.config.backend
+
+    # Primary path: the model autonomously asks the questions (free-form, robustly parsed).
+    try:
+        probes = _freeform_probes(client.generate_probe_questions(payload), state, max_probes)
+        if probes:
+            meta.update({"status": "accepted", "fallback_used": False, "mode": "freeform"})
+            return {"probes": probes, "tao_probe_runtime": meta}
+    except (DaoRuntimeError, ValueError, TypeError) as exc:
+        meta["freeform_error"] = str(exc)
+
+    # Secondary path: structured JSON contract with field hints (also guarded).
     try:
         raw = client.generate_followup_probes(payload)
         parsed, repair_meta = loads_with_repair(raw)
         if not isinstance(parsed, dict) or not isinstance(parsed.get("probes"), list):
             raise JsonRepairError("Tao probe output must be an object with a probes list.")
         allowed_set = set(allowed)
-        probes: list[dict[str, Any]] = []
+        probes = []
         guard_text_parts: list[str] = []
         for index, item in enumerate(parsed["probes"]):
             if not isinstance(item, dict):
@@ -88,7 +133,6 @@ def tao_followup_probe_skill(
                 continue
             field_hint = item.get("field_hint")
             if field_hint is not None and field_hint not in allowed_set:
-                # 越界 field_hint 不直接采纳为结构化字段，降级为纯文字线索。
                 field_hint = None
             reason = str(item.get("reason") or "").strip()
             guard_text_parts.extend([probe_text, reason])
@@ -104,7 +148,7 @@ def tao_followup_probe_skill(
                 "advisory_only": True,
             })
         guard = guard_tao_output("\n".join(guard_text_parts), parsed)
-        meta.update({"json_repair": repair_meta, "guard": guard, "status": "accepted" if guard["allowed"] and probes else "guard_rejected"})
+        meta.update({"json_repair": repair_meta, "guard": guard, "status": "accepted" if guard["allowed"] and probes else "guard_rejected", "mode": "structured"})
         if not guard["allowed"] or not probes:
             return {"probes": [], "tao_probe_runtime": meta}
         meta["fallback_used"] = False
