@@ -1,6 +1,7 @@
 const modules = [
   { id: 'dashboard', label: '总览看板', icon: '◧' },
   { id: 'intake', label: '智能问诊', icon: '✚' },
+  { id: 'chat', label: '智能问答', icon: '✦' },
   { id: 'agents', label: '智能体协作', icon: '⇄' },
   { id: 'reasoning', label: '经验推理', icon: '❖' },
   { id: 'summary', label: '经验总结', icon: '✎' },
@@ -27,6 +28,7 @@ const steps = [
 
 const featureMatrix = [
   ['多智能体协作', '11 个智能体在共享黑板上自主接力：规则智能体为主、语言模型智能体受守卫，红旗智能体可自主中止下游。'],
+  ['多轮智能问答', '语言模型在受限技能集内自主选择并调用对应 skill，按用户提问挖掘脱敏数据，附示例问题引导提问。'],
   ['CaseGuide FSM', '有限状态机分阶段问诊，默认每个状态最多 3 轮追问（可设置 1–5 轮）、每轮最多 3 问，答完可自动进入下一状态。'],
   ['Tao 自动追问', '在规则约束下由 Tao 生成本状态主题内的澄清式追问，仅作补充线索、不驱动状态跳转，违规即回退。'],
   ['经验辨证推理', '规则派生辨证推理链（症状→证候→治法→方剂→安全），Tao 语言化叠加并经 Output Guard 校验。'],
@@ -94,6 +96,7 @@ const state = {
   module: localStorage.getItem('yaobi-module') || 'dashboard',
   step: 0,
   doctorMode: true,
+  chat: { history: [] },
   answers: JSON.parse(localStorage.getItem('yaobi-case') || '{}'),
   fsm: JSON.parse(localStorage.getItem('yaobi-fsm') || '{\"rounds\":{},\"lastAnswers\":{}}'),
 };
@@ -230,6 +233,7 @@ function render() {
   document.querySelector('.app-shell').classList.toggle('wide', !intake);
   if (!intake) {
     if (state.module === 'dashboard') return renderDashboard();
+    if (state.module === 'chat') return renderChatModule();
     if (state.module === 'agents') return renderAgentsModule();
     if (state.module === 'reasoning') return renderReasoningModule();
     if (state.module === 'summary') return renderSummaryModule();
@@ -544,6 +548,140 @@ function buildReasoningChain() {
   ];
   return { chain, top, therapy, syn, c };
 }
+
+// ---------------------------------------------------------------------------
+// Conversational Q&A (mirrors backend ConversationSession + skill_router)
+// ---------------------------------------------------------------------------
+
+const CHAT_INTENTS = [
+  { id: 'syndrome_inquiry', label: '证候辨析', group: '辨证论治', kw: ['证型', '证候', '辨证', '什么证', '寒湿', '血瘀', '肝肾', '少阳', '气血'], examples: ['这个病人偏向什么证型？', '为什么考虑气血痹阻证？'] },
+  { id: 'reasoning_inquiry', label: '辨证推理', group: '辨证论治', kw: ['思路', '推理', '为什么这样', '辨证论治', '怎么分析', '治法'], examples: ['从症状到治法是怎么推的？', '讲讲这个案子的推理过程'] },
+  { id: 'formula_inquiry', label: '方剂路线', group: '辨证论治', kw: ['方剂', '方子', '用什么方', '主方', '路线', '独活寄生', '当归四逆', '桂枝芍药知母'], examples: ['可以考虑哪些方剂路线？', '下肢麻木倾向哪条方剂路线？'] },
+  { id: 'herb_inquiry', label: '用药模块', group: '辨证论治', kw: ['药物', '用药', '中药', '模块', '功效', '通络', '祛风', '补肝肾', '虫类'], examples: ['对应哪些用药功效模块？', '有没有通络相关的药物模块？'] },
+  { id: 'safety_inquiry', label: '安全审查', group: '安全与风险', kw: ['安全', '风险', '冲突', '禁忌', '高风险', '毒性', '配伍'], examples: ['这个方案有什么用药安全风险？', '有没有配伍冲突？'] },
+  { id: 'red_flag_inquiry', label: '红旗排查', group: '安全与风险', kw: ['红旗', '危险信号', '急诊', '马尾', '肿瘤', '感染', '骨折', '无力'], examples: ['有哪些危险信号需要排查？', '什么情况要立刻去医院？'] },
+  { id: 'dose_inquiry', label: '剂量经验', group: '安全与风险', kw: ['剂量', '用量', '多少克', '几克', '克数'], examples: ['细辛常用多少量？', '附片的剂量分布是怎样的？'] },
+  { id: 'mining_inquiry', label: '数据挖掘', group: '数据挖掘', kw: ['数据', '多少例', '最多', '统计', '规律', '占比', '分布', '关联', '几个'], examples: ['数据里哪个证型最多？', '气血痹阻证最常用什么方？', '下肢麻木对应什么方剂？'] },
+  { id: 'evidence_inquiry', label: '证据回溯', group: '数据挖掘', kw: ['证据', '依据', 'support', 'confidence', 'lift', '回溯', '规则来源', '出处'], examples: ['这些建议的挖掘证据是什么？', '匹配到哪些候选规则？'] },
+  { id: 'experience_inquiry', label: '经验总结', group: '经验与系统', kw: ['总结', '按语', '经验', '复盘', '医案小结', '规律总结'], examples: ['总结一下这个医案', '概括沈老腰痹用药经验规律'] },
+  { id: 'agent_inquiry', label: '协作机制', group: '经验与系统', kw: ['智能体', '协作', 'agent', '编排', '黑板', '怎么工作', '流程'], examples: ['这些智能体是怎么协作的？', '红旗命中后流程怎么走？'] },
+  { id: 'capabilities', label: '功能引导', group: '经验与系统', kw: ['能问什么', '帮助', '怎么用', '功能', '可以做什么', 'help'], examples: ['我可以问你哪些问题？', '你能做什么？'] },
+];
+const BLOCK_KW = ['完整处方', '开方', '开个方', '给我方子', '最终诊断', '确诊'];
+
+function chatRoute(q) {
+  const text = (q || '').toLowerCase();
+  if (!state.doctorMode && BLOCK_KW.some(k => q.includes(k))) return { id: 'safety_block', label: '安全拦截', method: 'guard' };
+  let best = CHAT_INTENTS.find(i => i.id === 'capabilities'), score = 0;
+  CHAT_INTENTS.forEach(i => { const n = i.kw.filter(k => text.includes(k.toLowerCase())).length; if (n > score) { score = n; best = i; } });
+  return { ...best, method: taoEnabled() ? 'llm' : 'keyword', score };
+}
+
+function chatQueryMined(q) {
+  if (!MINED) return '尚未加载脱敏挖掘数据，请先运行挖掘管道。';
+  const zheng = (MINED.dataset_stats || {}).zheng_distribution || {};
+  for (const [name, count] of Object.entries(zheng)) {
+    if (name && q.includes(name)) {
+      const routes = (MINED.formula_signature_hits || []).filter(h => Object.keys(h.by_zheng || {})[0] === name).slice(0, 4).map(h => `${h.formula}(${h.n_cases}例)`);
+      return `「${name}」在脱敏样本中出现 **${count}** 例。${routes.length ? '关联主方路线：' + routes.join('、') : ''}`;
+    }
+  }
+  for (const h of (MINED.formula_signature_hits || [])) { if (q.includes(h.formula)) return `「${h.formula}」命中 **${h.n_cases}** 张处方，主对应证型「${Object.keys(h.by_zheng || {})[0] || '—'}」。`; }
+  for (const [herb, d] of Object.entries(MINED.dose_table || {})) { if (q.includes(herb)) return `「${herb}」经验剂量：常用 ${d.mode_g} 克（${d.min_g}–${d.max_g} 克，n=${d.n}）。仅为医师端研究分布，非可执行医嘱。`; }
+  for (const [kw, tag] of Object.entries({ 麻木: 'lower_limb_numbness', 放射: 'radiating_leg_pain', 遇冷: 'cold_aggravation', 口苦: 'bitter_taste', 失眠: 'insomnia', 高龄: 'elderly', 骨质疏松: 'osteoporosis' })) {
+    if (q.includes(kw)) {
+      const assoc = (MINED.rule_candidates || []).filter(r => String(r.rule_type).includes('association') && r.if && r.if.tag === tag).slice(0, 5);
+      if (assoc.length) return `「${kw}」相关挖掘关联规律：\n` + assoc.map(r => `- ${kw} → ${Object.values(r.then)[0]}（support ${r.statistics.support}，confidence ${r.statistics.confidence}，lift ${r.statistics.lift}）`).join('\n');
+    }
+  }
+  const s = MINED.dataset_stats || {};
+  const topZ = Object.entries(zheng).slice(0, 4).map(([k, v]) => `${k}(${v})`).join('、');
+  const topF = (MINED.formula_signature_hits || []).slice(0, 4).map(h => `${h.formula}(${h.n_cases})`).join('、');
+  return `脱敏样本 ${s.n_cases || '—'} 例（含处方 ${s.n_with_prescription || '—'} 例）。高频证型：${topZ || '—'}。核心方剂路线：${topF || '—'}。`;
+}
+
+function chatAnswer(intent, q) {
+  const c = buildCase();
+  const syn = inferSyndromes();
+  const llm = taoEnabled();
+  switch (intent) {
+    case 'safety_block': return { md: '不能生成最终诊断、完整处方或患者可执行剂量；可以提供候选证型、方剂路线信号、用药模块解释（无剂量）和医生复核清单。', skills: ['patient_request_guard_skill'] };
+    case 'syndrome_inquiry': return { md: '候选证型（倾向，非最终诊断）：\n' + syn.slice(0, 4).map(s => `- ${s.name}：${s.ev.join('、')}`).join('\n'), skills: ['syndrome_router_skill'] };
+    case 'reasoning_inquiry': { const r = buildReasoningChain(); return { md: '辨证推理链（倾向性）：\n' + r.chain.map((s, i) => `${i + 1}. ${s.t}：${s.c}`).join('\n'), skills: ['physician_reasoning_skill'], usedLlm: llm }; }
+    case 'formula_inquiry': return { md: '候选方剂路线信号（非处方）：\n' + (c.modules.length ? c.modules.map(m => `- ${m}`).join('\n') : '- 信息待补充'), skills: ['formula_base_selector_skill'] };
+    case 'herb_inquiry': return { md: '用药功效模块草案（需医师审核，无剂量）：\n' + (c.modules.length ? c.modules.map(m => `- ${m}`).join('\n') : '- 待补充'), skills: ['herb_module_composer_skill'] };
+    case 'safety_inquiry': return { md: `安全状态：**${c.red.status}**。附片/细辛/全蝎/蜈蚣等高风险药需医师重点复核；注意孕期、抗凝、肝肾功能与胃肠风险。`, skills: ['safety_guard_skill', 'conflict_checker_skill'] };
+    case 'red_flag_inquiry': return { md: `红旗筛查状态：**${c.red.status}**。四类需立即排查：\n- 马尾综合征（大小便障碍、会阴麻木）\n- 肿瘤风险（肿瘤史、消瘦、夜间痛进行性加重）\n- 感染风险（发热寒战、近期感染）\n- 骨折风险（外伤、长期激素、重度骨质疏松骤发剧痛）`, skills: ['red_flag_screen_skill'] };
+    case 'dose_inquiry': return { md: chatQueryMined(q), skills: ['xlsx_dose_mining'] };
+    case 'mining_inquiry': return { md: chatQueryMined(q), skills: ['xlsx_case_miner'] };
+    case 'evidence_inquiry': { const ev = MINED ? (MINED.rule_candidates || []).filter(r => { const t = r.if && r.if.tag; return t && (c.tags.includes(t) || (t.startsWith('zheng::') && t.split('::')[1] === syn[0].name)); }).slice(0, 6) : []; return { md: ev.length ? '匹配到的挖掘候选规则（待专家审核）：\n' + ev.map(r => `- ${r.rule_id}：${Object.values(r.then)[0]}（lift ${r.statistics.lift || '—'}）`).join('\n') : '当前病例标签未匹配到挖掘候选规则，或挖掘数据未加载。', skills: ['mined_evidence_skill'] }; }
+    case 'experience_inquiry': { const r = buildReasoningChain(); return { md: `医案按语（教学复盘）：\n- 辨证倾向「${r.top.name}」\n- 治法：${r.therapy}\n- 选方用药：${c.modules.join('、') || '待补充'}\n- 沈老经验：温通经络、益气养血、顾护肝肾脾胃与少阳枢机`, skills: ['case_experience_summary_skill'], usedLlm: llm }; }
+    case 'agent_inquiry': return { md: '多智能体在共享黑板上自主协作：CaseStructuring → RedFlag → OrthoRisk → TcmSyndrome → FormulaReasoning → HerbModule → ConflictSafety → EvidenceTrace → Reasoning(语言模型) → Experience(语言模型) → PhysicianReview。红旗智能体命中急诊信号时自主中止下游临床智能体，仅急诊提示续跑。', skills: ['AgentOrchestrator'] };
+    default: return { md: '你可以这样问我（点下方示例也行）：\n' + groupedStarters().map(g => `**${g.group}**：` + g.items.map(i => `「${i.examples[0]}」`).join('；')).join('\n'), skills: ['skill_router'] };
+  }
+}
+
+function groupedStarters() {
+  const groups = {};
+  CHAT_INTENTS.forEach(i => { (groups[i.group] = groups[i.group] || { group: i.group, items: [] }).items.push(i); });
+  return Object.values(groups);
+}
+
+function chatAsk(q) {
+  if (!q || !q.trim()) return;
+  const route = chatRoute(q.trim());
+  const ans = chatAnswer(route.id, q.trim());
+  const others = CHAT_INTENTS.filter(i => i.id !== route.id).slice(0, 4).map(i => i.examples[0]);
+  state.chat.history.push({
+    q: q.trim(), intent: route.id, label: route.label, method: route.method,
+    md: ans.md, skills: ans.skills, usedLlm: !!ans.usedLlm && route.id !== 'safety_block',
+    followups: others,
+  });
+  renderChatModule();
+}
+
+function renderChatModule() {
+  pageTitle.textContent = '智能问答 · 语言模型自主选择技能并按提问挖掘';
+  const h = state.chat.history;
+  const bubbles = h.map(t => `
+    <div class="chat-turn">
+      <div class="bubble user">${escapeHtml(t.q)}</div>
+      <div class="bubble bot">
+        <div class="bot-meta"><span class="kind-badge ${t.intent === 'safety_block' ? 'rule' : 'llm'}">${t.label}</span>
+          <span class="route-tag">路由：${t.method === 'llm' ? 'Tao 选择' : t.method === 'guard' ? '安全护栏' : '关键词'}</span>
+          ${t.usedLlm ? '<span class="kind-badge llm-on">Tao 措辞</span>' : ''}
+          <span class="route-tag">技能：${(t.skills || []).join(' / ')}</span>
+        </div>
+        <div class="bot-body">${mdLite(t.md)}</div>
+        ${t.followups && t.followups.length ? `<div class="chip-row followups">${t.followups.map(f => `<button class="chip-btn" data-q="${escapeHtml(f)}">${f}</button>`).join('')}</div>` : ''}
+      </div>
+    </div>`).join('');
+  const starters = groupedStarters().map(g => `
+    <div class="starter-group"><span class="starter-title">${g.group}</span>
+      <div class="chip-row">${g.items.map(i => `<button class="chip-btn" data-q="${escapeHtml(i.examples[0])}" title="${i.label}">${i.examples[0]}</button>`).join('')}</div>
+    </div>`).join('');
+  screen.innerHTML = `
+    <section class="result-panel">
+      <p class="eyebrow">draft_for_clinician_review · 语言模型仅用于技能选择与措辞 · 确定性规则/挖掘数据作答</p>
+      <div class="chat-window">${bubbles || '<p class="muted">向我提问腰痹辨证、方药、安全、数据挖掘或经验总结。语言模型会自主选择对应技能，并用规则与脱敏数据作答。</p>'}</div>
+      <div class="chat-input"><input id="chatInput" type="text" placeholder="输入问题，如：气血痹阻证最常用什么方？" /><button class="primary-btn" id="chatSend">发送</button>${h.length ? '<button class="ghost-btn" id="chatClear">清空</button>' : ''}</div>
+    </section>
+    <section class="result-panel"><h3>你可以这样问（点击直接提问）</h3>${starters}
+      <p class="muted">语言模型只能从上述受限技能集中选择，越界或解析失败回退关键词路由；患者端请求最终诊断/处方/剂量会被安全护栏拦截。</p>
+    </section>`;
+  const input = document.querySelector('#chatInput');
+  const send = () => { chatAsk(input.value); };
+  document.querySelector('#chatSend').addEventListener('click', send);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  const clr = document.querySelector('#chatClear');
+  if (clr) clr.addEventListener('click', () => { state.chat.history = []; renderChatModule(); });
+  screen.querySelectorAll('.chip-btn').forEach(b => b.addEventListener('click', () => chatAsk(b.dataset.q)));
+  const win = screen.querySelector('.chat-window');
+  if (win) win.scrollTop = win.scrollHeight;
+}
+
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function mdLite(s) { return escapeHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br/>'); }
 
 // ---------------------------------------------------------------------------
 // Multi-agent collaboration (mirrors backend AgentOrchestrator trace)

@@ -14,7 +14,15 @@ def main() -> None:
     parser.add_argument("--use-llm", action="store_true", help="Enable optional Tao runtime overlay; falls back to deterministic report if unavailable or unsafe")
     parser.add_argument("--tao-chat", help="Direct Tao/Dao1 local chat input; set TAO_BACKEND=transformers for direct model inference")
     parser.add_argument("--stream", action="store_true", help="Stream direct Tao chat tokens to stdout")
+    parser.add_argument("--ask", help="Conversational mode: route a free-text question to a skill and answer from rules/mined data")
     args = parser.parse_args()
+    if args.ask:
+        from backend.agents.conversation import ConversationSession
+
+        session = ConversationSession(use_llm=args.use_llm)
+        turn = session.ask(args.ask)
+        print(f"[intent={turn['intent']} via={turn['method']} skills={','.join(turn['skills'])}]\n{turn['answer']}")
+        return
     if args.tao_chat:
         client = DaoClient()
         try:

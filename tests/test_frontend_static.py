@@ -102,3 +102,21 @@ def test_frontend_presents_agent_collaboration_module():
     assert "agent-timeline" in app
     assert "kind-badge" in app
     assert "ReasoningAgent" in app and "ExperienceAgent" in app
+
+
+def test_frontend_presents_conversational_qa_module():
+    root = Path("frontend")
+    app = (root / "app.js").read_text(encoding="utf-8")
+
+    assert "智能问答" in app
+    assert "renderChatModule" in app
+    assert "chatRoute" in app and "chatAnswer" in app and "chatQueryMined" in app
+    assert "CHAT_INTENTS" in app
+    # 语言模型自主选技能 + 安全护栏 + 引导示例
+    assert "Tao 选择" in app
+    assert "safety_block" in app
+    assert "你可以这样问" in app
+    assert "groupedStarters" in app
+    # 覆盖多种功能意图
+    for intent in ["syndrome_inquiry", "formula_inquiry", "mining_inquiry", "evidence_inquiry", "agent_inquiry"]:
+        assert intent in app

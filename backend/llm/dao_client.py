@@ -15,6 +15,7 @@ from backend.llm.prompt_templates import (
     QUESTION_PROMPT_TEMPLATE,
     REASONING_PROMPT_TEMPLATE,
     REPORT_PROMPT_TEMPLATE,
+    SKILL_ROUTING_PROMPT_TEMPLATE,
     SYSTEM_PROMPT,
 )
 
@@ -153,6 +154,12 @@ class DaoClient:
         )
         return self._dispatch(self.build_prompt(body), self._mock_experience_summary(summary_context), "experience summary")
 
+    def route_skill(self, routing_context: dict[str, Any]) -> str:
+        body = SKILL_ROUTING_PROMPT_TEMPLATE.format(
+            routing_context=json.dumps(routing_context, ensure_ascii=False, indent=2, default=str)
+        )
+        return self._dispatch(self.build_prompt(body), self._mock_route_skill(routing_context), "skill routing")
+
     def chat(
         self,
         history: list[dict[str, str]],
@@ -271,6 +278,14 @@ class DaoClient:
             "patient_executable_dose": None,
             "administration_instruction": None,
         }, ensure_ascii=False)
+
+    def _mock_route_skill(self, routing_context: dict[str, Any]) -> str:
+        # The mock honours the deterministic keyword hint so routing is testable;
+        # a real backend would let the model choose from allowed_intents itself.
+        allowed = routing_context.get("allowed_intents") or []
+        hint = routing_context.get("hint_intent")
+        intent = hint if hint in allowed else (allowed[0] if allowed else "capabilities")
+        return json.dumps({"intent": intent, "reason": "Tao 依据问题语义选择该技能（mock 沿用关键词提示）。"}, ensure_ascii=False)
 
     def _generate_http(self, prompt: str) -> str:
         if not self.config.endpoint_url:
