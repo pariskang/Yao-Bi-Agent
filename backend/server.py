@@ -22,7 +22,9 @@ from __future__ import annotations
 import argparse
 import http.server
 import json
+import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -201,6 +203,8 @@ def handle_warmup(_data: dict[str, Any]) -> dict[str, Any]:
         reply = CLIENT.chat([], "请用一句话说明你在本系统中的角色边界。")
     except DaoRuntimeError as exc:
         return {"ok": False, "reason": str(exc), "tao": tao_info()}
+    except Exception as exc:  # noqa: BLE001 — report the real cause instead of a 500
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}", "tao": tao_info()}
     return {"ok": True, "ms": int((time.time() - started) * 1000), "reply_preview": str(reply)[:160], "tao": tao_info()}
 
 
@@ -275,8 +279,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _dispatch(self, handler: Any, data: dict[str, Any]) -> None:
         try:
             self._send_json(handler(data))
-        except Exception as exc:  # never crash the UI; surface a JSON error
-            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=500)
+        except Exception as exc:  # never crash the UI; surface a JSON error + log full cause
+            tb = traceback.format_exc()
+            print(f"[yaobi-server] {self.path} failed:\n{tb}", file=sys.stderr, flush=True)
+            self._send_json({"error": f"{type(exc).__name__}: {exc}", "traceback": tb.splitlines()[-3:]}, status=500)
 
 
 def make_server(port: int = 8000, host: str = "0.0.0.0") -> http.server.ThreadingHTTPServer:

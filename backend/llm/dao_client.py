@@ -666,28 +666,36 @@ class DaoClient:
         return inputs.to(device) if device is not None else inputs
 
     def _generate_transformers(self, prompt: str, stream_callback: Any | None = None) -> str:
-        transformers, tokenizer, model = self._load_transformers_runtime()
-        inputs = self._tokenize_for_model(tokenizer, model, prompt)
-        generate_kwargs = dict(
-            **inputs,
-            max_new_tokens=self.config.max_new_tokens,
-            do_sample=self.config.do_sample,
-            temperature=self.config.temperature,
-            top_p=self.config.top_p,
-            repetition_penalty=self.config.repetition_penalty,
-            use_cache=True,
-        )
-        if stream_callback is not None:
-            streamer = transformers.TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-            thread = Thread(target=model.generate, kwargs={**generate_kwargs, "streamer": streamer})
-            thread.start()
-            response = ""
-            for token in streamer:
-                stream_callback(token)
-                response += token
-            thread.join()
-            return response
+        # Convert any transformers/torch/load/OOM failure into DaoRuntimeError so every caller
+        # (routing, consultation, probe, interview) degrades gracefully to deterministic rules
+        # instead of surfacing an opaque HTTP 500 — and the real cause is preserved in the message.
+        try:
+            transformers, tokenizer, model = self._load_transformers_runtime()
+            inputs = self._tokenize_for_model(tokenizer, model, prompt)
+            generate_kwargs = dict(
+                **inputs,
+                max_new_tokens=self.config.max_new_tokens,
+                do_sample=self.config.do_sample,
+                temperature=self.config.temperature,
+                top_p=self.config.top_p,
+                repetition_penalty=self.config.repetition_penalty,
+                use_cache=True,
+            )
+            if stream_callback is not None:
+                streamer = transformers.TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+                thread = Thread(target=model.generate, kwargs={**generate_kwargs, "streamer": streamer})
+                thread.start()
+                response = ""
+                for token in streamer:
+                    stream_callback(token)
+                    response += token
+                thread.join()
+                return response
 
-        outputs = model.generate(**generate_kwargs)
-        generated = outputs[0][inputs["input_ids"].shape[-1] :]
-        return tokenizer.decode(generated, skip_special_tokens=True)
+            outputs = model.generate(**generate_kwargs)
+            generated = outputs[0][inputs["input_ids"].shape[-1] :]
+            return tokenizer.decode(generated, skip_special_tokens=True)
+        except DaoRuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — surface cause, never crash the request
+            raise DaoRuntimeError(f"transformers backend failed: {type(exc).__name__}: {exc}") from exc

@@ -344,6 +344,10 @@ class YaoBiInterviewEngine:
             "tongue_coating": "舌苔是薄白、白腻还是黄腻", "pulse": "脉象偏细、偏弦还是偏沉",
             "waist_knee_soreness": "有没有腰膝酸软", "western_diagnosis": "之前医院诊断过什么",
             "bowel_bladder_dysfunction": "大小便是否正常", "fever": "有没有发热",
+            "saddle_anesthesia": "会阴部有没有发麻", "progressive_weakness": "下肢无力是否进行性加重",
+            "tumor_history": "有没有肿瘤病史或近期消瘦", "night_pain": "夜里痛得明显吗",
+            "trauma_history": "近期有没有外伤", "stool": "大便情况", "urine": "小便清还是黄",
+            "limb_heaviness": "肢体是否困重", "thirst": "口干口渴吗", "appetite": "胃口怎么样",
         }
         qs = [phrase.get(t, t) for t in targets][:4]
         return "想再了解几点：" + "；".join(qs) + "？"
