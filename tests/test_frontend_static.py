@@ -56,3 +56,49 @@ def test_frontend_presents_all_modules_and_mined_rules():
     # 安全边界在挖掘/审核模块同样呈现
     assert "不构成诊断或处方依据" in app
     assert "pending_expert_review" in app
+
+
+def test_frontend_presents_tao_reasoning_and_summary_modules():
+    root = Path("frontend")
+    app = (root / "app.js").read_text(encoding="utf-8")
+
+    # 新增模块导航与视图
+    for label in ["经验推理", "经验总结"]:
+        assert label in app
+    assert "renderReasoningModule" in app
+    assert "renderSummaryModule" in app
+
+    # Tao 规则约束内自动追问
+    assert "Tao 自动追问" in app
+    assert "taoProbesFor" in app
+    assert "TAO_PROBE_" in app
+    assert "tao-probe" in app
+
+    # 推理链与经验总结呈现
+    assert "辨证推理链" in app
+    assert "buildReasoningChain" in app
+    assert "医案按语" in app
+
+    # 最终报告新增推理/按语标签
+    assert 'data-tab="reasoning"' in app
+    assert 'data-tab="summary"' in app
+
+    # 安全边界仍在
+    assert "draft_for_clinician_review" in app
+    assert "非最终诊断" in app
+
+
+def test_frontend_presents_agent_collaboration_module():
+    root = Path("frontend")
+    app = (root / "app.js").read_text(encoding="utf-8")
+
+    assert "智能体协作" in app
+    assert "renderAgentsModule" in app
+    assert "buildAgentTrace" in app
+    # 协作机制要素：共享黑板、自主中止、语言模型在环、人类终审
+    for token in ["共享黑板", "自主中止", "语言模型在环", "EmergencyNoticeAgent", "PhysicianReviewAgent"]:
+        assert token in app
+    # 规则/语言模型标识与时间轴
+    assert "agent-timeline" in app
+    assert "kind-badge" in app
+    assert "ReasoningAgent" in app and "ExperienceAgent" in app

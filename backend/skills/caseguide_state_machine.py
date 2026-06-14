@@ -5,6 +5,7 @@ from typing import Any
 
 from backend.llm.dao_client import DaoClient
 
+from backend.agents.orchestrator import AgentOrchestrator
 from backend.skills.adaptive_question_planner_skill import adaptive_question_planner_skill
 from backend.skills.case_quality_check_skill import case_quality_check_skill
 from backend.skills.case_structuring_skill import case_structuring_skill
@@ -22,6 +23,9 @@ from backend.skills.red_flag_screen_skill import red_flag_screen_skill
 from backend.skills.shen_rule_signal_skill import shen_rule_signal_skill
 from backend.skills.tcm_four_diagnosis_skill import tcm_four_diagnosis_skill
 from backend.skills.tao_question_planner_skill import tao_question_planner_skill
+from backend.skills.tao_followup_probe_skill import tao_followup_probe_skill
+from backend.skills.physician_reasoning_skill import physician_reasoning_skill
+from backend.skills.case_experience_summary_skill import case_experience_summary_skill
 from backend.skills.formula_base_selector_skill import formula_base_selector_skill
 from backend.skills.herb_module_composer_skill import herb_module_composer_skill
 from backend.skills.safety_guard_skill import safety_guard_skill
@@ -61,6 +65,7 @@ class CaseGuideSession:
     max_followups_per_state: int = MAX_FOLLOWUPS_PER_STATE
     questions_per_turn: int = MAX_QUESTIONS_PER_TURN
     use_llm_questions: bool = False
+    tao_probe_budget: int = 2
     dao_client: DaoClient | None = None
 
     def __post_init__(self) -> None:
@@ -68,6 +73,7 @@ class CaseGuideSession:
             self.case_state = empty_case_state()
         self.max_followups_per_state = max(1, int(self.max_followups_per_state))
         self.questions_per_turn = max(1, int(self.questions_per_turn))
+        self.tao_probe_budget = max(0, int(self.tao_probe_budget))
         self.case_state.setdefault("fsm", {"state_turn_counts": {}, "last_answers": {}, "last_question_ids": []})
 
     def set_max_followups(self, count: int) -> int:
@@ -108,6 +114,7 @@ class CaseGuideSession:
 
     def answer_stage(self, answers: dict[str, Any], end_state: bool = False) -> dict[str, Any]:
         self._record_turn(answers)
+        answers = self._capture_probe_answers(answers)
         if self.state == "S2_BASIC":
             self._apply_basic_answers(answers)
         elif self.state == "S3_PAIN_PROFILE":
@@ -217,7 +224,28 @@ class CaseGuideSession:
             use_llm=self.use_llm_questions,
         )
         self.case_state.setdefault("fsm", {})["tao_question_runtime"] = planned["tao_question_runtime"]
-        return planned["questions"]
+        questions = list(planned["questions"])
+        probe_result = tao_followup_probe_skill(
+            self.case_state,
+            self.state,
+            self._state_allowed_fields(self.state),
+            rule_context=self.current_rule_context(),
+            last_answers=self.case_state.get("fsm", {}).get("last_answers", {}).get(self.state, {}),
+            max_probes=self.tao_probe_budget,
+            dao_client=self.dao_client,
+            use_llm=self.use_llm_questions,
+        )
+        self.case_state.setdefault("fsm", {})["tao_probe_runtime"] = probe_result["tao_probe_runtime"]
+        for probe in probe_result["probes"]:
+            probe["state_turn_index"] = self._current_turn_count() + 1
+            probe["rule_context"] = self.current_rule_context()
+        return questions + probe_result["probes"]
+
+    def _state_allowed_fields(self, state: str) -> list[str]:
+        if state in {"S6_SHEN_SIGNAL", "S8_ADAPTIVE_REPAIR"}:
+            fields = {q.get("field") for values in load_caseguide_questions().values() if isinstance(values, list) for q in values if isinstance(q, dict) and q.get("field")}
+            return sorted(f for f in fields if f)
+        return sorted({q.get("field") for q in self._state_questions(state) if q.get("field")})
 
     def _deterministic_next_questions(self, max_questions: int | None = None) -> list[dict[str, Any]]:
         if max_questions is None:
@@ -242,36 +270,57 @@ class CaseGuideSession:
             candidates.append(self._enrich_question(question, self._question_reason(question)))
         return candidates[:max_questions]
 
+    def run_agent_collaboration(self, use_llm: bool | None = None) -> dict[str, Any]:
+        """Run the multi-agent orchestrator over the current case and return its trace.
+
+        Agents collaborate on a shared blackboard (rules first, language model guarded and
+        optional); the red-flag agent may autonomously halt downstream clinical agents.
+        """
+
+        orchestration = AgentOrchestrator().run(
+            self.case_state,
+            use_llm=self.use_llm_questions if use_llm is None else use_llm,
+            dao_client=self.dao_client,
+        )
+        self.case_state = orchestration["case_state"]
+        return orchestration
+
     def final_report(self) -> dict[str, Any]:
-        shen = shen_rule_signal_skill(self.case_state)
-        self.case_state = shen["case_state"]
-        quality = case_quality_check_skill(self.case_state)
-        self.case_state = quality["case_state"]
-        normalized_tags = self.case_state.get("normalized_tags", [])
-        routed = syndrome_router_skill(normalized_tags)
-        formula = formula_base_selector_skill(normalized_tags, routed["syndrome_candidates"])
-        modules = herb_module_composer_skill(normalized_tags, formula.get("primary_route"))
-        safety = safety_guard_skill({"evidence": {"raw_text": ""}, "red_flags": self.case_state.get("red_flags", {}).get("positive_items", [])}, modules["matched_modules"], normalized_tags)
-        structured = case_structuring_skill(self.case_state)
-        handoff = clinician_handoff_skill(self.case_state, formula.get("formula_routes"), modules["matched_modules"], safety)
-        review_package = clinician_review_package_skill(
-            self.case_state,
-            routed["syndrome_candidates"],
-            formula.get("formula_routes"),
-            modules["matched_modules"],
-            safety,
-        )
-        cdss = cdss_recommendation_skill(
-            self.case_state,
-            routed["syndrome_candidates"],
-            formula.get("formula_routes"),
-            modules["matched_modules"],
-            safety,
-            user_role="clinician",
-        )
-        mined = mined_evidence_skill(normalized_tags, routed["syndrome_candidates"])
+        orchestration = self.run_agent_collaboration()
+        bb = orchestration["blackboard"]
+        shen = bb.get("shen", {})
+        mined = bb.get("mined", {})
+        agent_collaboration = {
+            "collaboration_trace": orchestration["collaboration_trace"],
+            "agent_roster": orchestration["agent_roster"],
+            "halted": orchestration["halted"],
+            "halt_reason": orchestration["halt_reason"],
+            "used_llm_agents": orchestration["used_llm_agents"],
+            "llm_in_loop": orchestration["llm_in_loop"],
+            "agent_count": orchestration["agent_count"],
+        }
         self.state = "S10_FINAL_REPORT"
-        return {"state": self.state, "case_state": self.case_state, "shen_signals": shen["shen_signals"], "high_value_missing": shen["high_value_missing"], **quality, **routed, **formula, **modules, "safety": safety, **structured, **handoff, **review_package, **cdss, "mined_evidence": mined["mined_evidence"], "mined_evidence_disclaimer": mined["disclaimer"]}
+        return {
+            "state": self.state,
+            "case_state": self.case_state,
+            "shen_signals": shen.get("shen_signals", {}),
+            "high_value_missing": shen.get("high_value_missing", []),
+            **bb.get("quality", {}),
+            **bb.get("routed", {}),
+            **bb.get("formula", {}),
+            **bb.get("modules", {}),
+            **bb.get("conflicts", {}),
+            "safety": bb.get("safety", {}),
+            **bb.get("structured", {}),
+            **bb.get("handoff", {}),
+            **bb.get("review_package", {}),
+            **bb.get("cdss", {}),
+            "mined_evidence": mined.get("mined_evidence", []),
+            "mined_evidence_disclaimer": mined.get("disclaimer", ""),
+            **bb.get("reasoning", {}),
+            **bb.get("experience", {}),
+            "agent_collaboration": agent_collaboration,
+        }
 
     def _question_payload(self) -> dict[str, Any]:
         return {
@@ -281,6 +330,8 @@ class CaseGuideSession:
                 "turn_index": self._current_turn_count(),
                 "max_followups_per_state": self.max_followups_per_state,
                 "questions_per_turn": self.questions_per_turn,
+                "tao_probe_budget": self.tao_probe_budget,
+                "tao_probe_runtime": self.case_state.get("fsm", {}).get("tao_probe_runtime"),
                 "remaining_followups": max(0, self.max_followups_per_state - self._current_turn_count()),
                 "can_end_state": self.state in STATES and self.state not in {"S0_CONSENT", "S_EMERGENCY_NOTICE", "S10_FINAL_REPORT"},
                 "rule_context": self.current_rule_context(),
@@ -394,6 +445,24 @@ class CaseGuideSession:
         if duration and "年" in str(duration):
             self.case_state.setdefault("normalized_tags", []).extend(["chronic_yabi", "long_duration"])
         self.case_state["normalized_tags"] = sorted(set(self.case_state.get("normalized_tags", [])))
+
+    def _capture_probe_answers(self, answers: dict[str, Any]) -> dict[str, Any]:
+        """Store Tao-probe answers as supplementary free-text evidence.
+
+        Probe answers (ids ``TAO_PROBE_*``) never write structured fields or drive
+        state transitions; they are advisory clarifications recorded for clinician review.
+        """
+
+        structured: dict[str, Any] = {}
+        store = self.case_state.setdefault("tao_probe_answers", {})
+        evidence = self.case_state.setdefault("answer_evidence", {})
+        for key, value in answers.items():
+            if str(key).startswith("TAO_PROBE_"):
+                store[key] = value
+                evidence[key] = {"question": key, "answer": value, "source": "tao_probe", "advisory_only": True}
+            else:
+                structured[key] = value
+        return structured
 
     def _apply_any_answers(self, answers: dict[str, Any]) -> None:
         by_id = {q["id"]: q for values in load_caseguide_questions().values() if isinstance(values, list) for q in values if isinstance(q, dict) and "id" in q}
