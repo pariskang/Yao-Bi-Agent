@@ -68,10 +68,10 @@ def test_frontend_presents_tao_reasoning_and_summary_modules():
     assert "renderReasoningModule" in app
     assert "renderSummaryModule" in app
 
-    # Tao 规则约束内自动追问
+    # Tao 规则约束内自动追问（现由后端 /api/followup_probe 真正调用语言模型生成）
     assert "Tao 自动追问" in app
-    assert "taoProbesFor" in app
-    assert "TAO_PROBE_" in app
+    assert "loadTaoProbes" in app
+    assert "/api/followup_probe" in app
     assert "tao-probe" in app
 
     # 推理链与经验总结呈现
@@ -82,6 +82,25 @@ def test_frontend_presents_tao_reasoning_and_summary_modules():
     # 最终报告新增推理/按语标签
     assert 'data-tab="reasoning"' in app
     assert 'data-tab="summary"' in app
+
+
+def test_frontend_calls_backend_for_genuine_llm():
+    """The UI must call the backend so the language model genuinely drives skill calls,
+    and must label runtime status honestly (online Tao vs offline rule mode)."""
+    app = (Path("frontend") / "app.js").read_text(encoding="utf-8")
+
+    # Real API client + endpoints (not client-side keyword stubs).
+    assert "/api/health" in app
+    assert "/api/chat" in app
+    assert "/api/autonomous" in app
+    assert "/api/followup_probe" in app
+    assert "/api/collaboration" in app
+
+    # Honest status: a Tao online/offline indicator and a "Tao 选择" label gated on real use.
+    assert "taoOnline" in app
+    assert "renderTaoBadge" in app
+    assert "Tao 选择" in app
+    assert "关键词回退" in app or "关键词（离线）" in app
 
     # 安全边界仍在
     assert "draft_for_clinician_review" in app

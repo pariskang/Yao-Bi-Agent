@@ -37,6 +37,8 @@ class DaoGenerationConfig:
     torch_dtype: str = "float16"
     device_map: str = "auto"
     attn_implementation: str = "eager"
+    load_in_4bit: bool = False
+    load_in_8bit: bool = False
     timeout_seconds: int = 120
 
     @classmethod
@@ -54,6 +56,8 @@ class DaoGenerationConfig:
             torch_dtype=os.getenv("TAO_TORCH_DTYPE", cls.torch_dtype),
             device_map=os.getenv("TAO_DEVICE_MAP", cls.device_map),
             attn_implementation=os.getenv("TAO_ATTN_IMPLEMENTATION", cls.attn_implementation),
+            load_in_4bit=os.getenv("TAO_LOAD_IN_4BIT", "false").lower() == "true",
+            load_in_8bit=os.getenv("TAO_LOAD_IN_8BIT", "false").lower() == "true",
             timeout_seconds=int(os.getenv("TAO_TIMEOUT_SECONDS", "120")),
         )
 
@@ -343,7 +347,8 @@ class DaoClient:
         transformers = importlib.import_module("transformers")
         torch = importlib.import_module("torch")
 
-        signature = (self.config.model_id, self.config.torch_dtype, self.config.device_map, self.config.attn_implementation)
+        quant = "4bit" if self.config.load_in_4bit else "8bit" if self.config.load_in_8bit else "none"
+        signature = (self.config.model_id, f"{self.config.torch_dtype}:{quant}", self.config.device_map, self.config.attn_implementation)
         with self._model_lock:
             if (
                 self.__class__._tokenizer is None
@@ -351,13 +356,27 @@ class DaoClient:
                 or self.__class__._model_signature != signature
             ):
                 dtype = getattr(torch, self.config.torch_dtype, torch.float16)
+                from_pretrained_kwargs: dict[str, Any] = {
+                    "trust_remote_code": True,
+                    "device_map": self.config.device_map,
+                    "attn_implementation": self.config.attn_implementation,
+                }
+                # Optional 4-bit / 8-bit quantization lets large models (e.g. the 30B MoE
+                # CMLM/Dao1-30b-a3b) fit a single A100/L4; requires the bitsandbytes package.
+                if self.config.load_in_4bit or self.config.load_in_8bit:
+                    from_pretrained_kwargs["quantization_config"] = transformers.BitsAndBytesConfig(
+                        load_in_4bit=self.config.load_in_4bit,
+                        load_in_8bit=self.config.load_in_8bit and not self.config.load_in_4bit,
+                        bnb_4bit_compute_dtype=dtype,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_use_double_quant=True,
+                    )
+                else:
+                    from_pretrained_kwargs["torch_dtype"] = dtype
                 self.__class__._tokenizer = transformers.AutoTokenizer.from_pretrained(self.config.model_id, trust_remote_code=True)
                 self.__class__._model = transformers.AutoModelForCausalLM.from_pretrained(
                     self.config.model_id,
-                    torch_dtype=dtype,
-                    trust_remote_code=True,
-                    device_map=self.config.device_map,
-                    attn_implementation=self.config.attn_implementation,
+                    **from_pretrained_kwargs,
                 )
                 self.__class__._model_signature = signature
         return transformers, self.__class__._tokenizer, self.__class__._model

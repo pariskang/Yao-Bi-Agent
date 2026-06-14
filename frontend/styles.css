@@ -280,6 +280,12 @@ code { background: var(--bg-deep); border-radius: 5px; padding: .1rem .35rem; fo
   .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .panel-grid { grid-template-columns: 1fr; }
 }
+/* Tao runtime status badge (topbar) */
+.tao-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--line); white-space: nowrap; }
+.tao-badge .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px rgba(0,0,0,.05); }
+.tao-badge.on { color: #137333; background: rgba(19,115,51,.10); border-color: rgba(19,115,51,.30); }
+.tao-badge.off { color: #8a6d00; background: rgba(202,138,4,.10); border-color: rgba(202,138,4,.28); }
+
 @media (max-width: 820px) {
   .app-shell, .app-shell.wide { grid-template-columns: 1fr; }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }

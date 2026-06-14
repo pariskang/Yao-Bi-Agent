@@ -82,7 +82,7 @@ def test_dao_direct_chat_mock_and_transformers_source_contract():
     assert "AutoTokenizer.from_pretrained" in source
     assert "AutoModelForCausalLM.from_pretrained" in source
     assert "trust_remote_code=True" in source
-    assert "attn_implementation=self.config.attn_implementation" in source
+    assert '"attn_implementation": self.config.attn_implementation' in source
 
 
 def test_dao_from_env_reads_direct_transformers_knobs(monkeypatch):
@@ -95,6 +95,17 @@ def test_dao_from_env_reads_direct_transformers_knobs(monkeypatch):
     assert config.torch_dtype == "bfloat16"
     assert config.device_map == "cuda:0"
     assert config.attn_implementation == "eager"
+
+
+def test_dao_from_env_reads_quantization_knobs(monkeypatch):
+    monkeypatch.setenv("TAO_LOAD_IN_4BIT", "true")
+    config = DaoGenerationConfig.from_env()
+    assert config.load_in_4bit is True
+    assert config.load_in_8bit is False
+    # Quantized loading (so the 30B MoE fits one GPU) is wired through BitsAndBytesConfig.
+    source = __import__("pathlib").Path("backend/llm/dao_client.py").read_text(encoding="utf-8")
+    assert "BitsAndBytesConfig" in source
+    assert "quantization_config" in source
 
 
 def test_dao_transformers_cache_is_configuration_aware():
