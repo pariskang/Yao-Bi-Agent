@@ -10,8 +10,10 @@ from threading import Lock, Thread
 from typing import Any, Literal
 
 from backend.llm.prompt_templates import (
+    CONSULTATION_PROMPT_TEMPLATE,
     EXPERIENCE_SUMMARY_PROMPT_TEMPLATE,
     FOLLOWUP_PROBE_PROMPT_TEMPLATE,
+    PROBE_FREEFORM_PROMPT_TEMPLATE,
     QUESTION_PROMPT_TEMPLATE,
     REASONING_PROMPT_TEMPLATE,
     REPORT_PROMPT_TEMPLATE,
@@ -165,6 +167,35 @@ class DaoClient:
         )
         return self._dispatch(self.build_prompt(body), self._mock_route_skill(routing_context), "skill routing")
 
+    def generate_consultation(self, consultation_context: dict[str, Any]) -> str:
+        """Tao-primary professional answer: the model is the main reasoner.
+
+        Unlike the JSON overlay tasks, this returns free-form professional Markdown grounded
+        in the supplied rule/mined evidence — the model combines those experience cues with
+        its own TCM knowledge. The caller guards it with ``guard_consultation`` before use.
+        """
+
+        body = CONSULTATION_PROMPT_TEMPLATE.format(
+            scope=consultation_context.get("scope", "全面会诊"),
+            question=consultation_context.get("question", ""),
+            evidence=json.dumps(consultation_context.get("evidence", {}), ensure_ascii=False, indent=2, default=str),
+        )
+        return self._dispatch(self.build_prompt(body), self._mock_consultation(consultation_context), "consultation")
+
+    def generate_probe_questions(self, probe_context: dict[str, Any]) -> str:
+        """Tao-primary follow-up: the model freely asks the next clarifying questions."""
+
+        max_probes = int(probe_context.get("max_probes", 2))
+        body = PROBE_FREEFORM_PROMPT_TEMPLATE.format(
+            max_probes=max_probes,
+            theme=probe_context.get("current_state_theme", "本状态主题"),
+            context=json.dumps(
+                {"last_answers": probe_context.get("last_answers", {}), "normalized_tags": probe_context.get("normalized_tags", [])},
+                ensure_ascii=False, default=str,
+            ),
+        )
+        return self._dispatch(self.build_prompt(body), self._mock_probe_questions(probe_context), "probe questions")
+
     def plan_skills(self, plan_context: dict[str, Any]) -> str:
         max_steps = int(plan_context.get("max_steps", 4))
         body = SKILL_PLAN_PROMPT_TEMPLATE.format(
@@ -308,6 +339,61 @@ class DaoClient:
         if not hint:
             hint = [{"intent": (plan_context.get("allowed_intents") or ["capabilities"])[0], "reason": "默认单步"}]
         return json.dumps({"plan": hint}, ensure_ascii=False)
+
+    def _mock_consultation(self, ctx: dict[str, Any]) -> str:
+        ev = ctx.get("evidence", {}) or {}
+        question = str(ctx.get("question", "")).strip()
+        scope = ctx.get("scope", "全面会诊")
+        syns = ev.get("syndrome_candidates") or []
+        routes = ev.get("formula_routes") or []
+        modules = ev.get("herb_modules") or []
+        tags = ev.get("normalized_tags") or []
+        safety = ev.get("safety") or {}
+        top = syns[0]["name"] if syns else "气血痹阻、筋脉失养"
+        alt = "、".join(s.get("name", "") for s in syns[1:3]) or "寒湿痹阻、肝肾不足"
+        route = (routes[0].get("name") if routes else None) or "独活寄生汤加减"
+        mods = "、".join(m.get("name", "") for m in modules[:4]) or "祛风湿通络、益气养血、补益肝肾"
+        clue = "、".join(tags[:8]) or "待四诊补充"
+        return (
+            f"# 腰痹病案分析（{scope} · 结合沈钦荣经验 · 供执业医师审核）\n\n"
+            f"## 一、四诊辨析与病机\n"
+            f"据所述「{question[:80]}」，本案以腰痛为主症。结合线索（{clue}）：跌扑、负重每致经筋损伤、气血瘀阻；"
+            f"久则气血亏虚、筋脉失养；遇冷加重、得温则缓提示寒凝经脉、阳气不展；脉细多为气血不足之象。"
+            f"病位在腰府筋脉，与肝、肾、脾相关，病性多属本虚标实、虚实夹杂。\n\n"
+            f"## 二、证型判断（倾向性，供医师审定）\n"
+            f"主证倾向「{top}」；次选可虑「{alt}」。辨证依据：上述症舌脉与既往史的相互印证，"
+            f"以及沈老“益气养血、温通经络、顾护肝肾脾胃”之经验思路。\n\n"
+            f"## 三、治法\n以益气养血、温经通络为主，兼顾活血化瘀、补益肝肾，标本同治。\n\n"
+            f"## 四、选方与方义\n"
+            f"可考虑「{route}」为底化裁：方中独活、桑寄生祛风湿、补肝肾为君；"
+            f"细辛、桂枝温经散寒，当归、川芎养血活血为臣；佐以杜仲、牛膝强筋骨、引药下行；"
+            f"使以炙甘草调和诸药。随证加减：瘀重酌加活血通络之品，寒甚增温阳散寒，"
+            f"麻木掣痛可虑虫类搜剔（需医师审核）。\n\n"
+            f"## 五、用药功效模块与经验剂量范围\n"
+            f"涉及模块：{mods}。各药经验用量区间需由医师按体质、合并病与耐受审定，此处不作患者可执行医嘱。\n\n"
+            f"## 六、安全、鉴别与随访\n"
+            f"安全状态参考：{safety.get('status', '待评估')}。附片、细辛、虫类等须医师重点审核配伍与用量；"
+            f"注意排除马尾综合征、肿瘤、感染、骨折等红旗信号；合并病及肝肾功能、胃肠耐受需复核；"
+            f"建议面诊查体与影像复核后随访调整。\n\n"
+            f"> 本分析为供执业医师审核的研究 / 教学草案，最终诊断与处方须医师面诊后确定，患者不可据此自行用药。"
+        )
+
+    def _mock_probe_questions(self, ctx: dict[str, Any]) -> str:
+        theme = ctx.get("current_state_theme", "本状态主题")
+        bank = {
+            "疼痛": ["这种腰痛更像胀痛、刺痛还是冷痛？", "受凉或阴雨天疼痛会不会明显加重，热敷能缓解吗？"],
+            "放射": ["腰痛会不会串到臀部或下肢？走一段路是否加重、休息能否缓解？", "咳嗽或用力时腿部串痛会加重吗？"],
+            "中医": ["平时怕冷还是怕热？口苦、口干明显吗？", "睡眠和胃口怎么样，和腰痛发作有没有一起变化？"],
+            "合并": ["以前吃过的止痛药有没有引起胃部不适或反酸？", "是否在用抗凝、激素或降糖类药物？"],
+        }
+        chosen: list[str] = []
+        for key, qs in bank.items():
+            if key in theme:
+                chosen = qs
+                break
+        if not chosen:
+            chosen = ["关于" + theme + "，还有哪些细节想补充给医生？", "这些症状最近有没有新的变化？"]
+        return "\n".join(chosen[: int(ctx.get("max_probes", 2))])
 
     def _generate_http(self, prompt: str) -> str:
         if not self.config.endpoint_url:

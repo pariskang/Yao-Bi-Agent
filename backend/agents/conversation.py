@@ -20,6 +20,18 @@ from backend.skills.mined_evidence_skill import load_mined_rules, mined_evidence
 from backend.skills.physician_reasoning_skill import physician_reasoning_skill
 from backend.skills.safety_guard_skill import safety_guard_skill
 from backend.skills.syndrome_router_skill import syndrome_router_skill
+from backend.skills.tao_consultation_skill import tao_consultation_skill
+
+# Clinical intents whose answer should be a Tao-primary grounded consultation (the model is
+# the main reasoner) rather than a bare rule snippet. Scope guides the prompt per intent.
+CONSULT_SCOPES = {
+    "syndrome_inquiry": "证候辨析与病机分析",
+    "formula_inquiry": "方剂路线、方义与随证加减",
+    "herb_inquiry": "用药功效模块与配伍思路",
+    "reasoning_inquiry": "辨证论治推理（症状→证候→治法→方药→安全）",
+    "safety_inquiry": "用药安全、配伍禁忌与风险复核",
+    "experience_inquiry": "医案按语与经验总结",
+}
 
 SYMPTOM_KEYWORD_TAG = {
     "麻木": "lower_limb_numbness", "放射": "radiating_leg_pain", "双下肢": "bilateral_leg_involvement",
@@ -168,17 +180,17 @@ class ConversationSession:
         routed = syndrome_router_skill(self._tags())
         formula = formula_base_selector_skill(self._tags(), routed.get("syndrome_candidates", []))
         modules = herb_module_composer_skill(self._tags(), formula.get("primary_route"))
-        pr = physician_reasoning_skill(self.case_state, routed.get("syndrome_candidates", []), formula.get("formula_routes"), modules.get("matched_modules"), dao_client=self.dao_client, use_llm=self.use_llm)["physician_reasoning"]
+        pr = physician_reasoning_skill(self.case_state, routed.get("syndrome_candidates", []), formula.get("formula_routes"), modules.get("matched_modules"), dao_client=self.dao_client, use_llm=False)["physician_reasoning"]
         chain = pr.get("reasoning_chain") or []
         lines = ["辨证推理链（倾向性，非最终诊断）："] + [f"{s['step']}. {s['title']}：{s['content']}" for s in chain]
-        return {"answer": "\n".join(lines), "evidence": [s["title"] for s in chain], "skills": ["physician_reasoning_skill"], "used_llm": pr.get("narrative_source") == "deterministic_rules_plus_tao"}
+        return {"answer": "\n".join(lines), "evidence": [s["title"] for s in chain], "skills": ["physician_reasoning_skill"], "used_llm": False}
 
     def _h_experience(self) -> dict[str, Any]:
         routed = syndrome_router_skill(self._tags())
         formula = formula_base_selector_skill(self._tags(), routed.get("syndrome_candidates", []))
         modules = herb_module_composer_skill(self._tags(), formula.get("primary_route"))
-        ce = case_experience_summary_skill(self.case_state, routed.get("syndrome_candidates", []), formula.get("formula_routes"), modules.get("matched_modules"), mode="case", dao_client=self.dao_client, use_llm=self.use_llm)["case_experience_summary"]
-        return {"answer": ce.get("summary_markdown", ""), "evidence": ce.get("key_points", []), "skills": ["case_experience_summary_skill"], "used_llm": ce.get("summary_source") == "deterministic_rules_plus_tao"}
+        ce = case_experience_summary_skill(self.case_state, routed.get("syndrome_candidates", []), formula.get("formula_routes"), modules.get("matched_modules"), mode="case", dao_client=self.dao_client, use_llm=False)["case_experience_summary"]
+        return {"answer": ce.get("summary_markdown", ""), "evidence": ce.get("key_points", []), "skills": ["case_experience_summary_skill"], "used_llm": False}
 
     def _h_agent(self) -> dict[str, Any]:
         roster = AgentOrchestrator().describe()
@@ -194,7 +206,45 @@ class ConversationSession:
 
     # -- routing + dispatch ----------------------------------------------
 
-    def _dispatch(self, intent: str, question: str) -> dict[str, Any]:
+    def _evidence_bundle(self) -> dict[str, Any]:
+        """Gather the deterministic rule/mined evidence that grounds the Tao consultation."""
+
+        tags = self._tags()
+        routed = syndrome_router_skill(tags)
+        cands = routed.get("syndrome_candidates") or []
+        formula = formula_base_selector_skill(tags, cands)
+        routes = formula.get("formula_routes") or []
+        modules = herb_module_composer_skill(tags, formula.get("primary_route"))
+        matched = modules.get("matched_modules") or []
+        safety = safety_guard_skill(
+            {"evidence": {"raw_text": ""}, "red_flags": (self.case_state.get("red_flags") or {}).get("positive_items", [])},
+            matched, tags,
+        )
+        mined = mined_evidence_skill(tags, cands).get("mined_evidence") or []
+        return {
+            "normalized_tags": tags,
+            "syndrome_candidates": [{"name": c["name"], "score": c.get("score"), "evidence_tags": c.get("evidence_tags", [])} for c in cands[:4]],
+            "formula_routes": [{"name": r["name"], "confidence": r.get("confidence"), "score": r.get("score")} for r in routes[:4]],
+            "herb_modules": [{"name": m["name"], "role": m.get("role"), "herbs": (m.get("herbs") or [])[:6]} for m in matched[:6]],
+            "safety": {"status": safety.get("safety_status"), "risks": safety.get("medication_risks") or []},
+            "mined_evidence": [{"rule_id": r.get("rule_id"), "then": r.get("then")} for r in mined[:6]],
+            "shen_signals": (self.case_state.get("shen_signals") or [])[:6],
+        }
+
+    def _consult(self, intent: str, question: str, det: dict[str, Any], full: bool) -> dict[str, Any]:
+        """Replace the bare rule answer with a Tao-primary grounded consultation."""
+
+        scope = "全面会诊：证型→治法→方药→安全（结合沈氏经验）" if full else CONSULT_SCOPES[intent]
+        res = tao_consultation_skill(
+            question, scope, self._evidence_bundle(),
+            fallback_text=det["answer"], dao_client=self.dao_client, use_llm=self.use_llm, user_role=self.user_role,
+        )
+        return {
+            "answer": res["answer"], "evidence": det.get("evidence", []), "skills": det.get("skills", []),
+            "used_llm": res["used_llm"], "consult_source": res["source"], "tao_runtime": res.get("tao_runtime"),
+        }
+
+    def _dispatch(self, intent: str, question: str, full: bool = False) -> dict[str, Any]:
         handlers = {
             "syndrome_inquiry": self._h_syndrome, "formula_inquiry": self._h_formula,
             "herb_inquiry": self._h_herb, "safety_inquiry": self._h_safety,
@@ -206,7 +256,11 @@ class ConversationSession:
             return self._h_mining(question)
         if intent == "dose_inquiry":
             return self._h_dose(question)
-        return handlers.get(intent, self._h_capabilities)()
+        det = handlers.get(intent, self._h_capabilities)()
+        # Clinical intents: the model becomes the primary reasoner, grounded in rule evidence.
+        if self.use_llm and intent in CONSULT_SCOPES:
+            return self._consult(intent, question, det, full)
+        return det
 
     def invoke(self, intent: str, question: str = "") -> dict[str, Any]:
         """Public subagent entry: run one skill handler for a given intent.
@@ -247,16 +301,17 @@ class ConversationSession:
 
         intent = routing["intent"]
         meta = INTENT_BY_ID.get(intent, {})
-        result = self._dispatch(intent, question)
+        result = self._dispatch(intent, question, full=True)
         followups = [ex for other in INTENTS if other["intent"] != intent for ex in other["examples"][:1]][:4]
         turn = {
             "question": question, "intent": intent, "intent_label": meta.get("label", intent),
             "intent_group": meta.get("group"), "method": routing["method"], "confidence": routing["confidence"],
             "answer": result["answer"], "skills": result.get("skills", []), "evidence": result.get("evidence", []),
             "used_llm": bool(result.get("used_llm")), "llm_routing": routing["llm_runtime"],
+            "answer_source": result.get("consult_source", "deterministic_rules"), "consult_runtime": result.get("tao_runtime"),
             "matched_keywords": routing.get("matched_keywords", []),
             "suggested_followups": followups,
-            "disclaimer": "回答基于确定性规则与脱敏挖掘数据，语言模型仅用于技能选择与措辞；不构成最终诊断、处方或可执行剂量。",
+            "disclaimer": "语言模型结合沈氏经验规则与脱敏挖掘数据进行辨证论治分析（供执业医师审核）；患者端不提供最终诊断、完整处方或可执行剂量。",
         }
         self.history.append(turn)
         return turn

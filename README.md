@@ -51,7 +51,7 @@ TAO_BACKEND=transformers TAO_MAX_NEW_TOKENS=512 python -m backend.main --tao-cha
 
 ## 本地 / 服务器运行（真·Tao 在环 UI）
 
-`backend/server.py` 是一个零额外依赖（stdlib `http.server`）的 HTTP 服务，**同源提供前端 UI 与 `/api/*` 接口**。前端不再用浏览器端关键词规则模拟，而是调用后端，让语言模型**真正自主选择并调用 skill、自主问诊**：
+`backend/server.py` 是一个零额外依赖（stdlib `http.server`）的 HTTP 服务，**同源提供前端 UI 与 `/api/*` 接口**。前端不再用浏览器端关键词规则模拟，而是调用后端，让语言模型**真正自主选择并调用 skill、自主问诊、并作为主推理者给出深度专业回答**：语言模型把候选证型/方剂/用药/安全等规则证据作为依据，结合自身中医知识输出长篇辨证论治分析（`tao_consultation_skill` + `generate_consultation`），追问由模型自主生成（`generate_probe_questions`）。安全采用**角色感知守卫** `guard_consultation`：医师/科研草案可含方剂、方义与经验剂量范围，但任何角色都不得出现"患者自行服用/无需就医"，患者角色保持严格（无诊断/处方/可执行剂量），违规即回退确定性规则。
 
 ```bash
 pip install -e .

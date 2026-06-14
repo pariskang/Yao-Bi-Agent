@@ -86,3 +86,27 @@ def test_disabled_backend_is_offline(monkeypatch):
     server = _server(monkeypatch, backend="disabled")
     assert server.TAO_ENABLED is False
     assert server.handle_health({})["tao"]["enabled"] is False
+
+
+def test_chat_answer_is_tao_primary_deep_consultation(monkeypatch):
+    # The model becomes the main reasoner: a long grounded consultation, never "信息不足".
+    server = _server(monkeypatch)
+    turn = server.handle_chat({
+        "question": "患者青年女性，跌扑后腰肌劳损，遇冷加重，舌淡红，苔薄白，脉细，什么证型、用什么方？",
+        "tags": [], "doctor_mode": True,
+    })["turn"]
+    assert turn["answer_source"] == "tao_primary_grounded"
+    assert turn["used_llm"] is True
+    assert len(turn["answer"]) > 200
+    assert "信息不足" not in turn["answer"]
+    assert "##" in turn["answer"]  # structured professional answer
+
+
+def test_followup_probe_is_model_generated_freeform(monkeypatch):
+    server = _server(monkeypatch)
+    res = server.handle_followup_probe({"stage": "pain", "tags": ["cold_aggravation"], "budget": 2, "doctor_mode": True})
+    runtime = res["tao_probe_runtime"]
+    assert runtime["status"] == "accepted"
+    assert runtime.get("mode") == "freeform"
+    assert res["probes"]
+    assert all(p["source"] == "tao_probe" for p in res["probes"])

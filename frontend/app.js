@@ -808,8 +808,8 @@ function renderChatModule() {
       <div class="chip-row">${g.items.map(i => `<button class="chip-btn" data-q="${escapeHtml(i.examples[0])}" title="${i.label}">${i.examples[0]}</button>`).join('')}</div>
     </div>`).join('');
   const statusLine = taoOnline()
-    ? `Tao 在线（${taoRuntimeTag()}）· 语言模型自主选择并调用技能 · 确定性规则/挖掘数据作答`
-    : '离线·规则模式（未连接 Tao 后端）· 标签如实显示为关键词 · 启动后端服务后自动启用 Tao';
+    ? `Tao 在线（${taoRuntimeTag()}）· 语言模型自主选择技能，并结合沈氏经验规则与脱敏数据进行辨证论治分析（供执业医师审核）`
+    : '离线·规则模式（未连接 Tao 后端）· 仅显示确定性规则要点 · 启动后端服务后由语言模型给出深度分析';
   screen.innerHTML = `
     <section class="result-panel">
       <p class="eyebrow">draft_for_clinician_review · ${statusLine}</p>
@@ -833,7 +833,26 @@ function renderChatModule() {
 }
 
 function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-function mdLite(s) { return escapeHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br/>'); }
+// Small Markdown renderer: headings / bullet lists / blockquotes / bold — for the long,
+// professional Tao consultation answers (not just **bold** + line breaks).
+function mdLite(s) {
+  const lines = escapeHtml(String(s == null ? '' : s)).split('\n');
+  const out = [];
+  let inList = false;
+  const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+  for (const raw of lines) {
+    const line = raw.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    const bullet = line.match(/^\s*[-•]\s+(.*)$/);
+    if (h) { closeList(); const lvl = Math.min(6, h[1].length + 3); out.push(`<h${lvl} class="md-h">${h[2]}</h${lvl}>`); }
+    else if (bullet) { if (!inList) { out.push('<ul class="md-ul">'); inList = true; } out.push(`<li>${bullet[1]}</li>`); }
+    else if (/^&gt;\s*/.test(line)) { closeList(); out.push(`<blockquote class="md-quote">${line.replace(/^&gt;\s*/, '')}</blockquote>`); }
+    else if (line.trim() === '') { closeList(); out.push('<div class="md-gap"></div>'); }
+    else { closeList(); out.push(`<p class="md-p">${line}</p>`); }
+  }
+  closeList();
+  return out.join('');
+}
 
 // ---------------------------------------------------------------------------
 // Multi-agent collaboration (mirrors backend AgentOrchestrator trace)

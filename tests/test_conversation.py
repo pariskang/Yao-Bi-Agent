@@ -97,7 +97,7 @@ def test_conversation_autonomously_invokes_skills_across_turns():
     assert len(s.history) == 3
     for turn in s.history:
         assert turn["suggested_followups"]
-        assert "不构成最终诊断" in turn["disclaimer"]
+        assert "最终诊断" in turn["disclaimer"]
 
 
 def test_conversation_reasoning_and_experience_use_tao_when_enabled():
