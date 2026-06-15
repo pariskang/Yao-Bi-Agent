@@ -69,7 +69,7 @@ TAO_BACKEND=transformers TAO_MODEL_ID=CMLM/Dao1-30b-a3b \
 | 对话式智能问诊 | `POST /api/interview` | Tao 抽取槽位→FSM 判阶段/红旗→模型自主追问→会诊报告；命中红旗（如马尾综合征）即终止并由 Tao 生成结构化急诊转诊建议，医师可 `review_action` 确认/修订/覆盖（`YaoBiInterviewEngine`） |
 | 智能体协作 | `POST /api/collaboration` | `ReasoningAgent`/`ExperienceAgent` 真实调用 Tao |
 
-只有模型真正路由时 UI 才标 `Tao 选择 ✓`，否则如实标 `关键词回退`/`离线`；安全护栏与 Output Guard 服务端强制。Tao 默认以**全量 FP16 推理**（`TAO_TORCH_DTYPE=float16`、无量化）运行，按官方模型卡推荐方式加载——30B-A3B MoE FP16 权重约 60GB，推荐 A100 80GB / H100，单卡显存不足时 `device_map=auto` 自动 CPU offload（能跑但较慢）。`TAO_LOAD_IN_4BIT`/`TAO_LOAD_IN_8BIT` 可选，但 30B-MoE + 单卡 < 60GB 时与 `device_map=auto` 配合常会触发 `bitsandbytes` 的 CPU offload 错误，故不再作为默认。未连接后端时前端自动回退到本地规则镜像并如实标注。
+只有模型真正路由时 UI 才标 `Tao 选择 ✓`，否则如实标 `关键词回退`/`离线`；安全护栏与 Output Guard 服务端强制。Tao 默认以**全量 FP16 推理**（`TAO_TORCH_DTYPE=float16`、无量化）运行，按官方模型卡推荐方式加载——30B-A3B MoE FP16 权重约 60GB，推荐 A100 80GB / H100，单卡显存不足时 `device_map=auto` 自动 CPU offload（能跑但较慢）。`TAO_LOAD_IN_4BIT`/`TAO_LOAD_IN_8BIT` 可选，但 30B-MoE + 单卡 < 60GB 时与 `device_map=auto` 配合常会触发 `bitsandbytes` 的 CPU offload 错误，故不再作为默认。未连接后端时前端自动回退到本地规则镜像并如实标注。`transformers` 后端启动时会在**后台线程预加载**模型（可用 `--no-preload` 或 `TAO_PRELOAD=0` 关闭），`/api/health` 暴露 `load_state`（`loading`/`ready`/`error`）+ `model_loaded`，故加载进度与失败原因可被轮询观察——**可捕获**的加载错误不再让进程崩溃，避免预热只剩 `Connection refused`（排查见 [`colab/README.md`](colab/README.md)）。
 
 ## Colab 一键复现（含 ngrok 公网 UI）
 

@@ -212,6 +212,40 @@ def test_interview_physician_revise(monkeypatch):
     assert res["done"] is True
 
 
+def test_health_reports_model_load_lifecycle(monkeypatch):
+    # /api/health now exposes load_state/model_loaded so a client can poll readiness instead of
+    # holding one long warmup request open and seeing only "Connection refused" when it fails.
+    server = _server(monkeypatch)
+    tao = server.handle_health({})["tao"]
+    assert tao["load_state"] == "ready"  # mock backend needs no weights
+    assert "model_loaded" in tao
+    assert "load_error" in tao
+
+
+def test_should_preload_prefers_flag_then_env_then_backend(monkeypatch):
+    server = _server(monkeypatch)
+    # Explicit --preload/--no-preload wins over everything.
+    assert server._should_preload(True, "mock") is True
+    assert server._should_preload(False, "transformers") is False
+    # Then TAO_PRELOAD env.
+    monkeypatch.setenv("TAO_PRELOAD", "1")
+    assert server._should_preload(None, "mock") is True
+    monkeypatch.setenv("TAO_PRELOAD", "off")
+    assert server._should_preload(None, "transformers") is False
+    # Default (no flag, no env): eager only for the heavy transformers backend.
+    monkeypatch.delenv("TAO_PRELOAD", raising=False)
+    assert server._should_preload(None, "transformers") is True
+    assert server._should_preload(None, "mock") is False
+
+
+def test_warmup_reports_disabled_backend_cleanly(monkeypatch):
+    # Disabled backend must answer warmup with a reason (ok=False), never crash the request.
+    server = _server(monkeypatch, backend="disabled")
+    res = server.handle_warmup({})
+    assert res["ok"] is False
+    assert "reason" in res
+
+
 def test_interview_physician_override_resumes_fsm(monkeypatch):
     """Physician override clears red flags and the FSM resumes asking clinical questions."""
     server = _server(monkeypatch)
