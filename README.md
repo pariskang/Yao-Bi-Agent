@@ -56,7 +56,7 @@ TAO_BACKEND=transformers TAO_MAX_NEW_TOKENS=512 python -m backend.main --tao-cha
 ```bash
 pip install -e .
 # 选 Tao 运行时（默认 disabled）：mock 验证 / 本地 transformers / 外部 http 接口
-TAO_BACKEND=transformers TAO_MODEL_ID=CMLM/Dao1-30b-a3b TAO_LOAD_IN_4BIT=true \
+TAO_BACKEND=transformers TAO_MODEL_ID=CMLM/Dao1-30b-a3b \
   python -m backend.server --port 8000
 # 打开 http://localhost:8000 —— 右上角显示「Tao 在线」徽章；method=llm 即模型真实路由
 ```
@@ -69,13 +69,13 @@ TAO_BACKEND=transformers TAO_MODEL_ID=CMLM/Dao1-30b-a3b TAO_LOAD_IN_4BIT=true \
 | 对话式智能问诊 | `POST /api/interview` | Tao 抽取槽位→FSM 判阶段/红旗→模型自主追问→会诊报告；命中红旗（如马尾综合征）即终止并由 Tao 生成结构化急诊转诊建议，医师可 `review_action` 确认/修订/覆盖（`YaoBiInterviewEngine`） |
 | 智能体协作 | `POST /api/collaboration` | `ReasoningAgent`/`ExperienceAgent` 真实调用 Tao |
 
-只有模型真正路由时 UI 才标 `Tao 选择 ✓`，否则如实标 `关键词回退`/`离线`；安全护栏与 Output Guard 服务端强制。`TAO_LOAD_IN_4BIT`/`TAO_LOAD_IN_8BIT` 让 30B MoE 适配单卡 A100/L4（需 `bitsandbytes`）。未连接后端时前端自动回退到本地规则镜像并如实标注。
+只有模型真正路由时 UI 才标 `Tao 选择 ✓`，否则如实标 `关键词回退`/`离线`；安全护栏与 Output Guard 服务端强制。Tao 默认以**全量 FP16 推理**（`TAO_TORCH_DTYPE=float16`、无量化）运行，按官方模型卡推荐方式加载——30B-A3B MoE FP16 权重约 60GB，推荐 A100 80GB / H100，单卡显存不足时 `device_map=auto` 自动 CPU offload（能跑但较慢）。`TAO_LOAD_IN_4BIT`/`TAO_LOAD_IN_8BIT` 可选，但 30B-MoE + 单卡 < 60GB 时与 `device_map=auto` 配合常会触发 `bitsandbytes` 的 CPU offload 错误，故不再作为默认。未连接后端时前端自动回退到本地规则镜像并如实标注。
 
 ## Colab 一键复现（含 ngrok 公网 UI）
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pariskang/Yao-Bi-Agent/blob/claude/focused-planck-3dv9we/colab/YaoBi_Skill_Colab.ipynb)
 
-[`colab/YaoBi_Skill_Colab.ipynb`](colab/YaoBi_Skill_Colab.ipynb) 在 Google Colab 上一键复现全部功能：启动 `backend.server`（默认本地 4-bit 加载 `CMLM/Dao1-30b-a3b`，需 A100/L4）、经 **ngrok** 暴露 `https://xxxx.ngrok-free.app` 公网链接，UI 即可**真正调用语言模型**自主选择技能与问诊，并复现规则管线、多智能体协作、全量测试与脱敏挖掘。无 GPU 时可在笔记本第 ② 步切换 mock / 小模型 / 外部 HTTP 接口。详见 [`colab/README.md`](colab/README.md)。
+[`colab/YaoBi_Skill_Colab.ipynb`](colab/YaoBi_Skill_Colab.ipynb) 在 Google Colab 上一键复现全部功能：启动 `backend.server`（默认本地 **全量 FP16** 加载 `CMLM/Dao1-30b-a3b`，推荐 A100 80GB / H100）、经 **ngrok** 暴露 `https://xxxx.ngrok-free.app` 公网链接，UI 即可**真正调用语言模型**自主选择技能与问诊，并复现规则管线、多智能体协作、全量测试与脱敏挖掘。无 GPU 时可在笔记本第 ② 步切换 mock / 小模型 / 外部 HTTP 接口。详见 [`colab/README.md`](colab/README.md)。
 
 ## 自动问诊：YaoBi-CaseGuide Skill
 
