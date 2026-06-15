@@ -22,7 +22,9 @@ from __future__ import annotations
 import argparse
 import http.server
 import json
+import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -177,7 +179,12 @@ _INTERVIEWS: dict[str, YaoBiCaseState] = {}
 
 
 def handle_interview(data: dict[str, Any]) -> dict[str, Any]:
-    """One turn of the Tao-driven conversational interview (extract → FSM → ask → report)."""
+    """One turn of the Tao-driven conversational interview (extract → FSM → ask → report).
+
+    Supports an additional ``review_action`` field for physician confirmation / revision /
+    override of the safety referral (POST body: ``review_action``, ``physician_notes``,
+    ``override_reason``).  Only meaningful when the session is in ``SAFETY_REFERRAL`` state.
+    """
 
     session_id = str(data.get("session_id") or "default")
     if data.get("reset"):
@@ -188,7 +195,16 @@ def handle_interview(data: dict[str, Any]) -> dict[str, Any]:
         case = YaoBiCaseState(session_id=session_id)
         _INTERVIEWS[session_id] = case
     engine = YaoBiInterviewEngine(dao_client=CLIENT, use_llm=TAO_ENABLED)
-    result = engine.run_turn(case, str(data.get("message") or ""))
+    review_action = str(data.get("review_action") or "").strip()
+    if review_action:
+        result = engine.run_review(
+            case,
+            action=review_action,
+            physician_notes=str(data.get("physician_notes") or ""),
+            override_reason=str(data.get("override_reason") or ""),
+        )
+    else:
+        result = engine.run_turn(case, str(data.get("message") or ""))
     result["tao"] = tao_info()
     return result
 
@@ -201,6 +217,8 @@ def handle_warmup(_data: dict[str, Any]) -> dict[str, Any]:
         reply = CLIENT.chat([], "请用一句话说明你在本系统中的角色边界。")
     except DaoRuntimeError as exc:
         return {"ok": False, "reason": str(exc), "tao": tao_info()}
+    except Exception as exc:  # noqa: BLE001 — report the real cause instead of a 500
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}", "tao": tao_info()}
     return {"ok": True, "ms": int((time.time() - started) * 1000), "reply_preview": str(reply)[:160], "tao": tao_info()}
 
 
@@ -275,8 +293,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _dispatch(self, handler: Any, data: dict[str, Any]) -> None:
         try:
             self._send_json(handler(data))
-        except Exception as exc:  # never crash the UI; surface a JSON error
-            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=500)
+        except Exception as exc:  # never crash the UI; surface a JSON error + log full cause
+            tb = traceback.format_exc()
+            print(f"[yaobi-server] {self.path} failed:\n{tb}", file=sys.stderr, flush=True)
+            self._send_json({"error": f"{type(exc).__name__}: {exc}", "traceback": tb.splitlines()[-3:]}, status=500)
 
 
 def make_server(port: int = 8000, host: str = "0.0.0.0") -> http.server.ThreadingHTTPServer:

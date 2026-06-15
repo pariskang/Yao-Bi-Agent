@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from backend.llm.prompt_templates import (
     CONSULTATION_PROMPT_TEMPLATE,
+    EMERGENCY_REFERRAL_PROMPT_TEMPLATE,
     EXPERIENCE_SUMMARY_PROMPT_TEMPLATE,
     FOLLOWUP_PROBE_PROMPT_TEMPLATE,
     INTERVIEW_EXTRACTION_PROMPT_TEMPLATE,
@@ -201,6 +202,59 @@ class DaoClient:
             case_summary=json.dumps(interview_context.get("case_summary", {}), ensure_ascii=False, default=str),
         )
         return self._dispatch(self.build_prompt(body), self._mock_interview_question(interview_context), "interview question")
+
+    def generate_emergency_referral(self, referral_context: dict[str, Any]) -> str:
+        """Tao reasons over detected red flags and produces ER referral clinical guidance.
+
+        Output is free-form Markdown for clinicians (not a diagnosis or prescription):
+        clinical significance of each flag, what to bring to the ER, precautions, and urgency
+        classification.  The caller guards the result with ``guard_consultation`` before use.
+        """
+
+        flags = referral_context.get("red_flags") or []
+        body = EMERGENCY_REFERRAL_PROMPT_TEMPLATE.format(
+            red_flags="\n".join(f"- {f}" for f in flags) or "- （危险信号待明确）",
+            case_summary=json.dumps(referral_context.get("case_summary", {}), ensure_ascii=False, indent=2, default=str),
+        )
+        return self._dispatch(self.build_prompt(body), self._mock_emergency_referral(referral_context), "emergency referral")
+
+    def _mock_emergency_referral(self, ctx: dict[str, Any]) -> str:
+        flags = ctx.get("red_flags") or []
+        safety_level = ctx.get("safety_level", "high")
+        is_emergency = safety_level == "emergency"
+        level_label = "**Ⅰ级急诊（立即就诊）**" if is_emergency else "**Ⅱ级急诊（2小时内就诊）**"
+        flags_md = "\n".join(f"- {f}" for f in flags) or "- 高风险信号（详见问诊记录）"
+        clinical_meaning = (
+            "马尾神经位于脊髓圆锥以下，受压后若未及时手术减压，可能导致永久性大小便功能障碍及下肢感觉运动缺失。"
+            "神经功能保护的时间窗有限（通常以48小时为关键节点），尽早影像确认和手术决策是预后的关键。"
+            if is_emergency else
+            "上述危险信号提示可能存在感染性、肿瘤性或骨折性脊柱病变，需尽快影像学确认与专科评估。"
+        )
+        urgency_reason = (
+            "马尾神经受压的可能性不能排除，时间窗决定预后，需立即脊柱外科/神经外科评估。"
+            if is_emergency else
+            "危险信号提示需要专科排除严重病变，建议尽快就医而非等待普通门诊。"
+        )
+        return (
+            f"## 急诊转诊临床参考（供执业医师审核 · 非患者自用）\n\n"
+            f"### 一、危险信号临床意义\n"
+            f"{flags_md}\n\n"
+            f"{clinical_meaning}\n\n"
+            f"### 二、就诊时建议携带的信息\n"
+            f"1. 各症状出现/加重的确切时间（尤其大小便障碍、肢体无力的起始时刻）\n"
+            f"2. 近期腰椎影像资料（MRI/CT/X线报告及原始图像，如有）\n"
+            f"3. 目前用药清单（止痛药/抗凝/激素/降糖等）\n"
+            f"4. 既往脊柱手术史、肿瘤病史及药物过敏史\n\n"
+            f"### 三、转诊前注意事项\n"
+            f"- 避免剧烈弯腰、扭转或搬运重物，防止加重神经损伤\n"
+            f"- 建议平卧位等待或由120急救担架搬运，避免长时间坐位移动\n"
+            f"- 如症状骤然加重（双下肢完全无力/完全失禁），立即拨打120急救\n"
+            f"- 镇痛药物是否使用请由急诊接诊医师判断，就医前请勿擅自用药以免影响评估\n\n"
+            f"### 四、紧迫度评级\n"
+            f"{level_label}\n"
+            f"理由：{urgency_reason}\n\n"
+            f"> 本内容为供执业医师参考的急诊转诊辅助信息，最终处置由接诊医师决定，患者不可据此自行用药。"
+        )
 
     def generate_probe_questions(self, probe_context: dict[str, Any]) -> str:
         """Tao-primary follow-up: the model freely asks the next clarifying questions."""
@@ -666,28 +720,36 @@ class DaoClient:
         return inputs.to(device) if device is not None else inputs
 
     def _generate_transformers(self, prompt: str, stream_callback: Any | None = None) -> str:
-        transformers, tokenizer, model = self._load_transformers_runtime()
-        inputs = self._tokenize_for_model(tokenizer, model, prompt)
-        generate_kwargs = dict(
-            **inputs,
-            max_new_tokens=self.config.max_new_tokens,
-            do_sample=self.config.do_sample,
-            temperature=self.config.temperature,
-            top_p=self.config.top_p,
-            repetition_penalty=self.config.repetition_penalty,
-            use_cache=True,
-        )
-        if stream_callback is not None:
-            streamer = transformers.TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-            thread = Thread(target=model.generate, kwargs={**generate_kwargs, "streamer": streamer})
-            thread.start()
-            response = ""
-            for token in streamer:
-                stream_callback(token)
-                response += token
-            thread.join()
-            return response
+        # Convert any transformers/torch/load/OOM failure into DaoRuntimeError so every caller
+        # (routing, consultation, probe, interview) degrades gracefully to deterministic rules
+        # instead of surfacing an opaque HTTP 500 — and the real cause is preserved in the message.
+        try:
+            transformers, tokenizer, model = self._load_transformers_runtime()
+            inputs = self._tokenize_for_model(tokenizer, model, prompt)
+            generate_kwargs = dict(
+                **inputs,
+                max_new_tokens=self.config.max_new_tokens,
+                do_sample=self.config.do_sample,
+                temperature=self.config.temperature,
+                top_p=self.config.top_p,
+                repetition_penalty=self.config.repetition_penalty,
+                use_cache=True,
+            )
+            if stream_callback is not None:
+                streamer = transformers.TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+                thread = Thread(target=model.generate, kwargs={**generate_kwargs, "streamer": streamer})
+                thread.start()
+                response = ""
+                for token in streamer:
+                    stream_callback(token)
+                    response += token
+                thread.join()
+                return response
 
-        outputs = model.generate(**generate_kwargs)
-        generated = outputs[0][inputs["input_ids"].shape[-1] :]
-        return tokenizer.decode(generated, skip_special_tokens=True)
+            outputs = model.generate(**generate_kwargs)
+            generated = outputs[0][inputs["input_ids"].shape[-1] :]
+            return tokenizer.decode(generated, skip_special_tokens=True)
+        except DaoRuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — surface cause, never crash the request
+            raise DaoRuntimeError(f"transformers backend failed: {type(exc).__name__}: {exc}") from exc

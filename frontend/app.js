@@ -355,6 +355,37 @@ function interviewReset() {
   interviewSend('');   // fresh opening question
 }
 
+async function interviewReview(action, notes) {
+  const iv = ensureInterview();
+  if (iv.pending) return;
+  const actionLabel = {confirm: '✓ 医师确认急诊转诊建议', revise: '✎ 医师修订转诊建议', override: '↺ 医师覆盖红旗评估，恢复问诊'}[action] || action;
+  iv.history.push({ role: 'physician', content: `${actionLabel}${notes ? '\n备注：' + notes : ''}` });
+  iv.pending = true;
+  renderConversationalInterview();
+  try {
+    const body = { session_id: iv.sessionId, review_action: action };
+    if (action === 'override') {
+      body.override_reason = notes;
+    } else {
+      body.physician_notes = notes;
+    }
+    const res = await api.post('/api/interview', body);
+    iv.pending = false;
+    iv.info = res;
+    iv.report = res.report || null;
+    // Override resumes the FSM → response message is the next Tao question (assistant).
+    // Confirm / revise stop the interview → response message is a physician confirmation echo (skip, already shown above).
+    if (action === 'override') {
+      iv.history.push({ role: 'assistant', content: res.message, state: res.state, done: res.done });
+    }
+  } catch (e) {
+    iv.pending = false;
+    await api.health(); renderTaoBadge();
+    iv.history.push({ role: 'assistant', content: '（医师审核提交失败，请重试。）', error: true });
+  }
+  renderConversationalInterview();
+}
+
 function renderConversationalInterview() {
   pageTitle.textContent = '智能问诊 · Tao 驱动的对话式腰痹问诊';
   const iv = ensureInterview();
@@ -378,18 +409,23 @@ function renderConversationalInterview() {
   const topP = Math.max(...patterns.map(p => p.prob || 0), 0.001);
   const bubbles = iv.history.map(m => {
     if (m.role === 'user') return `<div class="chat-turn"><div class="bubble user">${escapeHtml(m.content)}</div></div>`;
+    if (m.role === 'physician') {
+      return `<div class="chat-turn"><div class="bubble physician"><div class="bot-meta"><span class="kind-badge physician-badge">医师审核</span></div><div class="bot-body">${mdLite(m.content)}</div></div></div>`;
+    }
     const tag = m.done ? '<span class="kind-badge llm-on">问诊小结</span>' : '<span class="kind-badge llm">Tao 追问</span>';
     return `<div class="chat-turn"><div class="bubble bot"><div class="bot-meta">${tag}${m.state ? `<span class="route-tag">${escapeHtml(m.state)}</span>` : ''}</div><div class="bot-body">${mdLite(m.content)}</div></div></div>`;
   }).join('');
   const pendingHtml = iv.pending ? `<div class="chat-turn"><div class="bubble bot"><div class="bot-body muted">⏳ Tao 正在分析并组织下一步追问…（${escapeHtml(taoRuntimeTag())}）</div></div></div>` : '';
 
   const redFlags = (info.red_flags || []);
+  const pr = info.physician_review || {};
   const sidePanel = `
     <section class="result-panel interview-side">
       <h3>问诊状态</h3>
       <p class="eyebrow">${escapeHtml(info.state || 'SAFETY_TRIAGE')} · 第 ${info.turn_count || 0} 轮</p>
       <p class="muted">${escapeHtml(info.state_goal || '安全筛查与信息采集')}</p>
-      ${redFlags.length ? `<div class="redflag-box"><strong>⚠ 风险信号</strong><ul>${redFlags.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul></div>` : ''}
+      ${redFlags.length ? `<div class="redflag-box"><strong>⚠ 风险信号${info.safety_level === 'emergency' ? ' · 急诊' : ''}</strong><ul>${redFlags.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul></div>` : ''}
+      ${pr.status ? `<div class="review-status-badge review-${pr.status}">医师审核：${escapeHtml({'confirmed':'已确认转诊','revised':'已修订','overridden':'已覆盖（恢复问诊）'}[pr.status] || pr.status)}</div>` : ''}
       <h4>候选证候（规则评分，模型据此追问）</h4>
       ${patterns.length ? patterns.slice(0, 5).map(p => `
         <div class="bar-row"><span class="bar-label">${escapeHtml(p.pattern)}</span>
@@ -398,6 +434,28 @@ function renderConversationalInterview() {
       <p class="muted">不确定度：${info.uncertainty != null ? info.uncertainty : '—'}</p>
       ${(info.target_slots || []).length ? `<h4>本轮关注</h4><div class="chip-cloud">${info.target_slots.map(s => `<span class="chip">${escapeHtml(s)}</span>`).join('')}</div>` : ''}
     </section>`;
+
+  // Physician review panel — only in doctor_mode when the FSM has halted on a safety referral
+  // and the physician hasn't reviewed yet.
+  const needsReview = state.doctorMode && info.physician_review_required && info.state === 'SAFETY_REFERRAL';
+  const taoguidance = info.referral_tao_guidance || '';
+  const reviewPanel = needsReview ? `
+    <section class="result-panel physician-review-panel">
+      <p class="eyebrow">PHYSICIAN_REVIEW · doctor_mode · 仅执业医师可见</p>
+      <h3>医师审核转诊建议</h3>
+      <p>系统已检测到危险信号并暂停问诊。请选择处置方式：</p>
+      ${taoguidance ? `<details class="tao-guidance-details"><summary><strong>Tao 急诊转诊参考（供医师参考）</strong></summary><div class="bot-body">${mdLite(taoguidance)}</div></details>` : ''}
+      <div class="review-actions">
+        <button class="primary-btn" id="ivConfirm">✓ 确认转诊建议</button>
+        <button class="ghost-btn" id="ivRevise">✎ 修订并添加医师备注</button>
+        <button class="danger-btn" id="ivOverride">↺ 覆盖红旗判断（慎用）</button>
+      </div>
+      <div id="reviewNotesArea" class="review-notes-area" style="display:none">
+        <p class="muted" id="reviewNoteHint"></p>
+        <textarea id="ivNotes" class="free-note" placeholder="请输入医师备注（必填）…" rows="3"></textarea>
+        <button class="primary-btn" id="ivSubmitNotes">提交</button>
+      </div>
+    </section>` : '';
 
   screen.innerHTML = `
     <div class="intake-switch">
@@ -411,16 +469,35 @@ function renderConversationalInterview() {
       <section class="result-panel">
         <p class="eyebrow">draft_for_clinician_review · 语言模型抽取→规则红旗/证候→Tao 自主追问→会诊报告</p>
         <div class="chat-window">${bubbles || '<p class="muted">请描述您目前最主要的腰部不适（部位、多久、是否放射到腿、有无麻木无力）。</p>'}${pendingHtml}</div>
-        <div class="chat-input"><input id="ivInput" type="text" placeholder="像跟医生说话一样描述症状，例如：腰痛半年，弯腰加重，左腿发麻……" /><button class="primary-btn" id="ivSend">发送</button></div>
+        ${!info.done ? `<div class="chat-input"><input id="ivInput" type="text" placeholder="像跟医生说话一样描述症状，例如：腰痛半年，弯腰加重，左腿发麻……" /><button class="primary-btn" id="ivSend">发送</button></div>` : ''}
       </section>
       ${sidePanel}
-    </div>`;
+    </div>
+    ${reviewPanel}`;
+
   screen.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => setIntakeMode(b.dataset.mode)));
   document.querySelector('#ivReset').addEventListener('click', interviewReset);
-  const input = document.querySelector('#ivInput');
-  const send = () => { const v = input.value.trim(); if (v) { input.value = ''; interviewSend(v); } };
-  document.querySelector('#ivSend').addEventListener('click', send);
-  input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  if (!info.done) {
+    const input = document.querySelector('#ivInput');
+    const send = () => { const v = input.value.trim(); if (v) { input.value = ''; interviewSend(v); } };
+    document.querySelector('#ivSend').addEventListener('click', send);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  }
+  if (needsReview) {
+    let reviewMode = '';
+    const showNotes = (hint) => {
+      document.querySelector('#reviewNotesArea').style.display = '';
+      document.querySelector('#reviewNoteHint').textContent = hint;
+    };
+    document.querySelector('#ivConfirm').addEventListener('click', () => interviewReview('confirm', ''));
+    document.querySelector('#ivRevise').addEventListener('click', () => { reviewMode = 'revise'; showNotes('请填写医师修订备注（将附加到转诊记录）：'); });
+    document.querySelector('#ivOverride').addEventListener('click', () => { reviewMode = 'override'; showNotes('请填写覆盖理由（将记录在案，审计用）：'); });
+    document.querySelector('#ivSubmitNotes').addEventListener('click', () => {
+      const notes = (document.querySelector('#ivNotes').value || '').trim();
+      if (!notes) { alert('备注内容不能为空。'); return; }
+      interviewReview(reviewMode, notes);
+    });
+  }
   const win = screen.querySelector('.chat-window');
   if (win) win.scrollTop = win.scrollHeight;
 }
