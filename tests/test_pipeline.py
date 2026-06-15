@@ -24,14 +24,23 @@ def test_safety_flags_raw_red_flag():
 
 
 def test_direct_tao_cli_disabled_returns_friendly_error():
+    import os
     import subprocess
     import sys
+
+    # Subprocess must see TAO_BACKEND=disabled regardless of the host environment
+    # (a Colab notebook may have set TAO_BACKEND=transformers so the UI works) —
+    # otherwise the CLI would try to load the real model instead of hitting the
+    # "disabled" branch this test guards.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("TAO_")}
+    env["TAO_BACKEND"] = "disabled"
 
     result = subprocess.run(
         [sys.executable, "-m", "backend.main", "--tao-chat", "测试"],
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
     assert result.returncode == 2
     assert "Tao direct chat is disabled" in result.stderr
