@@ -317,6 +317,8 @@ code { background: var(--bg-deep); border-radius: 5px; padding: .1rem .35rem; fo
 .tao-guidance-details summary { padding: 10px 14px; cursor: pointer; background: var(--panel, #fff); font-size: 13px; }
 .tao-guidance-details[open] summary { border-bottom: 1px solid var(--line); }
 .tao-guidance-details .bot-body { padding: 12px 14px; }
+.bubble.physician { background: rgba(140,80,0,.05); border: 1px solid rgba(140,80,0,.25); border-radius: var(--radius-md); padding: 10px 14px; }
+.kind-badge.physician-badge { background: rgba(140,80,0,.12); color: #8a5000; }
 
 /* Tao runtime status badge (topbar) */
 .tao-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--line); white-space: nowrap; }

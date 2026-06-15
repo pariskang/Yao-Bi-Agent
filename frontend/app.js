@@ -358,6 +358,8 @@ function interviewReset() {
 async function interviewReview(action, notes) {
   const iv = ensureInterview();
   if (iv.pending) return;
+  const actionLabel = {confirm: '✓ 医师确认急诊转诊建议', revise: '✎ 医师修订转诊建议', override: '↺ 医师覆盖红旗评估，恢复问诊'}[action] || action;
+  iv.history.push({ role: 'physician', content: `${actionLabel}${notes ? '\n备注：' + notes : ''}` });
   iv.pending = true;
   renderConversationalInterview();
   try {
@@ -371,7 +373,11 @@ async function interviewReview(action, notes) {
     iv.pending = false;
     iv.info = res;
     iv.report = res.report || null;
-    iv.history.push({ role: 'physician', content: res.message, state: res.state, done: res.done });
+    // Override resumes the FSM → response message is the next Tao question (assistant).
+    // Confirm / revise stop the interview → response message is a physician confirmation echo (skip, already shown above).
+    if (action === 'override') {
+      iv.history.push({ role: 'assistant', content: res.message, state: res.state, done: res.done });
+    }
   } catch (e) {
     iv.pending = false;
     await api.health(); renderTaoBadge();
@@ -403,6 +409,9 @@ function renderConversationalInterview() {
   const topP = Math.max(...patterns.map(p => p.prob || 0), 0.001);
   const bubbles = iv.history.map(m => {
     if (m.role === 'user') return `<div class="chat-turn"><div class="bubble user">${escapeHtml(m.content)}</div></div>`;
+    if (m.role === 'physician') {
+      return `<div class="chat-turn"><div class="bubble physician"><div class="bot-meta"><span class="kind-badge physician-badge">医师审核</span></div><div class="bot-body">${mdLite(m.content)}</div></div></div>`;
+    }
     const tag = m.done ? '<span class="kind-badge llm-on">问诊小结</span>' : '<span class="kind-badge llm">Tao 追问</span>';
     return `<div class="chat-turn"><div class="bubble bot"><div class="bot-meta">${tag}${m.state ? `<span class="route-tag">${escapeHtml(m.state)}</span>` : ''}</div><div class="bot-body">${mdLite(m.content)}</div></div></div>`;
   }).join('');
