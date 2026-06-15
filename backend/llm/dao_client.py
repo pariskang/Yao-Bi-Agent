@@ -84,9 +84,65 @@ class DaoClient:
     _tokenizer: Any = None
     _model: Any = None
     _model_signature: tuple[str, str, str, str] | None = None
+    # Load lifecycle for the heavy transformers backend so callers (server health,
+    # Colab warmup) can observe progress instead of blocking blindly on the first
+    # request: "idle" → "loading" → "ready"/"error". This is what lets the UI report
+    # "still loading" vs. "load failed" instead of surfacing an opaque Connection refused.
+    _load_state: Literal["idle", "loading", "ready", "error"] = "idle"
+    _load_error: str | None = None
 
     def __init__(self, config: DaoGenerationConfig | None = None) -> None:
         self.config = config or DaoGenerationConfig.from_env()
+
+    def load_status(self) -> dict[str, Any]:
+        """Non-blocking snapshot of the model load lifecycle (safe to poll from /api/health).
+
+        ``mock``/``http`` need no local weights, so they report ``ready`` immediately;
+        ``disabled`` reports ``disabled``; ``transformers`` reflects the real load state
+        (``idle`` → ``loading`` → ``ready``/``error``). This is read without the model lock
+        on purpose so a health check never blocks behind a multi-minute 30B load.
+        """
+
+        backend = self.config.backend
+        if backend == "disabled":
+            state = "disabled"
+        elif backend in {"mock", "http"}:
+            state = "ready"
+        else:
+            state = self.__class__._load_state
+        return {
+            "backend": backend,
+            "state": state,
+            "model_loaded": self.__class__._model is not None,
+            "error": self.__class__._load_error,
+        }
+
+    def preload(self) -> dict[str, Any]:
+        """Eagerly load the runtime so the first real request is fast and failures are visible.
+
+        Decoupling the heavy ``transformers`` load from the HTTP request handler is what
+        prevents a load failure (e.g. an OOM-killed 30B FP16 load) from masquerading as an
+        opaque ``Connection refused`` on the next warmup. Catchable errors are returned as
+        ``{"ok": False, ...}`` with the real cause; ``mock``/``http``/``disabled`` are no-ops.
+        """
+
+        backend = self.config.backend
+        if backend == "disabled":
+            return {"ok": False, "state": "disabled", "backend": backend, "reason": "Tao backend disabled (set TAO_BACKEND=transformers/http/mock)."}
+        if backend in {"mock", "http"}:
+            self.__class__._load_state = "ready"
+            return {"ok": True, "state": "ready", "backend": backend, "model_id": self.config.model_id}
+        if backend == "transformers":
+            self.__class__._load_state = "loading"
+            self.__class__._load_error = None
+            try:
+                self._load_transformers_runtime()
+            except Exception as exc:  # noqa: BLE001 — surface the real cause instead of crashing the preload thread
+                self.__class__._load_state = "error"
+                self.__class__._load_error = f"{type(exc).__name__}: {exc}"
+                return {"ok": False, "state": "error", "backend": backend, "model_id": self.config.model_id, "reason": self.__class__._load_error}
+            return {"ok": True, "state": "ready", "backend": backend, "model_id": self.config.model_id}
+        return {"ok": False, "state": "error", "backend": backend, "reason": f"Unsupported Tao backend: {backend}"}
 
     def build_prompt(self, user_content: str, history: list[dict[str, str]] | None = None) -> str:
         text = f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
@@ -675,30 +731,38 @@ class DaoClient:
                 or self.__class__._model is None
                 or self.__class__._model_signature != signature
             ):
-                dtype = getattr(torch, self.config.torch_dtype, torch.float16)
-                from_pretrained_kwargs: dict[str, Any] = {
-                    "trust_remote_code": True,
-                    "device_map": self.config.device_map,
-                    "attn_implementation": self.config.attn_implementation,
-                }
-                # Optional 4-bit / 8-bit quantization lets large models (e.g. the 30B MoE
-                # CMLM/Dao1-30b-a3b) fit a single A100/L4; requires the bitsandbytes package.
-                if self.config.load_in_4bit or self.config.load_in_8bit:
-                    from_pretrained_kwargs["quantization_config"] = transformers.BitsAndBytesConfig(
-                        load_in_4bit=self.config.load_in_4bit,
-                        load_in_8bit=self.config.load_in_8bit and not self.config.load_in_4bit,
-                        bnb_4bit_compute_dtype=dtype,
-                        bnb_4bit_quant_type="nf4",
-                        bnb_4bit_use_double_quant=True,
+                self.__class__._load_state = "loading"
+                self.__class__._load_error = None
+                try:
+                    dtype = getattr(torch, self.config.torch_dtype, torch.float16)
+                    from_pretrained_kwargs: dict[str, Any] = {
+                        "trust_remote_code": True,
+                        "device_map": self.config.device_map,
+                        "attn_implementation": self.config.attn_implementation,
+                    }
+                    # Optional 4-bit / 8-bit quantization lets large models (e.g. the 30B MoE
+                    # CMLM/Dao1-30b-a3b) fit a single A100/L4; requires the bitsandbytes package.
+                    if self.config.load_in_4bit or self.config.load_in_8bit:
+                        from_pretrained_kwargs["quantization_config"] = transformers.BitsAndBytesConfig(
+                            load_in_4bit=self.config.load_in_4bit,
+                            load_in_8bit=self.config.load_in_8bit and not self.config.load_in_4bit,
+                            bnb_4bit_compute_dtype=dtype,
+                            bnb_4bit_quant_type="nf4",
+                            bnb_4bit_use_double_quant=True,
+                        )
+                    else:
+                        from_pretrained_kwargs["torch_dtype"] = dtype
+                    self.__class__._tokenizer = transformers.AutoTokenizer.from_pretrained(self.config.model_id, trust_remote_code=True)
+                    self.__class__._model = transformers.AutoModelForCausalLM.from_pretrained(
+                        self.config.model_id,
+                        **from_pretrained_kwargs,
                     )
-                else:
-                    from_pretrained_kwargs["torch_dtype"] = dtype
-                self.__class__._tokenizer = transformers.AutoTokenizer.from_pretrained(self.config.model_id, trust_remote_code=True)
-                self.__class__._model = transformers.AutoModelForCausalLM.from_pretrained(
-                    self.config.model_id,
-                    **from_pretrained_kwargs,
-                )
-                self.__class__._model_signature = signature
+                    self.__class__._model_signature = signature
+                except Exception as exc:  # noqa: BLE001 — record cause so health/warmup report it, then re-raise
+                    self.__class__._load_state = "error"
+                    self.__class__._load_error = f"{type(exc).__name__}: {exc}"
+                    raise
+            self.__class__._load_state = "ready"
         return transformers, self.__class__._tokenizer, self.__class__._model
 
     def _model_input_device(self, model: Any) -> Any | None:

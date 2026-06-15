@@ -22,10 +22,12 @@ from __future__ import annotations
 import argparse
 import http.server
 import json
+import os
 import sys
 import time
 import traceback
 from pathlib import Path
+from threading import Thread
 from typing import Any
 
 from backend.agents.autonomous_agent import AutonomousQAAgent
@@ -64,11 +66,17 @@ STAGE_FIELDS = {
 
 def tao_info() -> dict[str, Any]:
     c = CLIENT.config
+    status = CLIENT.load_status()
     return {
         "enabled": TAO_ENABLED,
         "backend": c.backend,
         "model_id": c.model_id,
         "quantization": "4bit" if c.load_in_4bit else "8bit" if c.load_in_8bit else "none",
+        # Load lifecycle so the UI / Colab can poll readiness ("loading" vs "ready" vs
+        # "error") instead of holding one long warmup request open and guessing on failure.
+        "load_state": status["state"],
+        "model_loaded": status["model_loaded"],
+        "load_error": status["error"],
     }
 
 
@@ -300,18 +308,83 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 def make_server(port: int = 8000, host: str = "0.0.0.0") -> http.server.ThreadingHTTPServer:
+    # allow_reuse_address (SO_REUSEADDR) is already set on the base class; being explicit makes
+    # a quick restart (e.g. re-running the Colab launch cell) reuse the port instead of failing
+    # with "Address already in use" and leaving nothing listening → Connection refused.
+    http.server.ThreadingHTTPServer.allow_reuse_address = True
     return http.server.ThreadingHTTPServer((host, port), Handler)
+
+
+def _should_preload(cli_flag: bool | None, backend: str) -> bool:
+    """Decide whether to eagerly load the model at startup.
+
+    Priority: explicit ``--preload/--no-preload`` > ``TAO_PRELOAD`` env > default (on for the
+    heavy ``transformers`` backend so the load — and any failure — happens visibly at startup
+    in a background thread, rather than hidden inside the first warmup request).
+    """
+
+    if cli_flag is not None:
+        return cli_flag
+    env = os.getenv("TAO_PRELOAD")
+    if env is not None and env.strip() != "":
+        return env.strip().lower() in {"1", "true", "yes", "on"}
+    return backend == "transformers"
+
+
+def _start_background_preload() -> None:
+    """Load the model in a daemon thread so the HTTP port is up immediately.
+
+    The server answers /api/health (reporting ``load_state``) while the weights load, so a
+    client can poll readiness instead of holding one multi-minute request open. Any *catchable*
+    failure is logged with its real cause; a hard OOM-kill still takes the process down, which
+    is exactly why the launcher must also watch the process and surface its captured log.
+    """
+
+    def _run() -> None:
+        info = tao_info()
+        print(
+            f"[yaobi-server] preloading Tao model in background: backend={info['backend']} "
+            f"model={info['model_id']} quant={info['quantization']} "
+            f"(a 30B FP16 model can take many minutes / tens of GB to load)...",
+            flush=True,
+        )
+        started = time.time()
+        status = CLIENT.preload()
+        secs = int(time.time() - started)
+        if status.get("ok"):
+            print(f"[yaobi-server] Tao model ready in {secs}s (state={status.get('state')}).", flush=True)
+        else:
+            print(
+                f"[yaobi-server] Tao preload did not complete after {secs}s "
+                f"(state={status.get('state')}): {status.get('reason')}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    Thread(target=_run, name="tao-preload", daemon=True).start()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve the YaoBi-Skill UI + Tao-in-the-loop API")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", default="0.0.0.0")
+    preload_group = parser.add_mutually_exclusive_group()
+    preload_group.add_argument("--preload", dest="preload", action="store_true", default=None,
+                               help="Eagerly load the model at startup (default for TAO_BACKEND=transformers).")
+    preload_group.add_argument("--no-preload", dest="preload", action="store_false",
+                               help="Skip eager loading; the model loads lazily on the first request.")
     args = parser.parse_args()
-    httpd = make_server(args.port, args.host)
+    try:
+        httpd = make_server(args.port, args.host)
+    except OSError as exc:
+        print(f"[yaobi-server] failed to bind {args.host}:{args.port}: {exc}", file=sys.stderr, flush=True)
+        print("[yaobi-server] another server may still be holding the port — stop it (or wait for it to exit) and retry, or pass a different --port.", file=sys.stderr, flush=True)
+        raise SystemExit(2) from exc
     info = tao_info()
-    print(f"YaoBi-Skill server on http://{args.host}:{args.port}  (frontend: {FRONTEND_DIR})")
-    print(f"Tao runtime: enabled={info['enabled']} backend={info['backend']} model={info['model_id']} quant={info['quantization']}")
+    print(f"YaoBi-Skill server on http://{args.host}:{args.port}  (frontend: {FRONTEND_DIR})", flush=True)
+    print(f"Tao runtime: enabled={info['enabled']} backend={info['backend']} model={info['model_id']} quant={info['quantization']}", flush=True)
+    if _should_preload(args.preload, info["backend"]) and TAO_ENABLED and info["backend"] != "disabled":
+        _start_background_preload()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
