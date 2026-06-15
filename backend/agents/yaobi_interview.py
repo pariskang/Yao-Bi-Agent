@@ -155,7 +155,8 @@ class YaoBiInterviewEngine:
             case.state = YaoBiState.SAFETY_REFERRAL
             message = self._referral_message(case)
             case.dialogue_history.append({"role": "assistant", "content": message})
-            return self._pack(case, message, done=False)
+            # Emergency (cauda equina) is a hard terminal stop; high-risk can be clarified.
+            return self._pack(case, message, done=(case.safety_level == "emergency"))
 
         case.state = self._transition(case)
         case.candidate_patterns, case.uncertainty_score = self._infer_patterns(case)
@@ -231,11 +232,16 @@ class YaoBiInterviewEngine:
 
     def _detect_red_flags(self, case: YaoBiCaseState) -> None:
         o, p, h = case.ortho_neuro_slots, case.pain_slots, case.history_slots
-        flags = []
+        flags: list[str] = []
+        emergency = False
+        # Cauda equina syndrome: hard stop, must go to ER immediately.
         if o.get("bowel_bladder_dysfunction"):
             flags.append("大小便功能异常，需警惕马尾神经受压 → 立即急诊")
+            emergency = True
         if o.get("saddle_anesthesia"):
             flags.append("会阴区麻木，需警惕马尾神经受压 → 立即急诊")
+            emergency = True
+        # High-risk: serious but can be clarified/corrected by the user.
         if o.get("progressive_weakness"):
             flags.append("进行性下肢无力，需排查神经受压")
         if o.get("severe_trauma"):
@@ -249,7 +255,7 @@ class YaoBiInterviewEngine:
         if o.get("unexplained_weight_loss"):
             flags.append("不明原因消瘦，需排查肿瘤")
         case.red_flags = flags
-        case.safety_level = "high" if flags else "low"
+        case.safety_level = "emergency" if emergency else ("high" if flags else "low")
 
     def _has_missing(self, case: YaoBiCaseState, state: YaoBiState) -> bool:
         for group, key in REQUIRED_SLOTS.get(state, []):
@@ -374,8 +380,11 @@ class YaoBiInterviewEngine:
         return "\n".join(lines)
 
     def _referral_message(self, case: YaoBiCaseState) -> str:
-        return "检测到需要重点排查的危险信号：\n- " + "\n- ".join(case.red_flags) + \
-            "\n\n建议尽快线下骨科/脊柱外科或急诊评估，本问诊暂停常规辨证。"
+        if case.safety_level == "emergency":
+            action = "**请立即拨打急救电话（120）或前往最近急诊科**，本问诊终止常规辨证。"
+        else:
+            action = "建议尽快线下骨科/脊柱外科或急诊评估，本问诊暂停常规辨证。"
+        return "检测到需要重点排查的危险信号：\n- " + "\n- ".join(case.red_flags) + f"\n\n{action}"
 
     def _pack(self, case: YaoBiCaseState, message: str, *, done: bool, report: dict[str, Any] | None = None, target_slots: list[str] | None = None) -> dict[str, Any]:
         return {

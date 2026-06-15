@@ -144,8 +144,11 @@ def test_interview_red_flag_hard_stop(monkeypatch):
     server.handle_interview({"session_id": "rf", "reset": True})
     res = _interview(server, "rf", "腰痛伴大小便失禁，会阴麻木，下肢进行性无力")
     assert res["state"] == "SAFETY_REFERRAL"
-    assert res["safety_level"] == "high"
+    # Bowel/bladder + saddle anesthesia = cauda equina emergency → "emergency" level + done=True.
+    assert res["safety_level"] == "emergency"
+    assert res["done"] is True
     assert res["red_flags"]
+    assert "急诊" in res["message"]
 
 
 def test_interview_negation_does_not_trigger_red_flag(monkeypatch):
