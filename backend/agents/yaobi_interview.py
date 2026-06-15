@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
+from backend.llm.output_guard import guard_consultation
 from backend.skills.syndrome_router_skill import syndrome_router_skill
 from backend.skills.tao_consultation_skill import tao_consultation_skill
 
@@ -127,6 +129,10 @@ class YaoBiCaseState:
     safety_level: str = "unknown"
     candidate_patterns: list[dict[str, Any]] = field(default_factory=list)
     uncertainty_score: float = 1.0
+    # Physician confirmation/revision/override of the safety referral.
+    physician_review: dict[str, Any] = field(default_factory=dict)
+    # Set to True by the override action so _detect_red_flags is bypassed for this session.
+    red_flags_overridden: bool = False
 
     def group(self, name: str) -> dict[str, Any]:
         return getattr(self, name)
@@ -153,10 +159,11 @@ class YaoBiInterviewEngine:
         self._detect_red_flags(case)
         if case.safety_level in ("high", "emergency"):
             case.state = YaoBiState.SAFETY_REFERRAL
-            message = self._referral_message(case)
+            referral = self._build_referral(case)
+            message = referral["message"]
             case.dialogue_history.append({"role": "assistant", "content": message})
-            # Emergency (cauda equina) is a hard terminal stop; high-risk can be clarified.
-            return self._pack(case, message, done=(case.safety_level == "emergency"))
+            # Emergency (cauda equina) = hard terminal stop; high = advisory, user can clarify.
+            return self._pack(case, message, done=(case.safety_level == "emergency"), referral=referral)
 
         case.state = self._transition(case)
         case.candidate_patterns, case.uncertainty_score = self._infer_patterns(case)
@@ -231,6 +238,10 @@ class YaoBiInterviewEngine:
                         case.group(group)[key] = value
 
     def _detect_red_flags(self, case: YaoBiCaseState) -> None:
+        if case.red_flags_overridden:
+            case.red_flags = []
+            case.safety_level = "low"
+            return
         o, p, h = case.ortho_neuro_slots, case.pain_slots, case.history_slots
         flags: list[str] = []
         emergency = False
@@ -379,14 +390,91 @@ class YaoBiInterviewEngine:
         ]
         return "\n".join(lines)
 
-    def _referral_message(self, case: YaoBiCaseState) -> str:
+    def _build_referral(self, case: YaoBiCaseState) -> dict[str, Any]:
+        """Rule-based safety warning + optional Tao emergency clinical guidance."""
+
         if case.safety_level == "emergency":
             action = "**请立即拨打急救电话（120）或前往最近急诊科**，本问诊终止常规辨证。"
         else:
             action = "建议尽快线下骨科/脊柱外科或急诊评估，本问诊暂停常规辨证。"
-        return "检测到需要重点排查的危险信号：\n- " + "\n- ".join(case.red_flags) + f"\n\n{action}"
+        base = "检测到需要重点排查的危险信号：\n- " + "\n- ".join(case.red_flags) + f"\n\n{action}"
 
-    def _pack(self, case: YaoBiCaseState, message: str, *, done: bool, report: dict[str, Any] | None = None, target_slots: list[str] | None = None) -> dict[str, Any]:
+        if not self.use_llm:
+            return {"message": base, "tao_guidance": None, "used_llm": False, "source": "deterministic_rules"}
+
+        client = self.dao_client or DaoClient()
+        try:
+            raw = client.generate_emergency_referral({
+                "red_flags": case.red_flags,
+                "safety_level": case.safety_level,
+                "case_summary": self._summary(case),
+            })
+            text = (raw or "").strip()
+            guard = guard_consultation(text, "clinician")
+            if text and guard["allowed"]:
+                full_message = base + "\n\n---\n\n" + text
+                return {"message": full_message, "tao_guidance": text, "used_llm": True, "source": "tao_emergency_guidance"}
+        except DaoRuntimeError:
+            pass
+        return {"message": base, "tao_guidance": None, "used_llm": False, "source": "deterministic_rules_fallback"}
+
+    def run_review(
+        self,
+        case: "YaoBiCaseState",
+        action: str,
+        physician_notes: str = "",
+        override_reason: str = "",
+    ) -> dict[str, Any]:
+        """Physician confirmation / revision / override of the safety referral.
+
+        ``confirm``  — physician endorses the referral; interview remains stopped (done=True).
+        ``revise``   — physician amends with notes; interview remains stopped (done=True).
+        ``override`` — physician rejects the red-flag assessment; flags cleared, FSM resumes.
+        """
+
+        ts = int(time.time())
+        if action == "confirm":
+            case.physician_review = {
+                "status": "confirmed",
+                "physician_notes": physician_notes or "",
+                "reviewed_at": ts,
+            }
+            note = f"（备注：{physician_notes}）" if physician_notes else ""
+            message = f"医师已确认急诊转诊建议。{note}"
+            case.dialogue_history.append({"role": "physician", "content": message})
+            return self._pack(case, message, done=True)
+
+        if action == "revise":
+            case.physician_review = {
+                "status": "revised",
+                "physician_notes": physician_notes,
+                "reviewed_at": ts,
+            }
+            message = f"医师已修订转诊建议。\n\n**医师备注：**{physician_notes}"
+            case.dialogue_history.append({"role": "physician", "content": message})
+            return self._pack(case, message, done=True)
+
+        if action == "override":
+            reason = override_reason or "医师评估后判断无需急诊转诊"
+            case.physician_review = {
+                "status": "overridden",
+                "override_reason": reason,
+                "physician_notes": physician_notes,
+                "reviewed_at": ts,
+            }
+            # Bypass future red-flag detection for this session (physician has assessed).
+            case.red_flags_overridden = True
+            case.red_flags = []
+            case.safety_level = "low"
+            override_msg = f"医师已覆盖红旗评估，恢复问诊。\n**覆盖理由：**{reason}"
+            case.dialogue_history.append({"role": "physician", "content": override_msg})
+            # Resume the FSM — empty text triggers no slot extraction, just the next question.
+            return self.run_turn(case, "")
+
+        message = f"未知医师操作：{action}"
+        return self._pack(case, message, done=False)
+
+    def _pack(self, case: YaoBiCaseState, message: str, *, done: bool, report: dict[str, Any] | None = None, target_slots: list[str] | None = None, referral: dict[str, Any] | None = None) -> dict[str, Any]:
         return {
             "session_id": case.session_id,
             "message": message,
@@ -403,4 +491,10 @@ class YaoBiInterviewEngine:
             "report": report["answer"] if report else None,
             "report_source": (report.get("source") if report else None),
             "used_llm": self.use_llm,
+            # Emergency referral details (present when state == SAFETY_REFERRAL).
+            "referral": referral,
+            "referral_tao_guidance": (referral or {}).get("tao_guidance"),
+            # Physician review state (persists across turns once set).
+            "physician_review": case.physician_review,
+            "physician_review_required": case.state == YaoBiState.SAFETY_REFERRAL and not case.physician_review.get("status"),
         }

@@ -179,7 +179,12 @@ _INTERVIEWS: dict[str, YaoBiCaseState] = {}
 
 
 def handle_interview(data: dict[str, Any]) -> dict[str, Any]:
-    """One turn of the Tao-driven conversational interview (extract → FSM → ask → report)."""
+    """One turn of the Tao-driven conversational interview (extract → FSM → ask → report).
+
+    Supports an additional ``review_action`` field for physician confirmation / revision /
+    override of the safety referral (POST body: ``review_action``, ``physician_notes``,
+    ``override_reason``).  Only meaningful when the session is in ``SAFETY_REFERRAL`` state.
+    """
 
     session_id = str(data.get("session_id") or "default")
     if data.get("reset"):
@@ -190,7 +195,16 @@ def handle_interview(data: dict[str, Any]) -> dict[str, Any]:
         case = YaoBiCaseState(session_id=session_id)
         _INTERVIEWS[session_id] = case
     engine = YaoBiInterviewEngine(dao_client=CLIENT, use_llm=TAO_ENABLED)
-    result = engine.run_turn(case, str(data.get("message") or ""))
+    review_action = str(data.get("review_action") or "").strip()
+    if review_action:
+        result = engine.run_review(
+            case,
+            action=review_action,
+            physician_notes=str(data.get("physician_notes") or ""),
+            override_reason=str(data.get("override_reason") or ""),
+        )
+    else:
+        result = engine.run_turn(case, str(data.get("message") or ""))
     result["tao"] = tao_info()
     return result
 

@@ -157,3 +157,74 @@ def test_interview_negation_does_not_trigger_red_flag(monkeypatch):
     res = _interview(server, "ng", "腰痛，没有大小便异常，无发热，无外伤")
     assert res["safety_level"] == "low"
     assert res["state"] != "SAFETY_REFERRAL"
+
+
+def test_interview_emergency_referral_includes_tao_guidance(monkeypatch):
+    """With mock backend, emergency referral should include Tao clinical guidance."""
+    server = _server(monkeypatch)
+    server.handle_interview({"session_id": "tao_rf", "reset": True})
+    res = _interview(server, "tao_rf", "大小便失禁，会阴麻木")
+    assert res["safety_level"] == "emergency"
+    assert res["referral_tao_guidance"] is not None          # Tao added ER guidance
+    assert "急诊转诊" in res["referral_tao_guidance"]         # expected section header
+    assert "紧迫度" in res["referral_tao_guidance"]           # urgency classification present
+    assert "physician_review_required" in res
+    assert res["physician_review_required"] is True          # physician must review
+
+
+def test_interview_high_risk_referral_tao_guidance(monkeypatch):
+    """Non-cauda-equina high-risk flag: safety_level=high (not emergency), done=False."""
+    server = _server(monkeypatch)
+    server.handle_interview({"session_id": "high_rf", "reset": True})
+    res = _interview(server, "high_rf", "腰背痛伴发热寒战，肿瘤病史，夜间痛加重")
+    assert res["safety_level"] == "high"
+    assert res["done"] is False                              # advisory, user can clarify
+    assert res["referral_tao_guidance"] is not None          # Tao still provides guidance
+
+
+def test_interview_physician_confirm(monkeypatch):
+    """Physician confirm action marks the referral as endorsed and keeps done=True."""
+    server = _server(monkeypatch)
+    server.handle_interview({"session_id": "ph_c", "reset": True})
+    _interview(server, "ph_c", "大小便失禁，会阴麻木")      # triggers emergency
+    res = server.handle_interview({
+        "session_id": "ph_c",
+        "review_action": "confirm",
+        "physician_notes": "已联系120，患者正在转运",
+    })
+    assert res["physician_review"]["status"] == "confirmed"
+    assert "已联系120" in res["physician_review"]["physician_notes"]
+    assert res["done"] is True
+
+
+def test_interview_physician_revise(monkeypatch):
+    """Physician revise action replaces guidance with physician-authored note."""
+    server = _server(monkeypatch)
+    server.handle_interview({"session_id": "ph_r", "reset": True})
+    _interview(server, "ph_r", "大小便失禁，会阴麻木")
+    res = server.handle_interview({
+        "session_id": "ph_r",
+        "review_action": "revise",
+        "physician_notes": "建议收住脊柱外科病房，暂不急诊手术",
+    })
+    assert res["physician_review"]["status"] == "revised"
+    assert "脊柱外科" in res["physician_review"]["physician_notes"]
+    assert res["done"] is True
+
+
+def test_interview_physician_override_resumes_fsm(monkeypatch):
+    """Physician override clears red flags and the FSM resumes asking clinical questions."""
+    server = _server(monkeypatch)
+    server.handle_interview({"session_id": "ph_o", "reset": True})
+    _interview(server, "ph_o", "大小便失禁，会阴麻木")      # triggers emergency
+    res = server.handle_interview({
+        "session_id": "ph_o",
+        "review_action": "override",
+        "override_reason": "患者描述有误，实际无膀胱症状",
+    })
+    # Red flags cleared; FSM resumes normal questioning
+    assert res["safety_level"] == "low"
+    assert res["state"] != "SAFETY_REFERRAL"
+    assert res["physician_review"]["status"] == "overridden"
+    assert "无膀胱症状" in res["physician_review"]["override_reason"]
+    assert res["done"] is False                              # interview continues
