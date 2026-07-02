@@ -4,10 +4,15 @@ import importlib
 import importlib.util
 import json
 import os
+import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Literal
+
+import yaml
 
 from backend.llm.prompt_templates import (
     CONSULTATION_PROMPT_TEMPLATE,
@@ -26,6 +31,40 @@ from backend.llm.prompt_templates import (
 )
 
 DaoBackend = Literal["disabled", "mock", "http", "transformers"]
+
+_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
+
+# Fallback profiles if config/model_config.yaml is missing — keep in sync with that file.
+_DEFAULT_INFERENCE_PROFILES: dict[str, dict[str, Any]] = {
+    "research_report": {"temperature": 0.3, "top_p": 0.85, "repetition_penalty": 1.1, "max_new_tokens": 3072, "do_sample": True},
+    "teaching_explanation": {"temperature": 0.6, "top_p": 0.9, "repetition_penalty": 1.1, "max_new_tokens": 3072, "do_sample": True},
+    "structured_json": {"temperature": 0.1, "top_p": 0.8, "repetition_penalty": 1.05, "max_new_tokens": 1024, "do_sample": False},
+}
+
+_PROFILE_CACHE: dict[str, dict[str, Any]] | None = None
+
+
+def load_inference_profiles() -> dict[str, dict[str, Any]]:
+    """Load per-task sampling profiles from config/model_config.yaml (cached).
+
+    Structured JSON tasks (routing/planning/extraction) need greedy decoding for
+    stability; long-form teaching tasks need a bigger token budget. Falling back to
+    the in-code defaults keeps the client usable without the config file.
+    """
+
+    global _PROFILE_CACHE
+    if _PROFILE_CACHE is None:
+        profiles = dict(_DEFAULT_INFERENCE_PROFILES)
+        try:
+            with open(_CONFIG_DIR / "model_config.yaml", encoding="utf-8") as f:
+                loaded = (yaml.safe_load(f) or {}).get("inference_profiles") or {}
+            for name, params in loaded.items():
+                if isinstance(params, dict):
+                    profiles[name] = {**profiles.get(name, {}), **params}
+        except (OSError, yaml.YAMLError):
+            pass
+        _PROFILE_CACHE = profiles
+    return _PROFILE_CACHE
 
 
 @dataclass
@@ -91,8 +130,34 @@ class DaoClient:
     _load_state: Literal["idle", "loading", "ready", "error"] = "idle"
     _load_error: str | None = None
 
+    # Env var that hard-overrides the same-named profile parameter when explicitly set.
+    _PARAM_ENV = {
+        "temperature": "TAO_TEMPERATURE",
+        "top_p": "TAO_TOP_P",
+        "repetition_penalty": "TAO_REPETITION_PENALTY",
+        "max_new_tokens": "TAO_MAX_NEW_TOKENS",
+        "do_sample": "TAO_DO_SAMPLE",
+    }
+
     def __init__(self, config: DaoGenerationConfig | None = None) -> None:
         self.config = config or DaoGenerationConfig.from_env()
+
+    def _profile_params(self, profile: str) -> dict[str, Any]:
+        """Resolve sampling params for a task profile: explicit env > profile > config."""
+
+        params = {
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "repetition_penalty": self.config.repetition_penalty,
+            "max_new_tokens": self.config.max_new_tokens,
+            "do_sample": self.config.do_sample,
+        }
+        params.update(load_inference_profiles().get(profile, {}))
+        for key, env_name in self._PARAM_ENV.items():
+            if env_name in os.environ:
+                # The operator asked for this value explicitly — honor it over the profile.
+                params[key] = getattr(self.config, key)
+        return params
 
     def load_status(self) -> dict[str, Any]:
         """Non-blocking snapshot of the model load lifecycle (safe to poll from /api/health).
@@ -160,32 +225,26 @@ class DaoClient:
         return QUESTION_PROMPT_TEMPLATE.format(question_context=context)
 
     def generate(self, structured_rule_outputs: dict[str, Any]) -> str:
-        prompt = self.build_prompt(self.build_report_prompt(structured_rule_outputs))
-        if self.config.backend == "disabled":
-            raise DaoRuntimeError("Tao runtime is disabled. Set TAO_BACKEND=http or transformers to enable generation.")
-        if self.config.backend == "mock":
-            return self._generate_mock(structured_rule_outputs)
-        if self.config.backend == "http":
-            return self._generate_http(prompt)
-        if self.config.backend == "transformers":
-            return self._generate_transformers(prompt)
-        raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
+        body = self.build_report_prompt(structured_rule_outputs)
+        return self._dispatch(body, self._generate_mock(structured_rule_outputs), "report", profile="research_report")
 
     def generate_question_plan(self, question_context: dict[str, Any]) -> str:
-        prompt = self.build_prompt(self.build_question_prompt(question_context))
-        if self.config.backend == "disabled":
-            raise DaoRuntimeError("Tao question runtime is disabled. Set TAO_BACKEND=http or transformers to enable question planning.")
-        if self.config.backend == "mock":
-            return self._generate_question_mock(question_context)
-        if self.config.backend == "http":
-            return self._generate_http(prompt)
-        if self.config.backend == "transformers":
-            return self._generate_transformers(prompt)
-        raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
+        body = self.build_question_prompt(question_context)
+        return self._dispatch(body, self._generate_question_mock(question_context), "question planning", profile="structured_json")
 
-    def _dispatch(self, prompt: str, mock_value: str, task: str) -> str:
-        """Backend dispatch shared by structured generation tasks.
+    def _dispatch(
+        self,
+        body: str,
+        mock_value: str,
+        task: str,
+        profile: str = "structured_json",
+        history: list[dict[str, str]] | None = None,
+    ) -> str:
+        """Backend dispatch shared by all generation tasks.
 
+        ``body`` is the raw task text. The Qwen chat template is applied only on the
+        local ``transformers`` path; the ``http`` path sends plain system+user messages
+        so an OpenAI-compatible endpoint applies its own template exactly once.
         Deterministic callers remain responsible for guarding output before it
         can surface as clinical text; this only routes prompt → backend.
         """
@@ -194,10 +253,11 @@ class DaoClient:
             raise DaoRuntimeError(f"Tao {task} runtime is disabled. Set TAO_BACKEND=http or transformers to enable.")
         if self.config.backend == "mock":
             return mock_value
+        params = self._profile_params(profile)
         if self.config.backend == "http":
-            return self._generate_http(prompt)
+            return self._generate_http(body, history=history, params=params)
         if self.config.backend == "transformers":
-            return self._generate_transformers(prompt)
+            return self._generate_transformers(self.build_prompt(body, history), params=params)
         raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
 
     def generate_followup_probes(self, probe_context: dict[str, Any]) -> str:
@@ -206,25 +266,25 @@ class DaoClient:
             max_probes=max_probes,
             probe_context=json.dumps(probe_context, ensure_ascii=False, indent=2, default=str),
         )
-        return self._dispatch(self.build_prompt(body), self._mock_followup_probes(probe_context), "follow-up probe")
+        return self._dispatch(body, self._mock_followup_probes(probe_context), "follow-up probe", profile="structured_json")
 
     def generate_reasoning(self, reasoning_context: dict[str, Any]) -> str:
         body = REASONING_PROMPT_TEMPLATE.format(
             reasoning_context=json.dumps(reasoning_context, ensure_ascii=False, indent=2, default=str)
         )
-        return self._dispatch(self.build_prompt(body), self._mock_reasoning(reasoning_context), "reasoning")
+        return self._dispatch(body, self._mock_reasoning(reasoning_context), "reasoning", profile="research_report")
 
     def generate_experience_summary(self, summary_context: dict[str, Any]) -> str:
         body = EXPERIENCE_SUMMARY_PROMPT_TEMPLATE.format(
             summary_context=json.dumps(summary_context, ensure_ascii=False, indent=2, default=str)
         )
-        return self._dispatch(self.build_prompt(body), self._mock_experience_summary(summary_context), "experience summary")
+        return self._dispatch(body, self._mock_experience_summary(summary_context), "experience summary", profile="research_report")
 
     def route_skill(self, routing_context: dict[str, Any]) -> str:
         body = SKILL_ROUTING_PROMPT_TEMPLATE.format(
             routing_context=json.dumps(routing_context, ensure_ascii=False, indent=2, default=str)
         )
-        return self._dispatch(self.build_prompt(body), self._mock_route_skill(routing_context), "skill routing")
+        return self._dispatch(body, self._mock_route_skill(routing_context), "skill routing", profile="structured_json")
 
     def generate_consultation(self, consultation_context: dict[str, Any]) -> str:
         """Tao-primary professional answer: the model is the main reasoner.
@@ -239,13 +299,13 @@ class DaoClient:
             question=consultation_context.get("question", ""),
             evidence=json.dumps(consultation_context.get("evidence", {}), ensure_ascii=False, indent=2, default=str),
         )
-        return self._dispatch(self.build_prompt(body), self._mock_consultation(consultation_context), "consultation")
+        return self._dispatch(body, self._mock_consultation(consultation_context), "consultation", profile="teaching_explanation")
 
     def extract_slots(self, user_text: str) -> str:
         """Tao extracts structured YaoBi slots from one free-text turn (JSON object)."""
 
         body = INTERVIEW_EXTRACTION_PROMPT_TEMPLATE.format(user_text=user_text)
-        return self._dispatch(self.build_prompt(body), self._mock_extract_slots(user_text), "slot extraction")
+        return self._dispatch(body, self._mock_extract_slots(user_text), "slot extraction", profile="structured_json")
 
     def generate_interview_question(self, interview_context: dict[str, Any]) -> str:
         """Tao autonomously asks the next follow-up turn, grounded in stage/slots/patterns."""
@@ -257,7 +317,7 @@ class DaoClient:
             candidate_patterns=json.dumps(interview_context.get("candidate_patterns", []), ensure_ascii=False, default=str),
             case_summary=json.dumps(interview_context.get("case_summary", {}), ensure_ascii=False, default=str),
         )
-        return self._dispatch(self.build_prompt(body), self._mock_interview_question(interview_context), "interview question")
+        return self._dispatch(body, self._mock_interview_question(interview_context), "interview question", profile="teaching_explanation")
 
     def generate_emergency_referral(self, referral_context: dict[str, Any]) -> str:
         """Tao reasons over detected red flags and produces ER referral clinical guidance.
@@ -272,7 +332,7 @@ class DaoClient:
             red_flags="\n".join(f"- {f}" for f in flags) or "- （危险信号待明确）",
             case_summary=json.dumps(referral_context.get("case_summary", {}), ensure_ascii=False, indent=2, default=str),
         )
-        return self._dispatch(self.build_prompt(body), self._mock_emergency_referral(referral_context), "emergency referral")
+        return self._dispatch(body, self._mock_emergency_referral(referral_context), "emergency referral", profile="teaching_explanation")
 
     def _mock_emergency_referral(self, ctx: dict[str, Any]) -> str:
         flags = ctx.get("red_flags") or []
@@ -320,11 +380,17 @@ class DaoClient:
             max_probes=max_probes,
             theme=probe_context.get("current_state_theme", "本状态主题"),
             context=json.dumps(
-                {"last_answers": probe_context.get("last_answers", {}), "normalized_tags": probe_context.get("normalized_tags", [])},
+                {
+                    "last_answers": probe_context.get("last_answers", {}),
+                    "normalized_tags": probe_context.get("normalized_tags", []),
+                    # Rule-engine grounding (tags / top syndromes / formula routes) so the
+                    # model can probe the most discriminative gap, not just the last answer.
+                    "rule_context": probe_context.get("rule_context", {}),
+                },
                 ensure_ascii=False, default=str,
             ),
         )
-        return self._dispatch(self.build_prompt(body), self._mock_probe_questions(probe_context), "probe questions")
+        return self._dispatch(body, self._mock_probe_questions(probe_context), "probe questions", profile="teaching_explanation")
 
     def plan_skills(self, plan_context: dict[str, Any]) -> str:
         max_steps = int(plan_context.get("max_steps", 4))
@@ -332,7 +398,7 @@ class DaoClient:
             max_steps=max_steps,
             plan_context=json.dumps(plan_context, ensure_ascii=False, indent=2, default=str),
         )
-        return self._dispatch(self.build_prompt(body), self._mock_plan_skills(plan_context), "skill planning")
+        return self._dispatch(body, self._mock_plan_skills(plan_context), "skill planning", profile="structured_json")
 
     def chat(
         self,
@@ -348,15 +414,15 @@ class DaoClient:
         responsible for applying task-specific guards before surfacing clinical text.
         """
 
-        prompt = self.build_prompt(user_input, history)
         if self.config.backend == "disabled":
             raise DaoRuntimeError("Tao direct chat is disabled. Set TAO_BACKEND=transformers for local model inference.")
         if self.config.backend == "mock":
             return "Tao mock direct reply: 已收到问题；当前项目中模型输出仍需规则与安全 guard 复核。"
+        params = self._profile_params("teaching_explanation")
         if self.config.backend == "http":
-            return self._generate_http(prompt)
+            return self._generate_http(user_input, history=history, params=params)
         if self.config.backend == "transformers":
-            return self._generate_transformers(prompt, stream_callback=stream_callback)
+            return self._generate_transformers(self.build_prompt(user_input, history), stream_callback=stream_callback, params=params)
         raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
 
     def _generate_mock(self, structured_rule_outputs: dict[str, Any]) -> str:
@@ -685,26 +751,66 @@ class DaoClient:
             chosen = ["还可以多说说目前最困扰你的症状，以及加重或缓解的因素"]
         return "为了更准确地帮医生判断，我想再了解几点：" + "；".join(chosen) + "？"
 
-    def _generate_http(self, prompt: str) -> str:
+    # Transient HTTP failures (timeouts, 5xx, connection resets) are retried this many
+    # times with a short backoff before the caller falls back to deterministic rules.
+    _HTTP_MAX_ATTEMPTS = 3
+    _HTTP_BACKOFF_SECONDS = 1.0
+
+    def _generate_http(
+        self,
+        user_content: str,
+        history: list[dict[str, str]] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> str:
+        """Call an OpenAI-compatible endpoint with plain chat messages.
+
+        The endpoint applies its own chat template, so we must NOT send the locally
+        templated ``<|im_start|>`` prompt string here — only raw message contents.
+        Every network/parse failure is converted to ``DaoRuntimeError`` so callers keep
+        their deterministic-fallback guarantee instead of surfacing an HTTP 500.
+        """
+
         if not self.config.endpoint_url:
             raise DaoRuntimeError("TAO_ENDPOINT_URL is required when TAO_BACKEND=http.")
+        params = params or self._profile_params("teaching_explanation")
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for turn in history or []:
+            messages.append({"role": turn["role"], "content": turn["content"]})
+        messages.append({"role": "user", "content": user_content})
         payload = {
             "model": self.config.model_id,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": self.config.temperature,
-            "top_p": self.config.top_p,
-            "max_tokens": self.config.max_new_tokens,
+            "messages": messages,
+            "temperature": params["temperature"],
+            "top_p": params["top_p"],
+            "max_tokens": params["max_new_tokens"],
         }
         data = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
-        request = urllib.request.Request(self.config.endpoint_url, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
-            body = json.loads(response.read().decode("utf-8"))
+
+        last_error: Exception | None = None
+        for attempt in range(self._HTTP_MAX_ATTEMPTS):
+            request = urllib.request.Request(self.config.endpoint_url, data=data, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                if exc.code < 500:
+                    # Client errors (bad key, bad payload) will not heal on retry.
+                    raise DaoRuntimeError(f"HTTP Tao endpoint returned {exc.code}: {exc.reason}") from exc
+            except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+                last_error = exc
+            if attempt < self._HTTP_MAX_ATTEMPTS - 1:
+                time.sleep(self._HTTP_BACKOFF_SECONDS * (2**attempt))
+        else:
+            raise DaoRuntimeError(
+                f"HTTP Tao endpoint failed after {self._HTTP_MAX_ATTEMPTS} attempts: "
+                f"{type(last_error).__name__}: {last_error}"
+            ) from last_error
+
         if "choices" in body:
             choice = body["choices"][0]
             return choice.get("message", {}).get("content") or choice.get("text", "")
@@ -783,34 +889,56 @@ class DaoClient:
         device = self._model_input_device(model)
         return inputs.to(device) if device is not None else inputs
 
-    def _generate_transformers(self, prompt: str, stream_callback: Any | None = None) -> str:
+    # HF generation is not thread-safe on a shared model instance (KV cache / CUDA state),
+    # and the ThreadingHTTPServer serves each request on its own thread — serialize inference.
+    _generate_lock = Lock()
+
+    def _generate_transformers(
+        self,
+        prompt: str,
+        stream_callback: Any | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> str:
         # Convert any transformers/torch/load/OOM failure into DaoRuntimeError so every caller
         # (routing, consultation, probe, interview) degrades gracefully to deterministic rules
         # instead of surfacing an opaque HTTP 500 — and the real cause is preserved in the message.
         try:
             transformers, tokenizer, model = self._load_transformers_runtime()
+            params = params or self._profile_params("teaching_explanation")
             inputs = self._tokenize_for_model(tokenizer, model, prompt)
             generate_kwargs = dict(
                 **inputs,
-                max_new_tokens=self.config.max_new_tokens,
-                do_sample=self.config.do_sample,
-                temperature=self.config.temperature,
-                top_p=self.config.top_p,
-                repetition_penalty=self.config.repetition_penalty,
+                max_new_tokens=params["max_new_tokens"],
+                do_sample=params["do_sample"],
+                temperature=params["temperature"],
+                top_p=params["top_p"],
+                repetition_penalty=params["repetition_penalty"],
                 use_cache=True,
             )
-            if stream_callback is not None:
-                streamer = transformers.TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-                thread = Thread(target=model.generate, kwargs={**generate_kwargs, "streamer": streamer})
-                thread.start()
-                response = ""
-                for token in streamer:
-                    stream_callback(token)
-                    response += token
-                thread.join()
-                return response
+            with self._generate_lock:
+                if stream_callback is not None:
+                    streamer = transformers.TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+                    generate_error: list[Exception] = []
 
-            outputs = model.generate(**generate_kwargs)
+                    def _run_generate() -> None:
+                        try:
+                            model.generate(**generate_kwargs, streamer=streamer)
+                        except Exception as exc:  # noqa: BLE001 — relayed to the caller after join
+                            generate_error.append(exc)
+                            streamer.end()
+
+                    thread = Thread(target=_run_generate)
+                    thread.start()
+                    response = ""
+                    for token in streamer:
+                        stream_callback(token)
+                        response += token
+                    thread.join()
+                    if generate_error:
+                        raise generate_error[0]
+                    return response
+
+                outputs = model.generate(**generate_kwargs)
             generated = outputs[0][inputs["input_ids"].shape[-1] :]
             return tokenizer.decode(generated, skip_special_tokens=True)
         except DaoRuntimeError:

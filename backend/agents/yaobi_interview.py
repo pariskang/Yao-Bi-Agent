@@ -28,6 +28,9 @@ from typing import Any
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
 from backend.llm.output_guard import guard_consultation
+from backend.skills.formula_base_selector_skill import formula_base_selector_skill
+from backend.skills.herb_module_composer_skill import herb_module_composer_skill
+from backend.skills.safety_guard_skill import safety_guard_skill
 from backend.skills.syndrome_router_skill import syndrome_router_skill
 from backend.skills.tao_consultation_skill import tao_consultation_skill
 
@@ -112,6 +115,33 @@ SAFETY_SLOTS = [
 
 MAX_TURNS = 8
 
+# Deterministic red-flag keyword safety net: the LLM slot extractor is the primary
+# channel, but red-flag detection must never depend on it alone — a missed slot key or
+# an unexpected phrasing would otherwise let a cauda-equina presentation slip through.
+RED_FLAG_TEXT_KEYWORDS: dict[str, list[str]] = {
+    "bowel_bladder_dysfunction": ["大小便失禁", "小便失禁", "大便失禁", "尿不出", "解不出小便", "排尿困难", "大小便控制不"],
+    "saddle_anesthesia": ["会阴麻木", "会阴部麻", "会阴发麻", "肛周麻木", "鞍区麻木"],
+    "progressive_weakness": ["进行性无力", "越来越没力", "腿越来越软", "走路拖脚", "踩棉花感"],
+    "severe_trauma": ["车祸", "摔伤", "高处坠落", "重物砸"],
+    "fever": ["发烧", "发热", "寒战"],
+    "tumor_history": ["肿瘤", "癌症"],
+    "unexplained_weight_loss": ["体重下降", "不明原因消瘦"],
+}
+_NEGATION_MARKERS = ("没有", "没", "无", "不", "未", "否认", "排除")
+
+# String slot values that mean "the patient denied it" — a red-flag slot holding
+# "否"/"正常" must not count as positive (the LLM may return strings, not booleans).
+_NEGATIVE_SLOT_STRINGS = {"否", "没有", "无", "正常", "不是", "没", "无异常", "否认", "阴性", "false", "no", "none", "unknown"}
+
+
+def _slot_positive(value: Any) -> bool:
+    """Truthiness for red-flag slots that treats denial strings as negative."""
+
+    if isinstance(value, str):
+        v = value.strip().lower()
+        return bool(v) and v not in _NEGATIVE_SLOT_STRINGS and not v.startswith(("否", "没", "无", "不", "未"))
+    return bool(value)
+
 
 @dataclass
 class YaoBiCaseState:
@@ -155,6 +185,9 @@ class YaoBiInterviewEngine:
             case.dialogue_history.append({"role": "user", "content": user_text})
             case.turn_count += 1
             self._merge(case, self._extract(user_text))
+            # Deterministic safety net: red flags mentioned in the raw text are captured
+            # even when the LLM extractor is offline or missed the slot.
+            self._scan_red_flag_text(case, user_text)
 
         self._detect_red_flags(case)
         if case.safety_level in ("high", "emergency"):
@@ -208,12 +241,25 @@ class YaoBiInterviewEngine:
             return deterministic
 
     def _build_report(self, case: YaoBiCaseState) -> dict[str, Any]:
+        # Full deterministic evidence bundle: the report scope covers 证型→治法→方药→随访,
+        # so the model must be grounded in the rule engine's formula routes, herb modules
+        # and safety review — not just syndrome candidates.
+        tags = self._tags(case)
+        candidates = [
+            {"name": p["pattern"], "score": round(p["prob"] * 10, 1), "evidence_tags": p.get("evidence", [])}
+            for p in case.candidate_patterns
+        ]
+        formula = formula_base_selector_skill(tags, candidates)
+        routes = formula.get("formula_routes") or []
+        modules = herb_module_composer_skill(tags, formula.get("primary_route"))
+        matched = modules.get("matched_modules") or []
+        safety = safety_guard_skill({"evidence": {"raw_text": self._case_text(case)}, "red_flags": case.red_flags}, matched, tags)
         evidence = {
-            "normalized_tags": self._tags(case),
-            "syndrome_candidates": [
-                {"name": p["pattern"], "score": round(p["prob"] * 10, 1), "evidence_tags": p.get("evidence", [])}
-                for p in case.candidate_patterns
-            ],
+            "normalized_tags": tags,
+            "syndrome_candidates": candidates,
+            "formula_routes": [{"name": r["name"], "confidence": r.get("confidence"), "score": r.get("score")} for r in routes[:4]],
+            "herb_modules": [{"name": m["name"], "role": m.get("role"), "herbs": (m.get("herbs") or [])[:6]} for m in matched[:6]],
+            "safety": {"status": safety.get("safety_status"), "risks": safety.get("medication_risks") or []},
             "case_state": self._summary(case),
             "red_flags": case.red_flags,
         }
@@ -237,6 +283,26 @@ class YaoBiInterviewEngine:
                     if value not in (None, "", [], "unknown"):
                         case.group(group)[key] = value
 
+    def _scan_red_flag_text(self, case: YaoBiCaseState, user_text: str) -> None:
+        """Deterministic keyword scan for red flags (union with LLM slot extraction).
+
+        Simple negation handling: a keyword preceded closely by 没有/无/不/未 etc.
+        ("没有大小便失禁") is treated as a denial and does not set the slot.
+        """
+
+        for slot, keywords in RED_FLAG_TEXT_KEYWORDS.items():
+            if _slot_positive(case.ortho_neuro_slots.get(slot)):
+                continue
+            for keyword in keywords:
+                idx = user_text.find(keyword)
+                if idx == -1:
+                    continue
+                window = user_text[max(0, idx - 6):idx]
+                if any(neg in window for neg in _NEGATION_MARKERS):
+                    continue
+                case.ortho_neuro_slots[slot] = True
+                break
+
     def _detect_red_flags(self, case: YaoBiCaseState) -> None:
         if case.red_flags_overridden:
             case.red_flags = []
@@ -246,24 +312,25 @@ class YaoBiInterviewEngine:
         flags: list[str] = []
         emergency = False
         # Cauda equina syndrome: hard stop, must go to ER immediately.
-        if o.get("bowel_bladder_dysfunction"):
+        # _slot_positive keeps a denial string ("否"/"正常") from firing a false emergency.
+        if _slot_positive(o.get("bowel_bladder_dysfunction")):
             flags.append("大小便功能异常，需警惕马尾神经受压 → 立即急诊")
             emergency = True
-        if o.get("saddle_anesthesia"):
+        if _slot_positive(o.get("saddle_anesthesia")):
             flags.append("会阴区麻木，需警惕马尾神经受压 → 立即急诊")
             emergency = True
         # High-risk: serious but can be clarified/corrected by the user.
-        if o.get("progressive_weakness"):
+        if _slot_positive(o.get("progressive_weakness")):
             flags.append("进行性下肢无力，需排查神经受压")
-        if o.get("severe_trauma"):
+        if _slot_positive(o.get("severe_trauma")):
             flags.append("明显外伤后腰痛，需排查骨折")
-        if h.get("osteoporosis") and (p.get("pain_severity") or o.get("severe_trauma")):
+        if _slot_positive(h.get("osteoporosis")) and (_slot_positive(p.get("pain_severity")) or _slot_positive(o.get("severe_trauma"))):
             flags.append("骨质疏松合并急性剧痛，需排查压缩性骨折")
-        if o.get("fever"):
+        if _slot_positive(o.get("fever")):
             flags.append("发热合并腰背痛，需排查感染")
-        if o.get("tumor_history") and p.get("night_pain"):
+        if _slot_positive(o.get("tumor_history")) and _slot_positive(p.get("night_pain")):
             flags.append("肿瘤病史合并夜间痛，需排查转移")
-        if o.get("unexplained_weight_loss"):
+        if _slot_positive(o.get("unexplained_weight_loss")):
             flags.append("不明原因消瘦，需排查肿瘤")
         case.red_flags = flags
         case.safety_level = "emergency" if emergency else ("high" if flags else "low")

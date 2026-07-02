@@ -7,6 +7,8 @@ from typing import Any, Iterable
 
 import yaml
 
+from backend.engine.scoring import confidence_from_score
+
 ROOT = Path(__file__).resolve().parents[2]
 RULES_DIR = ROOT / "rules"
 
@@ -106,11 +108,15 @@ class RuleEngine:
             syndrome = hit.effect.get("syndrome")
             if not syndrome:
                 continue
-            scores[syndrome] += int(hit.effect.get("score", 0))
+            # Base rule score plus a corroboration bonus: every matched evidence tag
+            # beyond the second strengthens the candidate, so richly supported syndromes
+            # can actually reach "high" confidence (a single rule caps the base at 5).
+            bonus = max(0, len(set(hit.evidence_tags)) - 2)
+            scores[syndrome] += int(hit.effect.get("score", 0)) + bonus
             evidence[syndrome].extend(hit.evidence_tags)
         candidates = []
         for name, score in sorted(scores.items(), key=lambda item: item[1], reverse=True):
-            confidence = "high" if score >= 8 else "medium" if score >= 4 else "low"
+            confidence = confidence_from_score(score)
             candidates.append({
                 "name": name,
                 "score": score,

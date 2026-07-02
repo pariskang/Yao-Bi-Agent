@@ -26,8 +26,10 @@ import os
 import sys
 import time
 import traceback
+import uuid
+from collections import OrderedDict
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any
 
 from backend.agents.autonomous_agent import AutonomousQAAgent
@@ -183,7 +185,15 @@ def handle_collaboration(data: dict[str, Any]) -> dict[str, Any]:
 
 
 # In-memory interview sessions (ephemeral; keyed by session_id from the UI).
-_INTERVIEWS: dict[str, YaoBiCaseState] = {}
+# Bounded: the oldest-touched session is evicted past the cap so a long-running public
+# deployment (Colab + ngrok) cannot grow memory without limit.
+_INTERVIEWS: "OrderedDict[str, YaoBiCaseState]" = OrderedDict()
+_MAX_INTERVIEW_SESSIONS = 256
+# Registry lock plus per-session locks: turns within one session are serialized (two
+# concurrent posts would otherwise mutate the same YaoBiCaseState mid-turn) while
+# different sessions stay independent.
+_INTERVIEW_LOCK = Lock()
+_SESSION_LOCKS: dict[str, Lock] = {}
 
 
 def handle_interview(data: dict[str, Any]) -> dict[str, Any]:
@@ -194,25 +204,36 @@ def handle_interview(data: dict[str, Any]) -> dict[str, Any]:
     ``override_reason``).  Only meaningful when the session is in ``SAFETY_REFERRAL`` state.
     """
 
-    session_id = str(data.get("session_id") or "default")
-    if data.get("reset"):
-        _INTERVIEWS.pop(session_id, None)
-        return {"reset": True, "session_id": session_id, "tao": tao_info()}
-    case = _INTERVIEWS.get(session_id)
-    if case is None:
-        case = YaoBiCaseState(session_id=session_id)
-        _INTERVIEWS[session_id] = case
+    # A missing session_id gets a server-generated one (returned to the caller) instead of
+    # a shared "default" key that would leak state across unrelated clients.
+    session_id = str(data.get("session_id") or "") or f"srv-{uuid.uuid4().hex[:12]}"
+    with _INTERVIEW_LOCK:
+        if data.get("reset"):
+            _INTERVIEWS.pop(session_id, None)
+            _SESSION_LOCKS.pop(session_id, None)
+            return {"reset": True, "session_id": session_id, "tao": tao_info()}
+        case = _INTERVIEWS.get(session_id)
+        if case is None:
+            case = YaoBiCaseState(session_id=session_id)
+            _INTERVIEWS[session_id] = case
+            while len(_INTERVIEWS) > _MAX_INTERVIEW_SESSIONS:
+                evicted, _ = _INTERVIEWS.popitem(last=False)
+                _SESSION_LOCKS.pop(evicted, None)
+        else:
+            _INTERVIEWS.move_to_end(session_id)
+        session_lock = _SESSION_LOCKS.setdefault(session_id, Lock())
     engine = YaoBiInterviewEngine(dao_client=CLIENT, use_llm=TAO_ENABLED)
     review_action = str(data.get("review_action") or "").strip()
-    if review_action:
-        result = engine.run_review(
-            case,
-            action=review_action,
-            physician_notes=str(data.get("physician_notes") or ""),
-            override_reason=str(data.get("override_reason") or ""),
-        )
-    else:
-        result = engine.run_turn(case, str(data.get("message") or ""))
+    with session_lock:
+        if review_action:
+            result = engine.run_review(
+                case,
+                action=review_action,
+                physician_notes=str(data.get("physician_notes") or ""),
+                override_reason=str(data.get("override_reason") or ""),
+            )
+        else:
+            result = engine.run_turn(case, str(data.get("message") or ""))
     result["tao"] = tao_info()
     return result
 
@@ -271,16 +292,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # Cap POST bodies (1 MiB is far beyond any legitimate case text) so an oversized
+    # Content-Length cannot balloon memory on a public deployment.
+    MAX_BODY_BYTES = 1024 * 1024
+
+    class _BadRequest(ValueError):
+        pass
+
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
+        if length > self.MAX_BODY_BYTES:
+            raise self._BadRequest(f"request body too large ({length} bytes; max {self.MAX_BODY_BYTES})")
         raw = self.rfile.read(length) if length else b""
         if not raw:
             return {}
         try:
             parsed = json.loads(raw.decode("utf-8"))
-            return parsed if isinstance(parsed, dict) else {}
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return {}
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise self._BadRequest(f"request body is not valid JSON: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise self._BadRequest("request body must be a JSON object")
+        return parsed
 
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
@@ -296,15 +328,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if handler is None:
             self._send_json({"error": f"unknown endpoint {path}"}, status=404)
             return
-        self._dispatch(handler, self._read_json())
+        try:
+            data = self._read_json()
+        except self._BadRequest as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._dispatch(handler, data)
 
     def _dispatch(self, handler: Any, data: dict[str, Any]) -> None:
         try:
             self._send_json(handler(data))
-        except Exception as exc:  # never crash the UI; surface a JSON error + log full cause
+        except Exception as exc:  # never crash the UI; log the full cause server-side only
             tb = traceback.format_exc()
             print(f"[yaobi-server] {self.path} failed:\n{tb}", file=sys.stderr, flush=True)
-            self._send_json({"error": f"{type(exc).__name__}: {exc}", "traceback": tb.splitlines()[-3:]}, status=500)
+            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=500)
 
 
 def make_server(port: int = 8000, host: str = "0.0.0.0") -> http.server.ThreadingHTTPServer:

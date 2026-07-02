@@ -4,7 +4,7 @@ from typing import Any
 
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
-from backend.llm.output_guard import guard_tao_output
+from backend.llm.output_guard import guard_clinician_draft
 
 HIGH_RISK_HERBS = {"附片", "细辛", "蜈蚣", "全蝎", "制川乌", "制草乌", "乌头", "麻黄"}
 
@@ -20,6 +20,7 @@ SYNDROME_THERAPY = {
     "脾虚不运证": "健脾益气、化湿和中",
     "脾虚湿困证": "健脾化湿、通络止痛",
     "少阳证类": "和解少阳、疏利枢机",
+    "少阳气郁证": "和解少阳、疏利枢机",
     "气血不足证": "补益气血、荣筋止痛",
     "肺肾阴虚证": "滋阴润燥、金水相生",
 }
@@ -171,7 +172,9 @@ def physician_reasoning_skill(
         markdown = str(parsed.get("reasoning_markdown") or "").strip()
         if not markdown:
             raise JsonRepairError("Tao reasoning output must include reasoning_markdown.")
-        guard = guard_tao_output(markdown, parsed)
+        # Clinician-only skill (patient role is rejected at entry) — use the soft draft guard
+        # so prompt-invited teaching content (方义/经验剂量区间) is not falsely rejected.
+        guard = guard_clinician_draft(markdown, parsed)
         meta.update({"status": "accepted" if guard["allowed"] else "guard_rejected", "json_repair": repair_meta, "guard": guard})
         if guard["allowed"]:
             meta["fallback_used"] = False

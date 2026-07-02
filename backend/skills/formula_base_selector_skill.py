@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Any
 
 from backend.engine.rule_engine import RuleEngine
+from backend.engine.scoring import confidence_from_score
 
 
 def formula_base_selector_skill(normalized_tags: list[str], syndrome_candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -20,7 +21,10 @@ def formula_base_selector_skill(normalized_tags: list[str], syndrome_candidates:
     for hit in hits:
         route = hit.effect.get("formula_route")
         if route:
-            scores[route] += int(hit.effect.get("route_score", 0))
+            # Same corroboration bonus as syndrome scoring: evidence beyond two tags
+            # strengthens the route, making "high" confidence reachable.
+            bonus = max(0, len(set(hit.evidence_tags)) - 2)
+            scores[route] += int(hit.effect.get("route_score", 0)) + bonus
             route_hits[route].append(hit.to_dict())
     routes = []
     for route, score in sorted(scores.items(), key=lambda item: item[1], reverse=True):
@@ -28,7 +32,7 @@ def formula_base_selector_skill(normalized_tags: list[str], syndrome_candidates:
         routes.append({
             "name": route,
             "score": score,
-            "confidence": "high" if score >= 8 else "medium" if score >= 4 else "low",
+            "confidence": confidence_from_score(score),
             "core_module": first["effect"].get("core_module", []),
             "evidence_tags": first["evidence_tags"],
             "rationale": first["rationale"],

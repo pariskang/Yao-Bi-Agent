@@ -35,7 +35,7 @@ inference_profiles:
     temperature: 0.3
     top_p: 0.85
     repetition_penalty: 1.1
-    max_new_tokens: 2048
+    max_new_tokens: 3072
     do_sample: true
   teaching_explanation:
     temperature: 0.6

@@ -22,7 +22,7 @@ tags:
   warmth_relieves:
     aliases: [热敷缓解, 热敷舒服]
   cold_aggravation:
-    aliases: [受凉加重, 遇冷加重]
+    aliases: [受凉加重, 遇冷加重, 阴雨天加重, 遇寒加重]
   dark_tongue:
     aliases: [舌暗, 舌紫暗]
   purple_tongue:
@@ -52,9 +52,23 @@ tags:
   osteoporosis:
     aliases: [骨质疏松]
   fixed_pain:
-    aliases: [疼痛固定]
+    aliases: [疼痛固定, 固定痛, 痛处固定, 痛有定处]
   stabbing_pain:
     aliases: [刺痛]
+  distending_pain:
+    aliases: [胀痛]
+  deep_cold_pain:
+    aliases: [冷痛, 寒痛]
+  strain_or_sprain:
+    aliases: [扭伤, 劳损, 闪腰, 负重损伤]
+  emotional_constraint:
+    aliases: [情志不畅, 情绪抑郁, 郁闷, 压力大, 焦虑]
+  teeth_marks:
+    aliases: [齿痕, 舌边齿痕]
+  weak_stomach:
+    aliases: [胃弱, 素有胃病, 脾胃虚弱, 慢性胃炎]
+  nausea:
+    aliases: [恶心, 泛恶, 呕吐]
   trauma_fracture_risk:
     aliases: [外伤, 跌倒, 车祸]
   cauda_equina_symptoms:
