@@ -47,6 +47,9 @@ def tao_report_generation_skill(
     dao_client: DaoClient | None = None,
     use_llm: bool = False,
     user_role: str = "clinician",
+    uncertainty: dict[str, Any] | None = None,
+    interaction_alerts: list[dict[str, Any]] | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Generate a deterministic report plus optional Tao teaching overlay.
 
@@ -66,6 +69,9 @@ def tao_report_generation_skill(
         conflicts=conflicts,
         safety=safety,
         rule_hits=rule_hits,
+        uncertainty=uncertainty,
+        interaction_alerts=interaction_alerts,
+        provenance=provenance,
     )
     payload = _structured_payload(
         case_json,

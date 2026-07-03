@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -28,11 +29,13 @@ from typing import Any
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
 from backend.llm.output_guard import guard_consultation
+from backend.skills.conflict_checker_skill import conflict_checker_skill
 from backend.skills.formula_base_selector_skill import formula_base_selector_skill
 from backend.skills.herb_module_composer_skill import herb_module_composer_skill
 from backend.skills.safety_guard_skill import safety_guard_skill
 from backend.skills.syndrome_router_skill import syndrome_router_skill
 from backend.skills.tao_consultation_skill import tao_consultation_skill
+from backend.skills.uncertainty_skill import uncertainty_skill
 
 
 class YaoBiState(str, Enum):
@@ -143,6 +146,26 @@ def _slot_positive(value: Any) -> bool:
     return bool(value)
 
 
+def _as_term_list(value: Any) -> list[str]:
+    """Normalize an LLM slot value into a clean term list for interaction matching.
+
+    The extractor is asked for lists but may return a bare string ("高血压、糖尿病") —
+    split on common Chinese separators instead of crashing on list concatenation.
+    """
+
+    if value in (None, "", [], "unknown"):
+        return []
+    if isinstance(value, str):
+        parts = [p.strip() for p in re.split(r"[，、,;；/和及\s]+", value)]
+        return [p for p in parts if p and p not in _NEGATIVE_SLOT_STRINGS]
+    if isinstance(value, list):
+        terms: list[str] = []
+        for item in value:
+            terms.extend(_as_term_list(item))
+        return terms
+    return [str(value)]
+
+
 @dataclass
 class YaoBiCaseState:
     session_id: str
@@ -246,7 +269,9 @@ class YaoBiInterviewEngine:
         # and safety review — not just syndrome candidates.
         tags = self._tags(case)
         candidates = [
-            {"name": p["pattern"], "score": round(p["prob"] * 10, 1), "evidence_tags": p.get("evidence", [])}
+            # Raw rule scores (uncertainty thresholds are calibrated on the raw scale;
+            # prob*10 would fabricate scores and flip abstention verdicts).
+            {"name": p["pattern"], "score": p.get("score") or 0, "evidence_tags": p.get("evidence", [])}
             for p in case.candidate_patterns
         ]
         formula = formula_base_selector_skill(tags, candidates)
@@ -254,12 +279,32 @@ class YaoBiInterviewEngine:
         modules = herb_module_composer_skill(tags, formula.get("primary_route"))
         matched = modules.get("matched_modules") or []
         safety = safety_guard_skill({"evidence": {"raw_text": self._case_text(case)}, "red_flags": case.red_flags}, matched, tags)
+        uncertainty = uncertainty_skill(candidates, tags)["uncertainty"]
+        history = case.history_slots
+        interactions = conflict_checker_skill(
+            matched, formula.get("primary_route"),
+            medications=_as_term_list(history.get("medication_history")),
+            # Only structured comorbidity terms — never the free-text western_diagnosis
+            # sentence, whose embedded negations ("没有高血压") would false-fire
+            # interruptive contraindication alerts via substring matching.
+            conditions=_as_term_list(history.get("comorbidities")),
+        )
         evidence = {
             "normalized_tags": tags,
             "syndrome_candidates": candidates,
             "formula_routes": [{"name": r["name"], "confidence": r.get("confidence"), "score": r.get("score")} for r in routes[:4]],
             "herb_modules": [{"name": m["name"], "role": m.get("role"), "herbs": (m.get("herbs") or [])[:6]} for m in matched[:6]],
             "safety": {"status": safety.get("safety_status"), "risks": safety.get("medication_risks") or []},
+            "interaction_alerts": [
+                {"level": a.get("alert_level"), "description": a.get("description")}
+                for a in (interactions.get("interaction_alerts") or [])[:5]
+            ],
+            # Epistemic self-assessment: the model must voice (not hide) low separation or abstention.
+            "uncertainty": {
+                "abstain": uncertainty.get("abstain"),
+                "assessment_note": uncertainty.get("assessment_note"),
+                "differential_gaps": [g.get("suggestion") for g in uncertainty.get("differential_gaps") or []],
+            },
             "case_state": self._summary(case),
             "red_flags": case.red_flags,
         }
@@ -268,6 +313,11 @@ class YaoBiInterviewEngine:
             evidence, fallback_text=self._rule_report(case),
             dao_client=self.dao_client, use_llm=self.use_llm, user_role="clinician",
         )
+        # Surface the tiered medication-safety verdict on the API payload itself —
+        # an interruptive alert must reach the physician UI, not just the LLM prompt.
+        res["interaction_alerts"] = interactions.get("interaction_alerts") or []
+        res["alert_summary"] = interactions.get("alert_summary") or {}
+        res["uncertainty"] = uncertainty
         return res
 
     # -- rules / grounding ----------------------------------------------------
@@ -377,7 +427,9 @@ class YaoBiInterviewEngine:
         scores = [max(0.1, float(c.get("score") or 1)) for c in cands]
         total = sum(scores) or 1.0
         patterns = [
-            {"pattern": c["name"], "prob": round(s / total, 3), "evidence": c.get("evidence_tags", [])}
+            # Keep the raw rule score alongside the share-normalized prob: downstream
+            # uncertainty thresholds are calibrated on raw scores, not probabilities.
+            {"pattern": c["name"], "prob": round(s / total, 3), "score": int(c.get("score") or 0), "evidence": c.get("evidence_tags", [])}
             for c, s in zip(cands, scores)
         ]
         probs = [p["prob"] for p in patterns if p["prob"] > 0]

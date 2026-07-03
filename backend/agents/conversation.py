@@ -14,6 +14,7 @@ from backend.agents.orchestrator import AgentOrchestrator
 from backend.agents.skill_router import INTENT_BY_ID, INTENTS, route_intent, suggested_questions
 from backend.llm.dao_client import DaoClient
 from backend.skills.case_experience_summary_skill import case_experience_summary_skill
+from backend.skills.conflict_checker_skill import conflict_checker_skill
 from backend.skills.formula_base_selector_skill import formula_base_selector_skill
 from backend.skills.herb_module_composer_skill import herb_module_composer_skill
 from backend.skills.mined_evidence_skill import load_mined_rules, mined_evidence_skill
@@ -21,6 +22,7 @@ from backend.skills.physician_reasoning_skill import physician_reasoning_skill
 from backend.skills.safety_guard_skill import safety_guard_skill
 from backend.skills.syndrome_router_skill import syndrome_router_skill
 from backend.skills.tao_consultation_skill import tao_consultation_skill
+from backend.skills.uncertainty_skill import uncertainty_skill
 
 # Clinical intents whose answer should be a Tao-primary grounded consultation (the model is
 # the main reasoner) rather than a bare rule snippet. Scope guides the prompt per intent.
@@ -221,14 +223,32 @@ class ConversationSession:
             matched, tags,
         )
         mined = mined_evidence_skill(tags, cands).get("mined_evidence") or []
+        uncertainty = uncertainty_skill(cands, tags)["uncertainty"]
+        comorbidity = self.case_state.get("comorbidity") or {}
+        interactions = conflict_checker_skill(
+            matched, formula.get("primary_route"),
+            medications=comorbidity.get("medications") or [],
+            conditions=comorbidity.get("diseases") or [],
+        )
         return {
             "normalized_tags": tags,
             "syndrome_candidates": [{"name": c["name"], "score": c.get("score"), "evidence_tags": c.get("evidence_tags", [])} for c in cands[:4]],
             "formula_routes": [{"name": r["name"], "confidence": r.get("confidence"), "score": r.get("score")} for r in routes[:4]],
             "herb_modules": [{"name": m["name"], "role": m.get("role"), "herbs": (m.get("herbs") or [])[:6]} for m in matched[:6]],
             "safety": {"status": safety.get("safety_status"), "risks": safety.get("medication_risks") or []},
+            "interaction_alerts": [
+                {"level": a.get("alert_level"), "description": a.get("description")}
+                for a in (interactions.get("interaction_alerts") or [])[:5]
+            ],
             "mined_evidence": [{"rule_id": r.get("rule_id"), "then": r.get("then")} for r in mined[:6]],
             "shen_signals": (self.case_state.get("shen_signals") or [])[:6],
+            # The consultation prompt sees the engine's own confidence assessment, so the
+            # model can (and should) voice low separation or abstention instead of bluffing.
+            "uncertainty": {
+                "abstain": uncertainty.get("abstain"),
+                "assessment_note": uncertainty.get("assessment_note"),
+                "differential_gaps": [g.get("suggestion") for g in uncertainty.get("differential_gaps") or []],
+            },
         }
 
     def _consult(self, intent: str, question: str, det: dict[str, Any], full: bool) -> dict[str, Any]:

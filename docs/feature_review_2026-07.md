@@ -77,3 +77,37 @@
 - `python -m pytest tests/`：**136 passed**（116 既有 + 20 新增 `tests/test_review_hardening.py`）。
 - mock 后端端到端冒烟：确定性管线 CLI、`--use-llm` 叠加、`/api/health`、`/api/chat`（`method=llm`、`answer_source=tao_primary_grounded`）、`/api/interview` 多轮（槽位抽取→FSM 推进→候选证型更新）、`/api/followup_probe`（规则约束内生成追问）均正常。
 - 红旗安全网：离线（`use_llm=False`）输入"小便失禁，会阴发麻"→ `emergency` 硬停；"没有大小便失禁"→ 不触发；字符串"否"/"正常"槽位→ 不触发。
+
+---
+
+# 第二轮：CDSS 治理层升级（同月晚些时候）
+
+按顶级 CDSS 设计理念（CDS 五个正确、可追溯、审计问责、用药安全、告警分级、认知谦逊、持续验证、临床治理）做第二轮差距分析与实现，全程采用「并行侦察 → 并行实现 → 对抗性审查（4 视角 + 16 项对抗验证）→ 修复」的多智能体流程。
+
+## 新增治理能力
+
+1. **决策出处**：`backend/provenance.py` 规则库 SHA-256 指纹（按文件 mtime/size 自动失效重算）+ 应用/模型运行时指纹，注入所有报告、`/api/health`、`/api/metrics`。
+2. **审计日志**：`backend/audit/` 追加式 JSONL，每次 API 决策记录意图/路由/守卫/回退/红旗级别/延迟；患者叙述仅存摘要哈希+长度；失败安全（磁盘故障不影响请求）。
+3. **医师反馈闭环**：`POST /api/feedback`（确认/需修订/不采纳+原因，字段全部限长）+ `GET /api/metrics`（采纳率等）+ 前端反馈组件（聊天回答/问诊小结/表单报告三处）。
+4. **用药安全深化**：`rules/06` 新增 1 条十八反（附片×半夏，interruptive）+ 5 条药-药 + 6 条药-病禁忌规则；`check_interactions` 双向子串匹配含否定窗口与短词防过匹配；`alert_summary.requires_dual_signoff` 分级告警；抽取器新增用药/合并病识别（含否定感知），管线/编排器/会诊/问诊四路全部接通。
+5. **认知谦逊**：`uncertainty_skill` 输出弃权判定（无候选或证据弱）、top1-top2 区分度、鉴别信息缺口与强化证据建议；进入报告「判读可信度」节、caseguide `final_report.uncertainty`、会诊 prompt（要求模型如实呈现不确定性）。
+6. **金标准回归**：`evaluation/golden_cases.yaml` 16 例（全部 6 证型×2、3 红旗、良性、模糊弃权、1 例诚实标注的已知缺口——湿热痹阻证规则缺失）；`python -m backend.evaluation.benchmark`；CI 强制红旗召回=100%、守卫对抗集捕获=100%、良性误杀=0%。
+7. **临床安全个案**：`docs/clinical_safety_case.md` 12 项危害（H1-H12）→ 缓解（代码引用）→ 验证（测试引用）→ 残余风险评级。
+
+## 对抗性审查确认并修复的缺陷（本轮内自查自纠）
+
+- **高**：问诊路径把含否定的原始句子当合并病条件传入相互作用匹配（「没有高血压也没有心脏病」触发 2 条 interruptive 假告警）→ 只传结构化条件 + `_terms_match` 加否定窗口与短词下限。
+- **高**：管线路径的药-药告警永远无法触发（抽取器不认药名）→ 抽取器补用药/合并病词表（含否定感知）。
+- **高**：问诊路径算出 `requires_dual_signoff` 却只进 LLM prompt、不进 API 载荷 → 报告载荷显式携带 `interaction_alerts`/`alert_summary`/`uncertainty`。
+- **高**：前端从不上送合并病数据，UI 全链路告警层失效 → `casePayload` 补 comorbidity。
+- **中**：问诊不确定性误用归一化概率×10（弃权判定错误、显示虚构分数）→ 全程携带原始规则分。
+- **中**：LLM 返回字符串型 comorbidities 使最终报告 500 → `_as_term_list` 归一。
+- **中**：出处指纹永久缓存而规则引擎每请求重读 YAML（热改规则后指纹漂移）→ mtime/size 键控缓存。
+- **中**：`/api/feedback` 客户端字段未限长直写审计 → 全字段限长；隐私声明在 README/安全个案中如实区分「患者叙述摘要化」与「医师反馈原文留存（设计使然）」。
+- **文档**：安全个案中黄金病例集/专项测试的三处过时表述与本轮产物矛盾 → 全部校正。
+
+## 最终验证
+
+- `python -m pytest tests/`：**187 passed**（上轮 136 → 本轮 +51：相互作用 14、基准 9、治理 26、前端 2）。
+- 基准：top1/top2/路线/红旗/安全等级全 100%（16 例，1 known_gap 诚实另计），守卫捕获 100%、误杀 0%。
+- 端到端（mock）：`/api/health` 带 provenance、`/api/metrics` 带计数与采纳率、审计 JSONL 落盘且患者文本仅哈希、问诊否定条件不再假告警、抗凝药×活血中断级告警从叙述文本直达报告「需医师确认」区。

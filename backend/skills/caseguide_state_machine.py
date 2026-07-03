@@ -6,6 +6,7 @@ from typing import Any
 from backend.llm.dao_client import DaoClient
 
 from backend.agents.orchestrator import AgentOrchestrator
+from backend.provenance import get_provenance
 from backend.skills.adaptive_question_planner_skill import adaptive_question_planner_skill
 from backend.skills.case_quality_check_skill import case_quality_check_skill
 from backend.skills.case_structuring_skill import case_structuring_skill
@@ -26,6 +27,7 @@ from backend.skills.tao_question_planner_skill import tao_question_planner_skill
 from backend.skills.tao_followup_probe_skill import tao_followup_probe_skill
 from backend.skills.physician_reasoning_skill import physician_reasoning_skill
 from backend.skills.case_experience_summary_skill import case_experience_summary_skill
+from backend.skills.uncertainty_skill import uncertainty_skill
 from backend.skills.formula_base_selector_skill import formula_base_selector_skill
 from backend.skills.herb_module_composer_skill import herb_module_composer_skill
 from backend.skills.safety_guard_skill import safety_guard_skill
@@ -300,13 +302,20 @@ class CaseGuideSession:
             "agent_count": orchestration["agent_count"],
         }
         self.state = "S10_FINAL_REPORT"
+        routed = bb.get("routed", {})
+        # CDSS governance blocks: epistemic self-assessment + decision provenance.
+        uncertainty = uncertainty_skill(
+            routed.get("syndrome_candidates") or [],
+            self.case_state.get("normalized_tags") or [],
+            shen.get("high_value_missing") or [],
+        )["uncertainty"]
         return {
             "state": self.state,
             "case_state": self.case_state,
             "shen_signals": shen.get("shen_signals", {}),
             "high_value_missing": shen.get("high_value_missing", []),
             **bb.get("quality", {}),
-            **bb.get("routed", {}),
+            **routed,
             **bb.get("formula", {}),
             **bb.get("modules", {}),
             **bb.get("conflicts", {}),
@@ -320,6 +329,8 @@ class CaseGuideSession:
             **bb.get("reasoning", {}),
             **bb.get("experience", {}),
             "agent_collaboration": agent_collaboration,
+            "uncertainty": uncertainty,
+            "provenance": get_provenance(getattr(self.dao_client, "config", None) if self.use_llm_questions else None),
         }
 
     def _question_payload(self) -> dict[str, Any]:

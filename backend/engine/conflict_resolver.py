@@ -28,5 +28,84 @@ def check_conflicts(items: list[dict[str, Any]]) -> list[dict[str, str]]:
                 "type": "route_conflict",
                 "description": rule["meaning"],
                 "resolution": rule.get("action", "require_clinician_review"),
+                "alert_level": rule.get("alert_level", "advisory"),
             })
     return conflicts
+
+
+# Denial phrasing immediately before a matched term ("没有高血压") negates the report.
+_NEGATION_MARKERS = ("没有", "没", "无", "不", "未", "否认", "排除")
+
+
+def _terms_match(reported: str, rule_term: str) -> bool:
+    # Substring-tolerant in both directions: a reported "阿司匹林肠溶片" matches
+    # the rule term "阿司匹林", and a reported "溃疡" matches "消化性溃疡".
+    # Empty strings never match — "" is a substring of everything.
+    reported = reported.strip()
+    rule_term = rule_term.strip()
+    if not reported or not rule_term:
+        return False
+    idx = reported.find(rule_term)
+    if idx != -1:
+        # Guard against free-text denials leaking in ("...没有高血压也没有心脏病"):
+        # a closely preceding negation marker means the condition was denied.
+        window = reported[max(0, idx - 4):idx]
+        return not any(neg in window for neg in _NEGATION_MARKERS)
+    # The reverse direction ("溃疡" reported, rule term "消化性溃疡") requires the
+    # reported string to be a plausible short term, not a single character or sentence.
+    return 2 <= len(reported) <= 12 and reported in rule_term
+
+
+def _matched_reported_terms(reported_list: list[str], rule_terms: list[Any]) -> list[str]:
+    matched = {
+        str(reported).strip()
+        for reported in reported_list
+        if any(_terms_match(str(reported), str(term)) for term in rule_terms)
+    }
+    return sorted(matched)
+
+
+def check_interactions(
+    items: list[dict[str, Any]],
+    medications: list[str] | None = None,
+    conditions: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Match the draft herb pool against herb-drug and comorbidity rules.
+
+    Every alert is draft_for_clinician_review material: 'interruptive' entries
+    are meant to block the UI until a physician explicitly acknowledges them,
+    'advisory' entries are passive notes (alert-fatigue tiering).
+    """
+    config = load_yaml(Path(RULES_DIR) / "06_conflict_rules.yaml") or {}
+    herbs = flatten_herbs(items)
+    alerts: list[dict[str, Any]] = []
+
+    for rule in config.get("herb_drug_interactions", []):
+        herbs_involved = sorted(herbs & set(rule.get("herbs") or []))
+        matched_drugs = _matched_reported_terms(medications or [], rule.get("drugs") or [])
+        if herbs_involved and matched_drugs:
+            alerts.append({
+                "id": rule["id"],
+                "type": "herb_drug",
+                "description": rule["meaning"],
+                "resolution": rule.get("action", "require_clinician_review"),
+                "alert_level": rule.get("alert_level", "advisory"),
+                "herbs_involved": herbs_involved,
+                "matched_drugs": matched_drugs,
+            })
+
+    for rule in config.get("comorbidity_contraindications", []):
+        herbs_involved = sorted(herbs & set(rule.get("herbs") or []))
+        matched_conditions = _matched_reported_terms(conditions or [], rule.get("conditions") or [])
+        if herbs_involved and matched_conditions:
+            alerts.append({
+                "id": rule["id"],
+                "type": "comorbidity_contraindication",
+                "description": rule["meaning"],
+                "resolution": rule.get("action", "require_clinician_review"),
+                "alert_level": rule.get("alert_level", "advisory"),
+                "herbs_involved": herbs_involved,
+                "matched_conditions": matched_conditions,
+            })
+
+    return alerts

@@ -164,3 +164,25 @@ def test_frontend_presents_autonomous_multistep_chat():
     assert "自主规划了" in app
     css = (root / "styles.css").read_text(encoding="utf-8")
     assert "plan-strip" in css and "substep" in css
+
+
+def test_frontend_ships_physician_feedback_loop():
+    root = Path("frontend")
+    app = (root / "app.js").read_text(encoding="utf-8")
+
+    # CDSS 治理：医师反馈闭环挂在聊天回答 / 问诊小结 / 表单最终报告上
+    assert "/api/feedback" in app
+    assert "feedbackWidget" in app
+    assert "需修订" in app and "不采纳" in app
+    assert "interview_report" in app and "form_report" in app
+    # 反馈状态存于 JS state（整页 innerHTML 重渲染不会丢失）
+    assert "holder.feedback" in app
+    css = (root / "styles.css").read_text(encoding="utf-8")
+    assert "feedback-row" in css and "feedback-reason" in css
+
+
+def test_frontend_surfaces_provenance_in_tao_badge():
+    root = Path("frontend")
+    app = (root / "app.js").read_text(encoding="utf-8")
+    assert "provenance" in app
+    assert "规则库版本" in app

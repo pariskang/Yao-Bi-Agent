@@ -37,7 +37,10 @@ from backend.agents.conversation import ConversationSession
 from backend.agents.orchestrator import AgentOrchestrator
 from backend.agents.skill_router import suggested_questions
 from backend.agents.yaobi_interview import YaoBiCaseState, YaoBiInterviewEngine
+from backend.audit import get_audit_log, get_counters
+from backend.audit.audit_log import text_digest
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
+from backend.provenance import get_provenance
 from backend.skills.case_extract_skill import case_extract_skill
 from backend.skills.case_normalize_skill import case_normalize_skill
 from backend.skills.mined_evidence_skill import load_mined_rules
@@ -122,9 +125,68 @@ def _enrich_with_question(data: dict[str, Any], question: str) -> dict[str, Any]
     return merged
 
 
+# CDSS governance: append-only decision audit + in-memory metrics (see backend/audit/).
+AUDIT = get_audit_log()
+COUNTERS = get_counters()
+
+
+def _decision_summary(path: str, data: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Extract the audit-relevant decision facts per endpoint (no raw patient text)."""
+
+    summary: dict[str, Any] = {}
+    turn = result.get("turn") if isinstance(result.get("turn"), dict) else None
+    if path in {"/api/chat", "/api/autonomous"} and turn:
+        summary = {
+            "intent": turn.get("intent"),
+            "method": turn.get("method") or turn.get("plan_method"),
+            "used_llm": turn.get("used_llm"),
+            "answer_source": turn.get("answer_source"),
+            "blocked": turn.get("intent") == "safety_block",
+            "question": text_digest(str(data.get("question") or "")),
+        }
+        consult = turn.get("consult_runtime") or {}
+        if consult.get("fallback_used"):
+            COUNTERS.increment("llm_fallback")
+        guard = (consult.get("guard") or {})
+        if guard and not guard.get("allowed", True):
+            COUNTERS.increment("guard_rejected")
+        if summary["blocked"]:
+            COUNTERS.increment("patient_request_blocked")
+    elif path == "/api/interview":
+        summary = {
+            "session_id": result.get("session_id"),
+            "state": result.get("state"),
+            "safety_level": result.get("safety_level"),
+            "done": result.get("done"),
+            "red_flag_count": len(result.get("red_flags") or []),
+            "review_action": data.get("review_action") or None,
+            "message": text_digest(str(data.get("message") or "")),
+        }
+        if result.get("safety_level") == "emergency":
+            COUNTERS.increment("red_flag_emergency_stop")
+    elif path == "/api/collaboration":
+        summary = {
+            "halted": result.get("halted"),
+            "halt_reason": result.get("halt_reason"),
+            "agent_count": result.get("agent_count"),
+            "used_llm_agents": result.get("used_llm_agents"),
+        }
+    elif path == "/api/followup_probe":
+        runtime = result.get("tao_probe_runtime") or {}
+        summary = {"probe_count": len(result.get("probes") or []), "status": runtime.get("status")}
+    return summary
+
+
 # --------------------------------------------------------------------------- handlers
 def handle_health(_data: dict[str, Any]) -> dict[str, Any]:
-    return {"ok": True, "tao": tao_info(), "mined_loaded": bool(load_mined_rules()), "service": "yaobi-skill"}
+    provenance = get_provenance()
+    return {
+        "ok": True,
+        "tao": tao_info(),
+        "mined_loaded": bool(load_mined_rules()),
+        "service": "yaobi-skill",
+        "provenance": {"app_version": provenance["app_version"], "rules_version": provenance["rules_version"]},
+    }
 
 
 def handle_starters(_data: dict[str, Any]) -> dict[str, Any]:
@@ -238,6 +300,65 @@ def handle_interview(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# Valid physician feedback verdicts (the learning loop of the CDSS governance cycle).
+_FEEDBACK_ACTIONS = {"confirmed", "revised", "rejected"}
+_FEEDBACK_TARGETS = {"chat_turn", "autonomous_turn", "interview_report", "form_report", "probe", "collaboration", "other"}
+
+
+def handle_feedback(data: dict[str, Any]) -> dict[str, Any]:
+    """Clinician feedback on a system output: 确认 / 需修订 / 不采纳 (+ optional reason).
+
+    Feedback closes the learning loop: it is appended to the audit log and tallied in
+    /api/metrics so rule curators can see which recommendations clinicians trust.
+    """
+
+    action = str(data.get("action") or "").strip()
+    if action not in _FEEDBACK_ACTIONS:
+        return {"ok": False, "error": f"action must be one of {sorted(_FEEDBACK_ACTIONS)}"}
+    target = str(data.get("target") or "other")
+    if target not in _FEEDBACK_TARGETS:
+        target = "other"
+    record = {
+        "action": action,
+        "target": target,
+        "session_id": str(data.get("session_id") or "")[:64] or None,
+        "intent": str(data.get("intent") or "")[:120] or None,
+        "answer_source": str(data.get("answer_source") or "")[:120] or None,
+        "used_llm": bool(data.get("used_llm")),
+        # Physician-authored feedback comment: stored verbatim (bounded) by design —
+        # it is the learning-loop payload for rule curators, not patient narrative.
+        # Patient free text elsewhere is digest-only (see backend/audit/audit_log.py).
+        "reason": str(data.get("reason") or "")[:500] or None,
+        "user_role": _role(data),
+    }
+    COUNTERS.increment(f"feedback_{action}")
+    if record["used_llm"]:
+        COUNTERS.increment(f"feedback_{action}_llm")
+    AUDIT.record("physician_feedback", record)
+    return {"ok": True, "recorded": record, "tao": tao_info()}
+
+
+def handle_metrics(_data: dict[str, Any]) -> dict[str, Any]:
+    """Operational + governance metrics: request counts, guard trips, fallbacks, feedback."""
+
+    counters = COUNTERS.snapshot()
+    feedback = {k: v for k, v in counters.items() if k.startswith("feedback_")}
+    confirmed = feedback.get("feedback_confirmed", 0)
+    total_feedback = sum(v for k, v in feedback.items() if k in {"feedback_confirmed", "feedback_revised", "feedback_rejected"})
+    return {
+        "ok": True,
+        "uptime_seconds": round(time.time() - COUNTERS.started_at, 1),
+        "counters": counters,
+        "feedback_summary": {
+            "total": total_feedback,
+            "acceptance_rate": round(confirmed / total_feedback, 3) if total_feedback else None,
+        },
+        "audit": {"enabled": AUDIT.enabled, "directory": str(AUDIT.directory), "write_errors": AUDIT.write_errors},
+        "provenance": get_provenance(CLIENT.config),
+        "tao": tao_info(),
+    }
+
+
 def handle_warmup(_data: dict[str, Any]) -> dict[str, Any]:
     if not TAO_ENABLED or CLIENT.config.backend == "disabled":
         return {"ok": False, "reason": "Tao backend disabled (set TAO_BACKEND).", "tao": tao_info()}
@@ -251,7 +372,7 @@ def handle_warmup(_data: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "ms": int((time.time() - started) * 1000), "reply_preview": str(reply)[:160], "tao": tao_info()}
 
 
-ROUTES_GET = {"/api/health": handle_health, "/api/starters": handle_starters}
+ROUTES_GET = {"/api/health": handle_health, "/api/starters": handle_starters, "/api/metrics": handle_metrics}
 ROUTES_POST = {
     "/api/chat": handle_chat,
     "/api/autonomous": handle_autonomous,
@@ -260,8 +381,11 @@ ROUTES_POST = {
     "/api/summary": handle_summary,
     "/api/collaboration": handle_collaboration,
     "/api/interview": handle_interview,
+    "/api/feedback": handle_feedback,
     "/api/warmup": handle_warmup,
 }
+# POST endpoints whose decisions are audit-logged (feedback logs itself with full detail).
+_AUDITED_ENDPOINTS = {"/api/chat", "/api/autonomous", "/api/interview", "/api/collaboration", "/api/followup_probe"}
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -336,12 +460,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self._dispatch(handler, data)
 
     def _dispatch(self, handler: Any, data: dict[str, Any]) -> None:
+        path = self.path.split("?", 1)[0]
+        started = time.time()
+        COUNTERS.increment(f"requests:{path}")
         try:
-            self._send_json(handler(data))
+            result = handler(data)
         except Exception as exc:  # never crash the UI; log the full cause server-side only
             tb = traceback.format_exc()
             print(f"[yaobi-server] {self.path} failed:\n{tb}", file=sys.stderr, flush=True)
+            COUNTERS.increment(f"errors:{path}")
+            AUDIT.record("api_error", {"endpoint": path, "error": f"{type(exc).__name__}: {exc}"})
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=500)
+            return
+        if path in _AUDITED_ENDPOINTS:
+            AUDIT.record("api_decision", {
+                "endpoint": path,
+                "latency_ms": int((time.time() - started) * 1000),
+                **_decision_summary(path, data, result if isinstance(result, dict) else {}),
+            })
+        self._send_json(result)
 
 
 def make_server(port: int = 8000, host: str = "0.0.0.0") -> http.server.ThreadingHTTPServer:

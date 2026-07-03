@@ -22,6 +22,33 @@ KEYWORDS = {
 RED_FLAG_TERMS = ["外伤", "跌倒", "车祸", "大小便", "会阴麻木", "尿不出来", "发热", "寒战", "肿瘤", "体重下降", "走路拖脚"]
 REQUIRED_FIELDS = ["疼痛性质", "是否放射痛", "夜寐", "胃纳", "二便", "舌象", "脉象"]
 
+# Feeds the herb-drug / comorbidity interaction checker (rules/06_conflict_rules.yaml).
+MEDICATION_TERMS = [
+    "华法林", "阿司匹林", "利伐沙班", "氯吡格雷", "塞来昔布", "布洛芬", "双氯芬酸",
+    "艾瑞昔布", "依托考昔", "泼尼松", "地塞米松", "二甲双胍", "乙哌立松",
+]
+COMORBIDITY_TERMS = [
+    "高血压", "糖尿病", "冠心病", "心脏病", "心律失常", "心衰",
+    "肝功能不全", "肾功能不全", "肝硬化", "尿毒症", "消化性溃疡", "胃溃疡",
+    "妊娠", "怀孕", "低血钾", "水肿",
+]
+_NEGATION_MARKERS = ("没有", "没", "无", "不", "未", "否认", "排除")
+
+
+def _positive_mentions(text: str, terms: list[str]) -> list[str]:
+    """Terms mentioned without a closely preceding denial ("否认高血压" is skipped)."""
+
+    found: list[str] = []
+    for term in terms:
+        idx = text.find(term)
+        if idx == -1:
+            continue
+        window = text[max(0, idx - 4):idx]
+        if any(neg in window for neg in _NEGATION_MARKERS):
+            continue
+        found.append(term)
+    return found
+
 
 def _first_match(text: str, patterns: list[tuple[str, int]]) -> Any:
     for pattern, group in patterns:
@@ -68,6 +95,8 @@ def case_extract_skill(raw_text: str) -> dict[str, Any]:
         evidence[field] = values
     red_flags = [term for term in RED_FLAG_TERMS if term in raw_text]
     extracted["red_flags"] = red_flags
+    extracted["medications"] = _positive_mentions(raw_text, MEDICATION_TERMS)
+    extracted["comorbidity_conditions"] = _positive_mentions(raw_text, COMORBIDITY_TERMS)
     missing = []
     if not any(term in raw_text for term in ["酸痛", "刺痛", "胀痛", "冷痛", "隐痛"]):
         missing.append("疼痛性质")

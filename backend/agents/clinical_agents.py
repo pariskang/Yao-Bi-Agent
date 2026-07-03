@@ -143,7 +143,13 @@ class ConflictSafetyAgent:
     def run(self, bb: Blackboard) -> AgentResult:
         modules = (bb.get("modules", {}) or {}).get("matched_modules") or []
         formula = bb.get("formula", {}) or {}
-        conflicts = conflict_checker_skill(modules, formula.get("primary_route"))
+        comorbidity = bb.case_state.get("comorbidity", {}) or {}
+        conflicts = conflict_checker_skill(
+            modules,
+            formula.get("primary_route"),
+            medications=comorbidity.get("medications") or [],
+            conditions=comorbidity.get("diseases") or [],
+        )
         safety = safety_guard_skill(
             {"evidence": {"raw_text": ""}, "red_flags": bb.case_state.get("red_flags", {}).get("positive_items", [])},
             modules, bb.case_state.get("normalized_tags", []),
@@ -151,8 +157,13 @@ class ConflictSafetyAgent:
         bb.put("conflicts", conflicts)
         bb.put("safety", safety)
         risks = safety.get("medication_risks") or []
-        status = "escalate" if safety.get("safety_status") != "safe" else "ok"
-        return AgentResult(self.name, self.role, self.kind, status, f"安全状态：{safety.get('safety_status')}；冲突 {len(conflicts.get('conflicts') or [])} 项，高风险用药 {len(risks)} 项。", confidence=1.0, evidence=risks[:6], handoff_to=self.handoff_to)
+        alerts = conflicts.get("interaction_alerts") or []
+        status = "escalate" if safety.get("safety_status") != "safe" or (conflicts.get("alert_summary") or {}).get("requires_dual_signoff") else "ok"
+        return AgentResult(
+            self.name, self.role, self.kind, status,
+            f"安全状态：{safety.get('safety_status')}；冲突 {len(conflicts.get('conflicts') or [])} 项，相互作用/禁忌告警 {len(alerts)} 项，高风险用药 {len(risks)} 项。",
+            confidence=1.0, evidence=risks[:6] + [a.get("id") for a in alerts[:4]], handoff_to=self.handoff_to,
+        )
 
 
 class EvidenceTraceAgent:

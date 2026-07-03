@@ -173,6 +173,21 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 
 三项能力均以 `draft_for_clinician_review`、`patient_visible=false` 输出，并随 `final_report` 一并返回。UI 在左侧导航新增「经验推理」「经验总结」模块，问诊页提供「Tao 自动追问」开关，最终报告新增「经验推理」「经验按语」标签页。
 
+## CDSS 治理层（v0.5：按顶级 CDSS 设计理念加固）
+
+对照 CDS「五个正确」、可追溯性、审计问责、用药安全、认知谦逊与持续验证等顶级 CDSS 设计理念，v0.5 新增完整治理层：
+
+| 治理机制 | 实现 | 入口 |
+|---|---|---|
+| **决策出处（Provenance）** | 规则库内容 SHA-256 指纹 + 应用版本 + 模型运行时配置，注入每份报告尾部与 `final_report.provenance` | `backend/provenance.py`、`/api/health`、`/api/metrics` |
+| **审计日志（Audit Trail）** | 追加式 JSONL：每次 API 决策记录意图/路由方式/守卫裁决/回退/红旗级别/延迟；**患者叙述**仅存摘要哈希+长度（隐私优先），医师撰写的反馈原因按设计以明文留存（≤500字，UI 明确提示勿含患者身份信息）；磁盘故障绝不影响临床请求 | `backend/audit/`，`YAOBI_AUDIT_DIR`（默认 `logs/`，gitignored），`YAOBI_AUDIT=0` 关闭 |
+| **医师反馈闭环（Learning Loop）** | 👍确认 / ✏️需修订 / 👎不采纳（+原因）挂在智能问答每条回答、对话问诊小结与表单式最终报告上；进入审计日志与指标 | `POST /api/feedback`、前端反馈组件 |
+| **运行指标** | 各端点请求量、守卫拦截数、LLM 回退数、红旗急停数、反馈采纳率、审计健康度 | `GET /api/metrics` |
+| **用药安全深化** | 药-药（乌头类×半夏十八反、抗凝药×活血化瘀/虫类药）、药-病禁忌（麻黄×高血压、附子细辛×心律失常/肝肾功能不全、妊娠禁忌）规则化；**分级告警**：interruptive（需医师确认，`requires_dual_signoff`）/ advisory（提示级），对抗告警疲劳 | `rules/06_conflict_rules.yaml`、`conflict_checker_skill(medications=, conditions=)` |
+| **认知谦逊（Uncertainty & 弃权）** | top1-top2 区分度评估、证据不足时**明确弃权**（不硬给证型倾向）、缺失鉴别信息建议（"补充舌象可区分A/B"）；不确定性块随证据包进入会诊 prompt，要求模型如实呈现不确定性 | `backend/skills/uncertainty_skill.py`，报告「判读可信度与鉴别提示」节 |
+| **金标准回归（Golden Cases）** | 覆盖全部证型/红旗/良性/模糊病例的标注病例集 + 基准跑分器（top-1/top-2 证型准确率、方剂召回、红旗召回=100%、守卫对抗集捕获率=100%、守卫良性误杀率=0），CI 阈值断言 | `evaluation/golden_cases.yaml`、`python -m backend.evaluation.benchmark`、`tests/test_benchmark.py` |
+| **临床安全个案（Safety Case）** | DCB0129 风格危害日志：≥12 项危害 → 缓解措施（代码引用）→ 验证证据（测试引用）→ 残余风险评级 | [`docs/clinical_safety_case.md`](docs/clinical_safety_case.md) |
+
 ## CDSS 草案模块
 
 项目新增 `cdss_recommendation_skill`，用于医生端 CDSS 自动生成候选诊断、候选证型、方剂路线和药物模块草案。该草案状态固定为 `draft_for_clinician_review`，不是最终诊断、不是签名处方、不是患者可见医嘱，也不会生成患者可执行剂量；最终医嘱仍需 `physician_review_skill` 医师手工录入并签名。
