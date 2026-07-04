@@ -29,6 +29,7 @@ from typing import Any
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
 from backend.llm.output_guard import guard_consultation
+from backend.skills.active_questioning import expected_information_gain
 from backend.skills.conflict_checker_skill import conflict_checker_skill
 from backend.skills.formula_base_selector_skill import formula_base_selector_skill
 from backend.skills.herb_module_composer_skill import herb_module_composer_skill
@@ -87,17 +88,24 @@ SLOT_TAGS: list[tuple[tuple[str, str], Any, list[str]]] = [
     (("pain_slots", "trauma_history"), True, ["strain_or_sprain"]),
     (("pain_slots", "night_pain"), True, ["night_pain"]),
     (("pain_slots", "pain_nature"), "刺痛", ["stabbing_pain"]),
-    (("pain_slots", "pain_nature"), "冷痛", ["cold_pain"]),
+    # Tag names must match the 02_syndrome_rules trigger vocabulary exactly, or the
+    # answer never reaches the rule engine (deep_cold_pain feeds R004 肾阳不足).
+    (("pain_slots", "pain_nature"), "冷痛", ["deep_cold_pain"]),
     (("tcm_slots", "fixed_pain"), True, ["fixed_pain"]),
-    (("tcm_slots", "cold_heat"), "怕冷", ["cold_aggravation"]),
+    (("tcm_slots", "cold_heat"), "怕冷", ["cold_aversion", "cold_aggravation"]),
     (("tcm_slots", "limb_heaviness"), True, ["white_greasy_coating"]),
-    (("tcm_slots", "waist_knee_soreness"), True, ["liver_kidney_deficiency"]),
+    (("tcm_slots", "waist_knee_soreness"), True, ["lumbar_knee_soreness"]),
     (("tcm_slots", "tongue_body"), "暗紫", ["dark_tongue", "purple_tongue"]),
     (("tcm_slots", "tongue_body"), "淡", ["pale_tongue"]),
     (("tcm_slots", "tongue_coating"), "白腻", ["white_greasy_coating"]),
     (("tcm_slots", "tongue_coating"), "黄腻", ["yellow_greasy_coating"]),
     (("history_slots", "osteoporosis"), True, ["osteoporosis"]),
 ]
+
+# Slot key → union of rule tags it can produce (drives EIG-based question selection).
+SLOT_TAG_MAP: dict[str, set[str]] = {}
+for (_group, _key), _expected, _mapped in SLOT_TAGS:
+    SLOT_TAG_MAP.setdefault(_key, set()).update(_mapped)
 
 # Discriminative slots per candidate pattern (drives the next follow-up target selection).
 DISCRIMINATIVE = {
@@ -186,6 +194,8 @@ class YaoBiCaseState:
     physician_review: dict[str, Any] = field(default_factory=dict)
     # Set to True by the override action so _detect_red_flags is bypassed for this session.
     red_flags_overridden: bool = False
+    # EIG ranking of the latest follow-up targets (BED-style question selection audit).
+    last_question_selection: list[dict[str, Any]] = field(default_factory=list)
 
     def group(self, name: str) -> dict[str, Any]:
         return getattr(self, name)
@@ -446,11 +456,18 @@ class YaoBiInterviewEngine:
         req = unanswered(REQUIRED_SLOTS.get(case.state, []))
         # 2) always make sure the core safety slots are covered
         safety = unanswered(SAFETY_SLOTS)
-        # 3) discriminative slots for the leading candidate patterns
+        # 3) discriminative slots for the leading candidate patterns, re-ranked by
+        # expected information gain (BED-style active questioning): ask what most
+        # reduces the entropy of the syndrome posterior, not a fixed slot order.
         disc_pairs: list[tuple[str, str]] = []
         for pattern in case.candidate_patterns[:3]:
             disc_pairs += DISCRIMINATIVE.get(pattern["pattern"], [])
         disc = unanswered(disc_pairs)
+        eig_ranked = expected_information_gain(case.candidate_patterns, SLOT_TAG_MAP, disc)
+        case.last_question_selection = [
+            {"slot": item["slot"], "eig_bits": item["eig_bits"]} for item in eig_ranked[:6]
+        ]
+        disc = [item["slot"] for item in eig_ranked]
         ordered: list[str] = []
         for key in req + safety[:2] + disc:
             if key not in ordered:
@@ -606,6 +623,9 @@ class YaoBiInterviewEngine:
             "uncertainty": case.uncertainty_score,
             "case_summary": self._summary(case),
             "target_slots": target_slots or [],
+            # EIG audit trail: why these follow-ups were chosen (bits of expected
+            # entropy reduction over the syndrome posterior).
+            "question_selection": case.last_question_selection,
             "done": done,
             "report": report["answer"] if report else None,
             "report_source": (report.get("source") if report else None),

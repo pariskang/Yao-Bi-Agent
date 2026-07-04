@@ -188,6 +188,17 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 | **金标准回归（Golden Cases）** | 覆盖全部证型/红旗/良性/模糊病例的标注病例集 + 基准跑分器（top-1/top-2 证型准确率、方剂召回、红旗召回=100%、守卫对抗集捕获率=100%、守卫良性误杀率=0），CI 阈值断言 | `evaluation/golden_cases.yaml`、`python -m backend.evaluation.benchmark`、`tests/test_benchmark.py` |
 | **临床安全个案（Safety Case）** | DCB0129 风格危害日志：≥12 项危害 → 缓解措施（代码引用）→ 验证证据（测试引用）→ 残余风险评级 | [`docs/clinical_safety_case.md`](docs/clinical_safety_case.md) |
 
+## 研究方法层（v0.6：对标最新顶级科研成果）
+
+在治理层之上，v0.6 引入四项经 Nature/顶会检验的方法（完整出处、方法映射与诚实差异声明见 [`docs/research_grounding.md`](docs/research_grounding.md)）：
+
+| 方法 | 科学出处 | 本项目实现 |
+|---|---|---|
+| **共形证型预测集** | 分裂共形预测（Angelopoulos & Bates 2023；CHEST 2025 临床综述："预测集=鉴别诊断的统计形式化"） | 金标准病例为校准集，输出"90% 目标覆盖下不可排除的证型集合"随报告呈现；基准报告 LOO 经验覆盖率与平均集合大小；小样本保守性明示（`backend/engine/conformal.py`） |
+| **EIG 自适应问诊** | BED-LLM（arXiv:2508.21184）：逐轮选期望信息增益最大的问题；AMIE（Nature 2025）历史采集优化 | 证型后验熵的期望降幅（bits）对鉴别性追问重排，答案似然由规则结构直接导出（零训练、可审计）；红旗/必填槽位保持硬优先；`/api/interview` 载荷输出 `question_selection` 审计链（`backend/skills/active_questioning.py`） |
+| **语义自一致性** | 语义熵幻觉检测（Farquhar et al., **Nature** 630, 2024） | `TAO_SELF_CONSISTENCY=N` 多采样→按临床结论实体集聚类→聚类熵+一致率；不稳定结论自动附加复核警示（非阻断，默认关） |
+| **声明级实体接地** | RAG 忠实性/归因（Grounded Attributions ICLR 2025；claim-level grounding） | 会诊文本中每个证型/方剂/药物实体对照本案规则证据核对，输出接地率与"模型自身知识"清单供医师定点复核——透明层而非审查层（`backend/skills/groundedness_skill.py`） |
+
 ## CDSS 草案模块
 
 项目新增 `cdss_recommendation_skill`，用于医生端 CDSS 自动生成候选诊断、候选证型、方剂路线和药物模块草案。该草案状态固定为 `draft_for_clinician_review`，不是最终诊断、不是签名处方、不是患者可见医嘱，也不会生成患者可执行剂量；最终医嘱仍需 `physician_review_skill` 医师手工录入并签名。

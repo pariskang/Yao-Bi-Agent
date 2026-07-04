@@ -156,6 +156,12 @@ def uncertainty_markdown(block: dict[str, Any]) -> str:
         lines.append(f"- ⚠️ **证据不足，暂不给出证型倾向**：{u.get('assessment_note', '')}")
     else:
         lines.append(f"- {u.get('assessment_note', '')}")
+    conformal = u.get("conformal") or {}
+    if conformal.get("prediction_set"):
+        lines.append(
+            f"- 共形鉴别集（{conformal.get('target_coverage', 0):.0%} 目标覆盖，不可排除的证型）："
+            f"{'、'.join(conformal['prediction_set'])}。{conformal.get('coverage_note', '')}"
+        )
     for gap in u.get("differential_gaps") or []:
         lines.append(f"- {gap.get('suggestion', '')}")
     strengthening = u.get("strengthening_evidence") or []

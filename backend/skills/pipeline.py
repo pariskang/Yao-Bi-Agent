@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.engine.conformal import conformal_prediction_set
 from backend.llm.dao_client import DaoClient
 from backend.provenance import get_provenance
 from backend.skills.case_extract_skill import case_extract_skill
@@ -30,6 +31,13 @@ def run_case_pipeline(raw_text: str, use_llm: bool = False, dao_client: DaoClien
     uncertainty = uncertainty_skill(
         routed["syndrome_candidates"], normalized["normalized_tags"], case_json.get("missing_fields"),
     )
+    # Conformal differential: the set of syndromes the engine cannot rule out at the
+    # target coverage level (finite-sample guarantee calibrated on the golden cases).
+    try:
+        uncertainty["uncertainty"]["conformal"] = conformal_prediction_set(routed["syndrome_candidates"])
+    except (OSError, ValueError):
+        # Missing/corrupt calibration file must never break the clinical pipeline.
+        uncertainty["uncertainty"]["conformal"] = None
     provenance = get_provenance(getattr(dao_client, "config", None) if use_llm else None)
     report = tao_report_generation_skill(
         case_json=case_json,

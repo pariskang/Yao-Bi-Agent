@@ -111,3 +111,16 @@
 - `python -m pytest tests/`：**187 passed**（上轮 136 → 本轮 +51：相互作用 14、基准 9、治理 26、前端 2）。
 - 基准：top1/top2/路线/红旗/安全等级全 100%（16 例，1 known_gap 诚实另计），守卫捕获 100%、误杀 0%。
 - 端到端（mock）：`/api/health` 带 provenance、`/api/metrics` 带计数与采纳率、审计 JSONL 落盘且患者文本仅哈希、问诊否定条件不再假告警、抗凝药×活血中断级告警从叙述文本直达报告「需医师确认」区。
+
+---
+
+# 第三轮：研究方法层（对标最新顶级科研成果）
+
+深度检索调研 2024–2026 顶级成果（AMIE，Nature 2025/2026；语义熵幻觉检测，Nature 2024；共形预测临床综述，CHEST 2025；BED-LLM，2025；RAG 忠实性归因，ICLR 2025；TCM-LLM 评测，npj Digital Medicine 2025），将四项方法工程化落地（出处映射与诚实差异声明见 `docs/research_grounding.md`）：
+
+1. **共形证型预测集**（`backend/engine/conformal.py`）：金标准病例校准的分裂共形预测，报告输出"90% 目标覆盖下不可排除的证型"，基准报告 LOO 经验覆盖率（当前 100% ≥ 90% 目标）与平均集合大小；小样本保守性、边际覆盖、标注分布依赖全部明示。
+2. **EIG 自适应问诊**（`backend/skills/active_questioning.py`）：BED 式期望信息增益（bits）对鉴别性追问重排，似然由规则结构导出（零训练、可审计），红旗/必填槽位硬优先不受重排影响；`/api/interview` 输出 `question_selection` 审计链。实现过程中发现并修复了 SLOT_TAGS 三处死标签映射（waist_knee_soreness/冷痛/怕冷 映射到规则不认识的标签名，问诊回答从未真正喂给 R003/R004 规则）。
+3. **语义自一致性**（semantic-entropy-lite）：`TAO_SELF_CONSISTENCY=N` 多采样按临床结论实体集聚类，聚类熵+一致率，不稳定结论自动附加复核警示；默认关闭（采样成本），mock 恒稳定属预期。
+4. **声明级实体接地**（`backend/skills/groundedness_skill.py`）：会诊文本中的证型/方剂/药物实体逐一对照本案规则证据，输出接地率与"模型自身知识"实体清单（如：右归丸未见于本案证据→标注需医师重点复核）；非阻断透明层，随 `/api/chat` 与 `/api/interview` 载荷返回。
+
+验证：`python -m pytest tests/` **206 passed**（+19 `tests/test_research_methods.py`）；基准新增共形覆盖行；README 新增「研究方法层」节。

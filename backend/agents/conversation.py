@@ -262,6 +262,8 @@ class ConversationSession:
         return {
             "answer": res["answer"], "evidence": det.get("evidence", []), "skills": det.get("skills", []),
             "used_llm": res["used_llm"], "consult_source": res["source"], "tao_runtime": res.get("tao_runtime"),
+            # Faithfulness transparency: rule-backed vs model-own-knowledge entities.
+            "groundedness": res.get("groundedness"), "semantic_consistency": res.get("semantic_consistency"),
         }
 
     def _dispatch(self, intent: str, question: str, full: bool = False) -> dict[str, Any]:
@@ -329,6 +331,7 @@ class ConversationSession:
             "answer": result["answer"], "skills": result.get("skills", []), "evidence": result.get("evidence", []),
             "used_llm": bool(result.get("used_llm")), "llm_routing": routing["llm_runtime"],
             "answer_source": result.get("consult_source", "deterministic_rules"), "consult_runtime": result.get("tao_runtime"),
+            "groundedness": result.get("groundedness"), "semantic_consistency": result.get("semantic_consistency"),
             "matched_keywords": routing.get("matched_keywords", []),
             "suggested_followups": followups,
             "disclaimer": "语言模型结合沈氏经验规则与脱敏挖掘数据进行辨证论治分析（供执业医师审核）；患者端不提供最终诊断、完整处方或可执行剂量。",

@@ -199,10 +199,15 @@ def run_benchmark(cases_path: str | Path | None = None) -> dict[str, Any]:
         "cases_total": len(per_case),
         "known_gaps": sum(record["known_gap"] for record in per_case),
     }
+    # Conformal calibration health: leave-one-out empirical coverage of the syndrome
+    # prediction sets (must meet the target coverage; small-n sets are conservative).
+    from backend.engine.conformal import leave_one_out_coverage
+
     return {
         "metrics": metrics,
         "per_case": per_case,
         "adversarial_guard": run_adversarial_guard_suite(),
+        "conformal": leave_one_out_coverage(),
     }
 
 
@@ -233,6 +238,8 @@ def format_markdown(result: dict[str, Any]) -> str:
         f"| 已知能力缺口（不计入准确率） | {metrics['known_gaps']} |",
         f"| 守卫拦截率（真实违规） | {_fmt(guard['guard_catch_rate'])} |",
         f"| 守卫误杀率（良性文本） | {_fmt(guard['guard_false_kill_rate'])} |",
+        f"| 共形预测集 LOO 覆盖率（目标 {_fmt((result.get('conformal') or {}).get('target_coverage'))}） | {_fmt((result.get('conformal') or {}).get('coverage'))} |",
+        f"| 共形预测集平均大小 | {(result.get('conformal') or {}).get('avg_set_size', 'n/a')} |",
         "",
         "## 逐例结果",
         "",
