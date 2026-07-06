@@ -8,7 +8,8 @@ REPORT_PROMPT_TEMPLATE = """
 请基于以下确定性规则引擎输出生成教学解释报告。
 只能解释规则命中、证据链、不确定性和医生复核重点；不得新增处方或剂量建议。
 
-必须只输出一个 JSON object，不要输出 Markdown 代码围栏或额外说明。JSON schema：
+必须只输出一个 JSON object，不要输出 Markdown 代码围栏或额外说明。
+注意：markdown_report 是 JSON 字符串，内部换行必须写成 \\n、双引号必须写成 \\"，保证 JSON 可解析。JSON schema：
 {{
   "markdown_report": "面向医生/科研复盘的教学解释 Markdown，不含最终诊断、不含完整处方、不含患者可执行剂量",
   "final_diagnosis": null,
@@ -84,7 +85,7 @@ REASONING_PROMPT_TEMPLATE = """
    必须与 reasoning_context 中的规则结论一致，不得新增规则层没有的证型、方剂或药物。
 2. 不得给出最终诊断（不要使用“诊断为/明确诊断”等表述）、完整处方、剂量、煎服法或患者自用建议。
 3. 全部表述为“倾向/提示/可考虑/待医师审定”的非最终口吻，面向医师复核与教学。
-4. 必须输出 JSON object，不要输出 markdown 代码围栏。
+4. 必须输出 JSON object，不要输出 markdown 代码围栏；reasoning_markdown 字符串内部换行写成 \\n、双引号写成 \\"。
 
 JSON schema：
 {{
@@ -110,7 +111,7 @@ mode=case 时面向单个医案，mode=experience 时面向多医案脱敏统计
 2. 不得给出针对当前患者的最终诊断、完整处方、可执行剂量、煎服法或自用医嘱；
    剂量只能作为“经验剂量分布/区间”的研究性描述，不得写成可执行医嘱。
 3. 表述为经验总结、用药特色、辨证思路、复诊要点等教学口吻，强调需医师审核。
-4. 必须输出 JSON object，不要输出 markdown 代码围栏。
+4. 必须输出 JSON object，不要输出 markdown 代码围栏；summary_markdown 字符串内部换行写成 \\n、双引号写成 \\"。
 
 JSON schema：
 {{
@@ -185,6 +186,7 @@ CONSULTATION_PROMPT_TEMPLATE = """
 硬性约束：
 - 这是**面向执业医师的研究 / 教学草案**；不得直接对患者下达“自行服用 / 自己煎服 / 无需就医 / 自行购买”等指令。
 - 剂量只能写为“经验剂量范围（医师审核）”，不得写成患者可执行的服药医嘱。
+- 若证据线索中的 uncertainty 提示证据不足（abstain）或证型区分度低，必须如实呈现不确定性、指出需补充的鉴别信息，不得给出过度自信的结论。
 - 末尾用一句话声明：本分析为供执业医师审核的研究 / 教学草案，最终诊断与处方须医师面诊后确定。
 - 直接输出**专业中文正文（Markdown）**，不要输出 JSON，不要代码围栏。
 

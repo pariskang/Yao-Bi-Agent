@@ -24,8 +24,8 @@ The repository is **not a clinically perfect or production-complete CDSS**. It i
 | Physician sign-off workflow | Implemented | `physician_review_skill` accepts physician-entered signed diagnosis/prescription records and rejects model-generated final orders. |
 | Safety boundaries | Implemented in code and tests | Patient executable diagnosis/prescription/dose requests are blocked; CDSS drafts are not patient visible. |
 | Dao1/Tao runtime integration | Implemented as optional guarded runtime | Supports disabled/mock/http/transformers backends, JSON repair, output guard and deterministic fallback; production still needs deployed model infrastructure and prompt regression. |
-| Frontend UI | Protocol only | UI docs exist, but no React/Next.js implementation is present. |
-| HTTP API service | Stub exports only | API re-export modules exist, but no FastAPI app, auth, persistence, or audit-log backend is implemented. |
+| Frontend UI | Implemented (zero-dependency static UI) | `frontend/` ships a same-origin static UI (chat, autonomous multi-step, interview, collaboration timeline, mining explorer) served by `backend/server.py`; it honestly labels LLM routing vs keyword fallback. |
+| HTTP API service | Implemented as stdlib prototype | `backend/server.py` (stdlib `http.server`) serves `/api/chat`, `/api/autonomous`, `/api/followup_probe`, `/api/interview`, `/api/collaboration`, `/api/health` with bounded sessions and request-size limits; auth, persistence and audit-log storage are still missing for production. |
 | Clinical validation | Not implemented | No expert-labeled dataset evaluation, prospective validation, or regulatory safety case is included. |
 
 ## Key safety conclusion

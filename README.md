@@ -32,7 +32,15 @@ report_generation_skill：研究/教学报告生成
 
 ## Dao1-30b-a3b 角色
 
-Dao1-30b-a3b 仅用于中医理论解释、方义说明、规则命中结果转写成教学报告、医案语言润色与不确定性说明。规则判断由确定性规则引擎完成，模型不得直接输出临床诊断、患者可执行处方或剂量医嘱。v0.2 新增可选 Tao Runtime：默认关闭，支持 mock/http/transformers 后端；模型输出必须是 JSON object，经过 JSON repair 与 forbidden-output guard 后，才会叠加到确定性规则报告，否则自动回退确定性模板。v0.4 增加 `DaoClient.chat()` 直接 Transformers 推理入口，可按 Dao1 示例直接加载 `CMLM/Dao1-30b-a3b` 并使用 `TextIteratorStreamer` 流式输出，无需 FastAPI 包装。
+Dao1-30b-a3b 仅用于中医理论解释、方义说明、规则命中结果转写成教学报告、医案语言润色与不确定性说明。规则判断由确定性规则引擎完成，模型不得直接输出临床诊断、患者可执行处方或剂量医嘱。v0.2 新增可选 Tao Runtime：默认关闭，支持 mock/http/transformers 后端；模型输出必须是 JSON object，经过 JSON repair 与角色感知输出守卫后，才会叠加到确定性规则报告，否则自动回退确定性模板。v0.4 增加 `DaoClient.chat()` 直接 Transformers 推理入口，可按 Dao1 示例直接加载 `CMLM/Dao1-30b-a3b` 并使用 `TextIteratorStreamer` 流式输出，无需 FastAPI 包装。
+
+v0.5（功能审核加固）：
+- **按任务采样档**：`config/model_config.yaml` 的 `inference_profiles` 真正生效——结构化 JSON 任务（路由/规划/槽位抽取）用 `do_sample=false, temp=0.1` 贪心解码保证稳定，长文教学/会诊任务用 `3072` token 预算充分发挥；显式设置的 `TAO_*` 环境变量仍优先。
+- **http 后端回退保证**：网络/超时/坏响应一律转为 `DaoRuntimeError` 并有限重试（5xx/超时重试、4xx 立即失败），所有消费者保持"失败即回退确定性规则"，不再穿透为 HTTP 500；http 路径改发原生 system+user messages，不再把本地 Qwen 模板串二次包裹进 user 内容。
+- **守卫分层（软约束落地）**：医师/科研端叠加（教学报告/经验推理/经验按语）改用 `guard_clinician_draft` 软守卫——允许方义、先煎后下安全提示与"经验剂量区间（医师审核）"，仅拦截断言式最终诊断、可执行完整医嘱（水煎服/每日X次/处方如下）与患者自服指令；患者端保持严格 `guard_tao_output` 并补齐中文数字剂量/频次模式（"三克""一日三次"不再绕过），同时收紧"每次/疗程/\d+g"正则避免教学词误杀回退。
+- **transformers 并发安全**：共享模型实例的 `generate` 加进程级串行锁（ThreadingHTTPServer 多线程下不再竞争 KV cache），流式子线程异常回传为 `DaoRuntimeError` 而非静默返回残缺文本。
+- **规则词表打通**：`case_normalize_skill` 真正消费 `rules/01_tags.yaml` 别名词表（单一事实源）并扩充抽取关键词，气滞血瘀（R002）、脾虚不运（R006）、寒湿信号（cold_damp_signal）等此前无法从自由文本触发的规则全部激活；证型/方剂评分引入"证据富集加成"，证据充分时 `high` 置信度真实可达。
+- **问诊接地增强**：`/api/interview` 会诊报告的证据包补齐方剂路线、药物模块与安全审查（模型的方药论述受规则约束）；自主追问（freeform probe）上下文注入规则引擎的证型/方剂线索；追问一旦泄漏诊断/处方/剂量即整轮作废回退规则问题。
 
 ## 快速开始
 
@@ -66,7 +74,7 @@ TAO_BACKEND=transformers TAO_MODEL_ID=CMLM/Dao1-30b-a3b \
 | 智能问答 | `POST /api/chat` | `route_skill` 在受限技能集内真实选择 skill（JSON 修复 + 越界回退） |
 | 自主多步 | `POST /api/autonomous` | `plan_skills` 真实规划多步并委派子智能体 |
 | Tao 自动追问 | `POST /api/followup_probe` | 规则约束内真实生成澄清式追问（经 Output Guard） |
-| 对话式智能问诊 | `POST /api/interview` | Tao 抽取槽位→FSM 判阶段/红旗→模型自主追问→会诊报告；命中红旗（如马尾综合征）即终止并由 Tao 生成结构化急诊转诊建议，医师可 `review_action` 确认/修订/覆盖（`YaoBiInterviewEngine`） |
+| 对话式智能问诊 | `POST /api/interview` | Tao 抽取槽位→FSM 判阶段/红旗→模型自主追问→会诊报告；红旗检测为「确定性关键词扫描 ∪ Tao 槽位抽取」双通道（含否定语义识别，Tao 离线时安全网仍生效）；命中红旗（如马尾综合征）即终止并由 Tao 生成结构化急诊转诊建议，医师可 `review_action` 确认/修订/覆盖（`YaoBiInterviewEngine`） |
 | 智能体协作 | `POST /api/collaboration` | `ReasoningAgent`/`ExperienceAgent` 真实调用 Tao |
 
 只有模型真正路由时 UI 才标 `Tao 选择 ✓`，否则如实标 `关键词回退`/`离线`；安全护栏与 Output Guard 服务端强制。Tao 默认以**全量 FP16 推理**（`TAO_TORCH_DTYPE=float16`、无量化）运行，按官方模型卡推荐方式加载——30B-A3B MoE FP16 权重约 60GB，推荐 A100 80GB / H100，单卡显存不足时 `device_map=auto` 自动 CPU offload（能跑但较慢）。`TAO_LOAD_IN_4BIT`/`TAO_LOAD_IN_8BIT` 可选，但 30B-MoE + 单卡 < 60GB 时与 `device_map=auto` 配合常会触发 `bitsandbytes` 的 CPU offload 错误，故不再作为默认。未连接后端时前端自动回退到本地规则镜像并如实标注。`transformers` 后端启动时会在**后台线程预加载**模型（可用 `--no-preload` 或 `TAO_PRELOAD=0` 关闭），`/api/health` 暴露 `load_state`（`loading`/`ready`/`error`）+ `model_loaded`，故加载进度与失败原因可被轮询观察——**可捕获**的加载错误不再让进程崩溃，避免预热只剩 `Connection refused`（排查见 [`colab/README.md`](colab/README.md)）。
@@ -81,7 +89,7 @@ TAO_BACKEND=transformers TAO_MODEL_ID=CMLM/Dao1-30b-a3b \
 
 本项目现在同时包含 `YaoBi_CaseGuide_Hermes_Agent`，用于自动导引患者生成高质量腰痹医案。该模块提供 12 个问诊 Skill：知情脱敏、红旗筛查、主诉生成、疼痛特征、神经骨科、中医四诊、沈老规则信号、合并病用药、动态补问、医案结构化、质量评分和医生交接。
 
-`CaseGuideSession` 按有限状态机运行，默认每个状态最多 3 轮追问、每轮最多返回 1–3 个高价值问题；追问预算可配置（`CaseGuideSession(max_followups_per_state=N, questions_per_turn=M)` 或运行中 `set_max_followups(N)` / `set_questions_per_turn(M)`）。每轮都会叠加上一轮答案、当前规则标签、沈老经验信号、候选证型和方剂路线信号深化补问。v0.3 支持可选 Tao 问诊叠加：确定性规则先给出候选问题 id，Tao 只能在 JSON 合约内重排、患者友好化改写和解释追问理由，不能新增问题 id、诊断、处方或剂量；失败或违规则回退规则问题。v0.4 新增自主问诊驱动器 `run_scripted_interview(answers)`：状态机自主推进全部问诊状态，无可答问题或追问预算用尽时自动终止当前状态的追问，并返回完整 transcript 供审计回放。调用方也可通过 `end_current_state()` 手动结束当前状态进入下一状态；红旗问题未答完时（任何方式）不允许离开红旗筛查状态，若命中 urgent 会硬停止后续问诊并提示线下/急诊评估。最终输出标准化医案、结构化标签、风险提示、沈老经验规则线索和医生复核清单。
+`CaseGuideSession` 按有限状态机运行，默认每个状态最多 3 轮追问、每轮最多返回 1–3 个高价值规则问题（开启 Tao 自动追问时，另附加最多 `tao_probe_budget` 个仅作线索的补充追问）；追问预算可配置（`CaseGuideSession(max_followups_per_state=N, questions_per_turn=M)` 或运行中 `set_max_followups(N)` / `set_questions_per_turn(M)`）。每轮都会叠加上一轮答案、当前规则标签、沈老经验信号、候选证型和方剂路线信号深化补问。v0.3 支持可选 Tao 问诊叠加：确定性规则先给出候选问题 id，Tao 只能在 JSON 合约内重排、患者友好化改写和解释追问理由，不能新增问题 id、诊断、处方或剂量；失败或违规则回退规则问题。v0.4 新增自主问诊驱动器 `run_scripted_interview(answers)`：状态机自主推进全部问诊状态，无可答问题或追问预算用尽时自动终止当前状态的追问，并返回完整 transcript 供审计回放。调用方也可通过 `end_current_state()` 手动结束当前状态进入下一状态；红旗问题未答完时（任何方式）不允许离开红旗筛查状态，若命中 urgent 会硬停止后续问诊并提示线下/急诊评估。最终输出标准化医案、结构化标签、风险提示、沈老经验规则线索和医生复核清单。
 
 > 若用户要求“诊断和处方”，系统只输出候选证型/方剂路线信号与药物模块解释，并全部标注为“待医生复核/非处方”；不得生成最终诊断、临床处方、患者自服剂量或替代医生治疗建议。
 
@@ -165,6 +173,32 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 
 三项能力均以 `draft_for_clinician_review`、`patient_visible=false` 输出，并随 `final_report` 一并返回。UI 在左侧导航新增「经验推理」「经验总结」模块，问诊页提供「Tao 自动追问」开关，最终报告新增「经验推理」「经验按语」标签页。
 
+## CDSS 治理层（v0.5：按顶级 CDSS 设计理念加固）
+
+对照 CDS「五个正确」、可追溯性、审计问责、用药安全、认知谦逊与持续验证等顶级 CDSS 设计理念，v0.5 新增完整治理层：
+
+| 治理机制 | 实现 | 入口 |
+|---|---|---|
+| **决策出处（Provenance）** | 规则库内容 SHA-256 指纹 + 应用版本 + 模型运行时配置，注入每份报告尾部与 `final_report.provenance` | `backend/provenance.py`、`/api/health`、`/api/metrics` |
+| **审计日志（Audit Trail）** | 追加式 JSONL：每次 API 决策记录意图/路由方式/守卫裁决/回退/红旗级别/延迟；**患者叙述**仅存摘要哈希+长度（隐私优先），医师撰写的反馈原因按设计以明文留存（≤500字，UI 明确提示勿含患者身份信息）；磁盘故障绝不影响临床请求 | `backend/audit/`，`YAOBI_AUDIT_DIR`（默认 `logs/`，gitignored），`YAOBI_AUDIT=0` 关闭 |
+| **医师反馈闭环（Learning Loop）** | 👍确认 / ✏️需修订 / 👎不采纳（+原因）挂在智能问答每条回答、对话问诊小结与表单式最终报告上；进入审计日志与指标 | `POST /api/feedback`、前端反馈组件 |
+| **运行指标** | 各端点请求量、守卫拦截数、LLM 回退数、红旗急停数、反馈采纳率、审计健康度 | `GET /api/metrics` |
+| **用药安全深化** | 药-药（乌头类×半夏十八反、抗凝药×活血化瘀/虫类药）、药-病禁忌（麻黄×高血压、附子细辛×心律失常/肝肾功能不全、妊娠禁忌）规则化；**分级告警**：interruptive（需医师确认，`requires_dual_signoff`）/ advisory（提示级），对抗告警疲劳 | `rules/06_conflict_rules.yaml`、`conflict_checker_skill(medications=, conditions=)` |
+| **认知谦逊（Uncertainty & 弃权）** | top1-top2 区分度评估、证据不足时**明确弃权**（不硬给证型倾向）、缺失鉴别信息建议（"补充舌象可区分A/B"）；不确定性块随证据包进入会诊 prompt，要求模型如实呈现不确定性 | `backend/skills/uncertainty_skill.py`，报告「判读可信度与鉴别提示」节 |
+| **金标准回归（Golden Cases）** | 覆盖全部证型/红旗/良性/模糊病例的标注病例集 + 基准跑分器（top-1/top-2 证型准确率、方剂召回、红旗召回=100%、守卫对抗集捕获率=100%、守卫良性误杀率=0），CI 阈值断言 | `evaluation/golden_cases.yaml`、`python -m backend.evaluation.benchmark`、`tests/test_benchmark.py` |
+| **临床安全个案（Safety Case）** | DCB0129 风格危害日志：≥12 项危害 → 缓解措施（代码引用）→ 验证证据（测试引用）→ 残余风险评级 | [`docs/clinical_safety_case.md`](docs/clinical_safety_case.md) |
+
+## 研究方法层（v0.6：对标最新顶级科研成果）
+
+在治理层之上，v0.6 引入四项经 Nature/顶会检验的方法（完整出处、方法映射与诚实差异声明见 [`docs/research_grounding.md`](docs/research_grounding.md)）：
+
+| 方法 | 科学出处 | 本项目实现 |
+|---|---|---|
+| **共形证型预测集** | 分裂共形预测（Angelopoulos & Bates 2023；CHEST 2025 临床综述："预测集=鉴别诊断的统计形式化"） | 金标准病例为校准集，输出"90% 目标覆盖下不可排除的证型集合"随报告呈现；基准报告 LOO 经验覆盖率与平均集合大小；小样本保守性明示（`backend/engine/conformal.py`） |
+| **EIG 自适应问诊** | BED-LLM（arXiv:2508.21184）：逐轮选期望信息增益最大的问题；AMIE（Nature 2025）历史采集优化 | 证型后验熵的期望降幅（bits）对鉴别性追问重排，答案似然由规则结构直接导出（零训练、可审计）；红旗/必填槽位保持硬优先；`/api/interview` 载荷输出 `question_selection` 审计链（`backend/skills/active_questioning.py`） |
+| **语义自一致性** | 语义熵幻觉检测（Farquhar et al., **Nature** 630, 2024） | `TAO_SELF_CONSISTENCY=N` 多采样→按临床结论实体集聚类→聚类熵+一致率；不稳定结论自动附加复核警示（非阻断，默认关） |
+| **声明级实体接地** | RAG 忠实性/归因（Grounded Attributions ICLR 2025；claim-level grounding） | 会诊文本中每个证型/方剂/药物实体对照本案规则证据核对，输出接地率与"模型自身知识"清单供医师定点复核——透明层而非审查层（`backend/skills/groundedness_skill.py`） |
+
 ## CDSS 草案模块
 
 项目新增 `cdss_recommendation_skill`，用于医生端 CDSS 自动生成候选诊断、候选证型、方剂路线和药物模块草案。该草案状态固定为 `draft_for_clinician_review`，不是最终诊断、不是签名处方、不是患者可见医嘱，也不会生成患者可执行剂量；最终医嘱仍需 `physician_review_skill` 医师手工录入并签名。
@@ -205,7 +239,7 @@ tests/           规则、安全、挖掘与前端回归测试
 
 ## 功能完整性审核
 
-详细审核见 [`docs/final_functionality_audit.md`](docs/final_functionality_audit.md)。结论：当前项目是研究/CDSS MVP 的核心功能实现，不是临床产品意义上的“完美完成”；真实生产仍需前端、API、持久化、LLM 服务、专家验证、安全工程和合规审查。
+详细审核见 [`docs/final_functionality_audit.md`](docs/final_functionality_audit.md)；最近一轮全面功能审核与加固记录见 [`docs/feature_review_2026-07.md`](docs/feature_review_2026-07.md)（含 README 逐条声明核对、发现的缺陷清单与修复对照）。结论：当前项目是研究/CDSS MVP 的核心功能实现，不是临床产品意义上的“完美完成”；真实生产仍需持久化、鉴权、LLM 服务容量规划、专家验证、安全工程和合规审查。
 
 ## 免责声明
 

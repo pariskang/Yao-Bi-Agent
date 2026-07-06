@@ -3,16 +3,55 @@ from __future__ import annotations
 import re
 from typing import Any
 
+# Chinese numerals that appear in colloquial dose / frequency instructions ("三克"、"一日三次").
+_CHN_NUM = "一二三四五六七八九十两半"
+
 FORBIDDEN_PATTERNS = {
-    "final_diagnosis": [r"最终诊断", r"明确诊断", r"诊断为", r"可诊断为"],
-    "patient_executable_prescription": [r"处方如下", r"完整处方", r"请按.*服用", r"每日[一二三四五六七八九十\d]+次", r"水煎服", r"疗程"],
-    "dose_instruction": [r"\d+\s*g", r"\d+克", r"先煎", r"后下", r"饭后服", r"每次"],
+    "final_diagnosis": [r"最终诊断", r"明确诊断", r"诊断为", r"可诊断为", r"确诊为"],
+    "patient_executable_prescription": [
+        r"处方如下",
+        r"完整处方",
+        r"请按.*服用",
+        r"水煎服",
+        # Frequency instructions in Arabic or Chinese numerals: 每日2次 / 一日三次 / 每天三服 / 日3次.
+        rf"[每一]?[日天]\s*[{_CHN_NUM}\d]+\s*[次服]",
+        rf"分[{_CHN_NUM}\d]+次",
+        # Numbered course of treatment ("两个疗程"), not the bare teaching word 疗程.
+        rf"[{_CHN_NUM}\d]+\s*个?疗程",
+    ],
+    "dose_instruction": [
+        # Arabic-digit doses: 3g / 3 克 / 500mg / 3钱 (excludes alphabetic runs like "IgG4").
+        r"\d+(?:\.\d+)?\s*(?:g(?![a-zA-Z])|克|mg(?![a-zA-Z])|毫克|钱)",
+        # Chinese-numeral doses: 三克 / 两钱 — the classic bypass of digit-only regexes.
+        rf"[{_CHN_NUM}]+\s*[克钱]",
+        r"先煎",
+        r"后下",
+        r"饭后服",
+        # Per-dose instructions ("每次一袋/每次服6克"), not innocent phrases like "每次复诊".
+        rf"每次[^，。;；\n]{{0,6}}(?:\d|[{_CHN_NUM}]|服|克|丸|片|袋)",
+    ],
     "replacement_for_clinician": [r"无需就医", r"不用看医生", r"可以自行", r"自行购买"],
 }
 
+# Structured JSON contract: these keys must stay null in every Tao JSON overlay.
+_FORBIDDEN_STRUCTURED_KEYS = (
+    "final_diagnosis",
+    "complete_prescription",
+    "patient_executable_dose",
+    "administration_instruction",
+)
+
+
+def _structured_violations(structured_output: dict[str, Any] | None) -> list[dict[str, str]]:
+    violations: list[dict[str, str]] = []
+    for key in _FORBIDDEN_STRUCTURED_KEYS:
+        if (structured_output or {}).get(key):
+            violations.append({"category": key, "pattern": f"structured.{key}"})
+    return violations
+
 
 def guard_tao_output(text: str, structured_output: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Validate Tao/Dao1 output before it can replace deterministic content."""
+    """Strict patient-floor guard: no diagnosis, prescription, or executable dose at all."""
 
     violations: list[dict[str, str]] = []
     for category, patterns in FORBIDDEN_PATTERNS.items():
@@ -21,10 +60,7 @@ def guard_tao_output(text: str, structured_output: dict[str, Any] | None = None)
                 violations.append({"category": category, "pattern": pattern})
                 break
 
-    structured_output = structured_output or {}
-    for key in ("final_diagnosis", "complete_prescription", "patient_executable_dose", "administration_instruction"):
-        if structured_output.get(key):
-            violations.append({"category": key, "pattern": f"structured.{key}"})
+    violations.extend(_structured_violations(structured_output))
 
     return {
         "allowed": not violations,
@@ -39,6 +75,43 @@ PATIENT_SELF_ADMIN_PATTERNS = [
     r"自行服用", r"自己煎", r"自行煎", r"回家.{0,6}煎", r"回家.{0,6}服", r"自行抓药", r"自行购买",
     r"无需就医", r"不用看医生", r"不必就医", r"可以自行", r"自己买药",
 ]
+
+# Content forbidden even in a clinician-facing draft: assertive final verdicts and
+# complete executable regimens. Experience dose *ranges*, 方义, 先煎/后下 safety notes
+# and the bare word 疗程 are deliberately allowed — that is the point of a teaching draft.
+_CLINICIAN_DRAFT_FORBIDDEN = [
+    (r"最终诊断|明确诊断|确诊为", "assertive_final_diagnosis"),
+    (r"处方如下|完整处方|请按.*服用", "complete_prescription"),
+    (rf"水煎服|[每一][日天]\s*[{_CHN_NUM}\d]+\s*[次服]|分[{_CHN_NUM}\d]+次(?:服|口服)", "executable_regimen"),
+]
+
+
+def guard_clinician_draft(text: str, structured_output: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Soft guard for clinician/research Tao overlays (report / reasoning / experience notes).
+
+    A clinician draft may name candidate syndromes, formula routes, 方义 and experience
+    dose ranges ("细辛经验剂量 3-6g，医师审核") — those are what a teaching note is for.
+    It may not assert a final diagnosis, issue a complete executable regimen, or tell
+    the patient to self-medicate / skip the physician.
+    """
+
+    violations: list[dict[str, str]] = []
+    for pattern in PATIENT_SELF_ADMIN_PATTERNS + FORBIDDEN_PATTERNS["replacement_for_clinician"]:
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            violations.append({"category": "patient_self_administration", "pattern": pattern})
+            break
+    for pattern, category in _CLINICIAN_DRAFT_FORBIDDEN:
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            violations.append({"category": category, "pattern": pattern})
+
+    violations.extend(_structured_violations(structured_output))
+
+    return {
+        "allowed": not violations,
+        "violations": violations,
+        "fallback_required": bool(violations),
+        "guardrail": "clinician_draft_no_final_verdict_no_executable_regimen_no_self_administration",
+    }
 
 
 def guard_consultation(text: str, user_role: str = "clinician") -> dict[str, Any]:

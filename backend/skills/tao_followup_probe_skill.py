@@ -36,10 +36,13 @@ def _parse_question_lines(raw: str | None, max_n: int) -> list[str]:
 
 
 def _freeform_probes(raw: str | None, state: str, max_probes: int) -> list[dict[str, Any]]:
+    questions = _parse_question_lines(raw, max_probes)
+    # Safety contract: a single leaked diagnosis/prescription/dose voids the WHOLE round —
+    # the model has shown it is off-theme, so none of its probes from this turn are trusted.
+    if any(not guard_probe(question)["allowed"] for question in questions):
+        return []
     probes: list[dict[str, Any]] = []
-    for index, question in enumerate(_parse_question_lines(raw, max_probes)):
-        if not guard_probe(question)["allowed"]:
-            continue  # a question that leaked diagnosis/dose is dropped
+    for index, question in enumerate(questions):
         probes.append({
             "id": f"TAO_PROBE_{state}_{index + 1}",
             "question": question,
@@ -72,7 +75,8 @@ def tao_followup_probe_skill(
 
     * only enabled in clinical-content states (red-flag / consent / demographics are off);
     * at most ``max_probes`` per turn, advisory only — they never drive a state jump;
-    * each probe passes ``guard_probe``; on any failure it falls back to no probe.
+    * every probe must pass ``guard_probe``; one leaked diagnosis/prescription/dose voids
+      the whole round (falls back to deterministic rule questions only).
     """
 
     meta: dict[str, Any] = {

@@ -4,7 +4,7 @@ from typing import Any
 
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
-from backend.llm.output_guard import guard_tao_output
+from backend.llm.output_guard import guard_clinician_draft
 from backend.skills.physician_reasoning_skill import SYNDROME_THERAPY, TAG_CN
 
 
@@ -140,7 +140,9 @@ def case_experience_summary_skill(
         markdown = str(parsed.get("summary_markdown") or "").strip()
         if not markdown:
             raise JsonRepairError("Tao summary output must include summary_markdown.")
-        guard = guard_tao_output(markdown, parsed)
+        # Clinician-only skill (patient role is rejected at entry) — soft draft guard keeps
+        # prompt-invited experience dose *ranges* while blocking executable regimens.
+        guard = guard_clinician_draft(markdown, parsed)
         meta.update({"status": "accepted" if guard["allowed"] else "guard_rejected", "json_repair": repair_meta, "guard": guard})
         if guard["allowed"]:
             meta["fallback_used"] = False

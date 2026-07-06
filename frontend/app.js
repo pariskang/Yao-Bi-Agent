@@ -22,16 +22,16 @@ const MINED = typeof window !== 'undefined' && window.MINED_RULES ? window.MINED
 // ---------------------------------------------------------------------------
 const API_BASE = (typeof window !== 'undefined' && window.YAOBI_API_BASE) || '';
 const api = {
-  state: { checked: false, online: false, tao: null },
+  state: { checked: false, online: false, tao: null, provenance: null },
   // `ngrok-skip-browser-warning` stops ngrok's free interstitial HTML from breaking fetch JSON.
   async health() {
     try {
       const r = await fetch(`${API_BASE}/api/health`, { cache: 'no-store', headers: { 'ngrok-skip-browser-warning': 'true' } });
       if (!r.ok) throw new Error(String(r.status));
       const j = await r.json();
-      this.state = { checked: true, online: true, tao: j.tao || null };
+      this.state = { checked: true, online: true, tao: j.tao || null, provenance: j.provenance || null };
     } catch (e) {
-      this.state = { checked: true, online: false, tao: null };
+      this.state = { checked: true, online: false, tao: null, provenance: null };
     }
     return this.state;
   },
@@ -49,7 +49,15 @@ function taoRuntimeTag() {
 }
 function casePayload(extra = {}) {
   const c = buildCase();
-  return { tags: c.tags, red_flags: { status: c.red.status, positive_items: c.red.positives }, doctor_mode: state.doctorMode, ...extra };
+  const asList = v => Array.isArray(v) ? v : (v ? [v] : []);
+  return {
+    tags: c.tags,
+    red_flags: { status: c.red.status, positive_items: c.red.positives },
+    // Intake comorbidity answers feed the server-side herb-drug / contraindication checker.
+    comorbidity: { diseases: asList(state.answers.diseases), medications: asList(state.answers.medications) },
+    doctor_mode: state.doctorMode,
+    ...extra,
+  };
 }
 function renderTaoBadge() {
   let el = document.querySelector('#taoBadge');
@@ -64,10 +72,83 @@ function renderTaoBadge() {
   const online = taoOnline();
   el.classList.toggle('on', online);
   el.classList.toggle('off', !online);
-  el.title = online ? `语言模型在线：${taoRuntimeTag()}` : '未连接 Tao 后端：离线规则模式（标签如实显示为关键词）';
+  const prov = api.state.provenance;
+  const provTag = prov ? `规则库版本 ${prov.rules_version} · 应用 v${prov.app_version}` : '';
+  el.title = online
+    ? `语言模型在线：${taoRuntimeTag()}${provTag ? '\n' + provTag : ''}`
+    : '未连接 Tao 后端：离线规则模式（标签如实显示为关键词）';
   el.innerHTML = online
     ? `<span class="dot"></span>Tao 在线 · ${api.state.tao.backend}`
     : `<span class="dot"></span>离线 · 规则模式`;
+}
+
+// ---- CDSS governance: physician feedback loop (确认/需修订/不采纳 → POST /api/feedback) ----
+const FEEDBACK_ACTIONS = [
+  { id: 'confirmed', label: '👍 确认' },
+  { id: 'revised', label: '✏️ 需修订' },
+  { id: 'rejected', label: '👎 不采纳' },
+];
+
+// Feedback state lives on JS state objects (not the DOM) because every render is a full
+// innerHTML replacement. `holder.feedback = {action, reason, pendingReason, sent}`.
+function feedbackWidget(holder, key) {
+  if (!taoOnline()) return '';
+  const fb = holder.feedback;
+  if (fb && fb.sent) {
+    const act = FEEDBACK_ACTIONS.find(a => a.id === fb.action);
+    return `<div class="feedback-row done">医师反馈已记录：${act ? act.label : escapeHtml(fb.action)} ✓</div>`;
+  }
+  const buttons = FEEDBACK_ACTIONS.map(a =>
+    `<button class="chip-btn feedback-btn${fb && fb.action === a.id ? ' selected' : ''}" data-fbkey="${key}" data-action="${a.id}">${a.label}</button>`).join('');
+  const reasonBox = fb && fb.pendingReason
+    ? `<input class="feedback-reason" data-fbkey="${key}" type="text" maxlength="200" placeholder="原因（可选，请勿包含患者身份信息），回车提交" value="${escapeHtml(fb.reason || '')}" />
+       <button class="chip-btn feedback-submit" data-fbkey="${key}">提交</button>`
+    : '';
+  return `<div class="feedback-row"><span class="feedback-label">医师反馈</span>${buttons}${reasonBox}</div>`;
+}
+
+function submitFeedback(holder, target, extra, rerender) {
+  const fb = holder.feedback || {};
+  fb.sent = true;
+  fb.pendingReason = false;
+  holder.feedback = fb;
+  // Fire-and-forget: feedback must never block or break the clinical UI.
+  api.post('/api/feedback', {
+    action: fb.action,
+    target,
+    reason: fb.reason || '',
+    doctor_mode: state.doctorMode,
+    ...extra,
+  }).catch(() => {});
+  rerender();
+}
+
+// resolver(key) -> {holder, target, extra} for every widget rendered on the current screen.
+function wireFeedback(resolver, rerender) {
+  screen.querySelectorAll('.feedback-btn').forEach(b => b.addEventListener('click', () => {
+    const ctx = resolver(b.dataset.fbkey);
+    if (!ctx) return;
+    const action = b.dataset.action;
+    ctx.holder.feedback = { ...(ctx.holder.feedback || {}), action };
+    if (action === 'confirmed') {
+      submitFeedback(ctx.holder, ctx.target, ctx.extra, rerender);
+    } else {
+      ctx.holder.feedback.pendingReason = true;
+      rerender();
+    }
+  }));
+  const send = key => {
+    const ctx = resolver(key);
+    if (ctx) submitFeedback(ctx.holder, ctx.target, ctx.extra, rerender);
+  };
+  screen.querySelectorAll('.feedback-reason').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const ctx = resolver(inp.dataset.fbkey);
+      if (ctx) ctx.holder.feedback = { ...(ctx.holder.feedback || {}), reason: inp.value, pendingReason: true };
+    });
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') send(inp.dataset.fbkey); });
+  });
+  screen.querySelectorAll('.feedback-submit').forEach(b => b.addEventListener('click', () => send(b.dataset.fbkey)));
 }
 
 const steps = [
@@ -157,6 +238,8 @@ const state = {
   interview: null,
   answers: JSON.parse(localStorage.getItem('yaobi-case') || '{}'),
   fsm: JSON.parse(localStorage.getItem('yaobi-fsm') || '{\"rounds\":{},\"lastAnswers\":{}}'),
+  // Physician feedback holder for the form-mode final report (session-scoped).
+  reportFeedback: {},
 };
 state.fsm.rounds = state.fsm.rounds || {};
 state.fsm.lastAnswers = state.fsm.lastAnswers || {};
@@ -413,7 +496,8 @@ function renderConversationalInterview() {
       return `<div class="chat-turn"><div class="bubble physician"><div class="bot-meta"><span class="kind-badge physician-badge">医师审核</span></div><div class="bot-body">${mdLite(m.content)}</div></div></div>`;
     }
     const tag = m.done ? '<span class="kind-badge llm-on">问诊小结</span>' : '<span class="kind-badge llm">Tao 追问</span>';
-    return `<div class="chat-turn"><div class="bubble bot"><div class="bot-meta">${tag}${m.state ? `<span class="route-tag">${escapeHtml(m.state)}</span>` : ''}</div><div class="bot-body">${mdLite(m.content)}</div></div></div>`;
+    const fbHtml = m.done && state.doctorMode ? feedbackWidget(iv, 'iv-report') : '';
+    return `<div class="chat-turn"><div class="bubble bot"><div class="bot-meta">${tag}${m.state ? `<span class="route-tag">${escapeHtml(m.state)}</span>` : ''}</div><div class="bot-body">${mdLite(m.content)}</div>${fbHtml}</div></div>`;
   }).join('');
   const pendingHtml = iv.pending ? `<div class="chat-turn"><div class="bubble bot"><div class="bot-body muted">⏳ Tao 正在分析并组织下一步追问…（${escapeHtml(taoRuntimeTag())}）</div></div></div>` : '';
 
@@ -498,6 +582,11 @@ function renderConversationalInterview() {
       interviewReview(reviewMode, notes);
     });
   }
+  wireFeedback(() => ({
+    holder: iv,
+    target: 'interview_report',
+    extra: { session_id: iv.sessionId, used_llm: true, intent: 'interview_report' },
+  }), renderConversationalInterview);
   const win = screen.querySelector('.chat-window');
   if (win) win.scrollTop = win.scrollHeight;
 }
@@ -694,13 +783,18 @@ function renderFinal() {
     <button class="tab-btn" data-tab="cdss">CDSS 草案</button>
     <button class="tab-btn" data-tab="physician">医师签名</button>
     <button class="tab-btn" data-tab="json">规则 JSON</button>
-  </div><pre class="report-box" id="reportBox"></pre><div class="footer-actions"><button class="ghost-btn" id="copyBtn">复制当前内容</button><button class="primary-btn" id="downloadBtn">下载 Markdown</button></div></section>`;
+  </div><pre class="report-box" id="reportBox"></pre><div class="footer-actions"><button class="ghost-btn" id="copyBtn">复制当前内容</button><button class="primary-btn" id="downloadBtn">下载 Markdown</button></div>${state.doctorMode ? feedbackWidget(state.reportFeedback, 'form-report') : ''}</section>`;
   const box = document.querySelector('#reportBox');
   const setTab = key => { box.textContent = tabs[key]; document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === key)); };
   setTab('case');
   document.querySelectorAll('.tab-btn').forEach(btn => btn.addEventListener('click', () => setTab(btn.dataset.tab)));
   document.querySelector('#copyBtn').addEventListener('click', () => navigator.clipboard?.writeText(box.textContent));
   document.querySelector('#downloadBtn').addEventListener('click', () => download('yaobi-case.md', box.textContent));
+  wireFeedback(() => ({
+    holder: state.reportFeedback,
+    target: 'form_report',
+    extra: { intent: 'form_final_report', used_llm: false },
+  }), renderFinal);
 }
 
 function buildReport() {
@@ -970,7 +1064,7 @@ function adaptAuto(q, res) {
 function renderChatModule() {
   pageTitle.textContent = '智能问答 · 语言模型自主选择技能并按提问挖掘';
   const h = state.chat.history;
-  const bubbles = h.map(t => {
+  const bubbles = h.map((t, ti) => {
     if (t.pending) {
       return `<div class="chat-turn"><div class="bubble user">${escapeHtml(t.q)}</div><div class="bubble bot"><div class="bot-body muted">⏳ 正在调用语言模型选择技能并作答…（${escapeHtml(taoRuntimeTag())}）</div></div></div>`;
     }
@@ -1000,6 +1094,7 @@ function renderChatModule() {
         ${t.autonomous && t.multiStep ? `<div class="bot-body synth">${mdLite(t.md)}</div>` : ''}
         ${stepsHtml}
         ${t.followups && t.followups.length ? `<div class="chip-row followups">${t.followups.map(f => `<button class="chip-btn" data-q="${escapeHtml(f)}">${f}</button>`).join('')}</div>` : ''}
+        ${t.real ? feedbackWidget(t, `chat-${ti}`) : ''}
       </div>
     </div>`;
   }).join('');
@@ -1027,7 +1122,16 @@ function renderChatModule() {
   input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
   const clr = document.querySelector('#chatClear');
   if (clr) clr.addEventListener('click', () => { state.chat.history = []; renderChatModule(); });
-  screen.querySelectorAll('.chip-btn').forEach(b => b.addEventListener('click', () => chatAsk(b.dataset.q)));
+  screen.querySelectorAll('.chip-btn:not(.feedback-btn):not(.feedback-submit)').forEach(b => b.addEventListener('click', () => chatAsk(b.dataset.q)));
+  wireFeedback(key => {
+    const t = state.chat.history[Number(String(key).replace('chat-', ''))];
+    if (!t) return null;
+    return {
+      holder: t,
+      target: t.autonomous ? 'autonomous_turn' : 'chat_turn',
+      extra: { intent: t.intent || null, used_llm: !!t.usedLlm, answer_source: t.method || null },
+    };
+  }, renderChatModule);
   const win = screen.querySelector('.chat-window');
   if (win) win.scrollTop = win.scrollHeight;
 }

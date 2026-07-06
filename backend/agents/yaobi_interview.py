@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -28,8 +29,14 @@ from typing import Any
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
 from backend.llm.output_guard import guard_consultation
+from backend.skills.active_questioning import expected_information_gain
+from backend.skills.conflict_checker_skill import conflict_checker_skill
+from backend.skills.formula_base_selector_skill import formula_base_selector_skill
+from backend.skills.herb_module_composer_skill import herb_module_composer_skill
+from backend.skills.safety_guard_skill import safety_guard_skill
 from backend.skills.syndrome_router_skill import syndrome_router_skill
 from backend.skills.tao_consultation_skill import tao_consultation_skill
+from backend.skills.uncertainty_skill import uncertainty_skill
 
 
 class YaoBiState(str, Enum):
@@ -81,17 +88,24 @@ SLOT_TAGS: list[tuple[tuple[str, str], Any, list[str]]] = [
     (("pain_slots", "trauma_history"), True, ["strain_or_sprain"]),
     (("pain_slots", "night_pain"), True, ["night_pain"]),
     (("pain_slots", "pain_nature"), "刺痛", ["stabbing_pain"]),
-    (("pain_slots", "pain_nature"), "冷痛", ["cold_pain"]),
+    # Tag names must match the 02_syndrome_rules trigger vocabulary exactly, or the
+    # answer never reaches the rule engine (deep_cold_pain feeds R004 肾阳不足).
+    (("pain_slots", "pain_nature"), "冷痛", ["deep_cold_pain"]),
     (("tcm_slots", "fixed_pain"), True, ["fixed_pain"]),
-    (("tcm_slots", "cold_heat"), "怕冷", ["cold_aggravation"]),
+    (("tcm_slots", "cold_heat"), "怕冷", ["cold_aversion", "cold_aggravation"]),
     (("tcm_slots", "limb_heaviness"), True, ["white_greasy_coating"]),
-    (("tcm_slots", "waist_knee_soreness"), True, ["liver_kidney_deficiency"]),
+    (("tcm_slots", "waist_knee_soreness"), True, ["lumbar_knee_soreness"]),
     (("tcm_slots", "tongue_body"), "暗紫", ["dark_tongue", "purple_tongue"]),
     (("tcm_slots", "tongue_body"), "淡", ["pale_tongue"]),
     (("tcm_slots", "tongue_coating"), "白腻", ["white_greasy_coating"]),
     (("tcm_slots", "tongue_coating"), "黄腻", ["yellow_greasy_coating"]),
     (("history_slots", "osteoporosis"), True, ["osteoporosis"]),
 ]
+
+# Slot key → union of rule tags it can produce (drives EIG-based question selection).
+SLOT_TAG_MAP: dict[str, set[str]] = {}
+for (_group, _key), _expected, _mapped in SLOT_TAGS:
+    SLOT_TAG_MAP.setdefault(_key, set()).update(_mapped)
 
 # Discriminative slots per candidate pattern (drives the next follow-up target selection).
 DISCRIMINATIVE = {
@@ -111,6 +125,53 @@ SAFETY_SLOTS = [
 ]
 
 MAX_TURNS = 8
+
+# Deterministic red-flag keyword safety net: the LLM slot extractor is the primary
+# channel, but red-flag detection must never depend on it alone — a missed slot key or
+# an unexpected phrasing would otherwise let a cauda-equina presentation slip through.
+RED_FLAG_TEXT_KEYWORDS: dict[str, list[str]] = {
+    "bowel_bladder_dysfunction": ["大小便失禁", "小便失禁", "大便失禁", "尿不出", "解不出小便", "排尿困难", "大小便控制不"],
+    "saddle_anesthesia": ["会阴麻木", "会阴部麻", "会阴发麻", "肛周麻木", "鞍区麻木"],
+    "progressive_weakness": ["进行性无力", "越来越没力", "腿越来越软", "走路拖脚", "踩棉花感"],
+    "severe_trauma": ["车祸", "摔伤", "高处坠落", "重物砸"],
+    "fever": ["发烧", "发热", "寒战"],
+    "tumor_history": ["肿瘤", "癌症"],
+    "unexplained_weight_loss": ["体重下降", "不明原因消瘦"],
+}
+_NEGATION_MARKERS = ("没有", "没", "无", "不", "未", "否认", "排除")
+
+# String slot values that mean "the patient denied it" — a red-flag slot holding
+# "否"/"正常" must not count as positive (the LLM may return strings, not booleans).
+_NEGATIVE_SLOT_STRINGS = {"否", "没有", "无", "正常", "不是", "没", "无异常", "否认", "阴性", "false", "no", "none", "unknown"}
+
+
+def _slot_positive(value: Any) -> bool:
+    """Truthiness for red-flag slots that treats denial strings as negative."""
+
+    if isinstance(value, str):
+        v = value.strip().lower()
+        return bool(v) and v not in _NEGATIVE_SLOT_STRINGS and not v.startswith(("否", "没", "无", "不", "未"))
+    return bool(value)
+
+
+def _as_term_list(value: Any) -> list[str]:
+    """Normalize an LLM slot value into a clean term list for interaction matching.
+
+    The extractor is asked for lists but may return a bare string ("高血压、糖尿病") —
+    split on common Chinese separators instead of crashing on list concatenation.
+    """
+
+    if value in (None, "", [], "unknown"):
+        return []
+    if isinstance(value, str):
+        parts = [p.strip() for p in re.split(r"[，、,;；/和及\s]+", value)]
+        return [p for p in parts if p and p not in _NEGATIVE_SLOT_STRINGS]
+    if isinstance(value, list):
+        terms: list[str] = []
+        for item in value:
+            terms.extend(_as_term_list(item))
+        return terms
+    return [str(value)]
 
 
 @dataclass
@@ -133,6 +194,8 @@ class YaoBiCaseState:
     physician_review: dict[str, Any] = field(default_factory=dict)
     # Set to True by the override action so _detect_red_flags is bypassed for this session.
     red_flags_overridden: bool = False
+    # EIG ranking of the latest follow-up targets (BED-style question selection audit).
+    last_question_selection: list[dict[str, Any]] = field(default_factory=list)
 
     def group(self, name: str) -> dict[str, Any]:
         return getattr(self, name)
@@ -155,6 +218,9 @@ class YaoBiInterviewEngine:
             case.dialogue_history.append({"role": "user", "content": user_text})
             case.turn_count += 1
             self._merge(case, self._extract(user_text))
+            # Deterministic safety net: red flags mentioned in the raw text are captured
+            # even when the LLM extractor is offline or missed the slot.
+            self._scan_red_flag_text(case, user_text)
 
         self._detect_red_flags(case)
         if case.safety_level in ("high", "emergency"):
@@ -208,12 +274,47 @@ class YaoBiInterviewEngine:
             return deterministic
 
     def _build_report(self, case: YaoBiCaseState) -> dict[str, Any]:
+        # Full deterministic evidence bundle: the report scope covers 证型→治法→方药→随访,
+        # so the model must be grounded in the rule engine's formula routes, herb modules
+        # and safety review — not just syndrome candidates.
+        tags = self._tags(case)
+        candidates = [
+            # Raw rule scores (uncertainty thresholds are calibrated on the raw scale;
+            # prob*10 would fabricate scores and flip abstention verdicts).
+            {"name": p["pattern"], "score": p.get("score") or 0, "evidence_tags": p.get("evidence", [])}
+            for p in case.candidate_patterns
+        ]
+        formula = formula_base_selector_skill(tags, candidates)
+        routes = formula.get("formula_routes") or []
+        modules = herb_module_composer_skill(tags, formula.get("primary_route"))
+        matched = modules.get("matched_modules") or []
+        safety = safety_guard_skill({"evidence": {"raw_text": self._case_text(case)}, "red_flags": case.red_flags}, matched, tags)
+        uncertainty = uncertainty_skill(candidates, tags)["uncertainty"]
+        history = case.history_slots
+        interactions = conflict_checker_skill(
+            matched, formula.get("primary_route"),
+            medications=_as_term_list(history.get("medication_history")),
+            # Only structured comorbidity terms — never the free-text western_diagnosis
+            # sentence, whose embedded negations ("没有高血压") would false-fire
+            # interruptive contraindication alerts via substring matching.
+            conditions=_as_term_list(history.get("comorbidities")),
+        )
         evidence = {
-            "normalized_tags": self._tags(case),
-            "syndrome_candidates": [
-                {"name": p["pattern"], "score": round(p["prob"] * 10, 1), "evidence_tags": p.get("evidence", [])}
-                for p in case.candidate_patterns
+            "normalized_tags": tags,
+            "syndrome_candidates": candidates,
+            "formula_routes": [{"name": r["name"], "confidence": r.get("confidence"), "score": r.get("score")} for r in routes[:4]],
+            "herb_modules": [{"name": m["name"], "role": m.get("role"), "herbs": (m.get("herbs") or [])[:6]} for m in matched[:6]],
+            "safety": {"status": safety.get("safety_status"), "risks": safety.get("medication_risks") or []},
+            "interaction_alerts": [
+                {"level": a.get("alert_level"), "description": a.get("description")}
+                for a in (interactions.get("interaction_alerts") or [])[:5]
             ],
+            # Epistemic self-assessment: the model must voice (not hide) low separation or abstention.
+            "uncertainty": {
+                "abstain": uncertainty.get("abstain"),
+                "assessment_note": uncertainty.get("assessment_note"),
+                "differential_gaps": [g.get("suggestion") for g in uncertainty.get("differential_gaps") or []],
+            },
             "case_state": self._summary(case),
             "red_flags": case.red_flags,
         }
@@ -222,6 +323,11 @@ class YaoBiInterviewEngine:
             evidence, fallback_text=self._rule_report(case),
             dao_client=self.dao_client, use_llm=self.use_llm, user_role="clinician",
         )
+        # Surface the tiered medication-safety verdict on the API payload itself —
+        # an interruptive alert must reach the physician UI, not just the LLM prompt.
+        res["interaction_alerts"] = interactions.get("interaction_alerts") or []
+        res["alert_summary"] = interactions.get("alert_summary") or {}
+        res["uncertainty"] = uncertainty
         return res
 
     # -- rules / grounding ----------------------------------------------------
@@ -237,6 +343,26 @@ class YaoBiInterviewEngine:
                     if value not in (None, "", [], "unknown"):
                         case.group(group)[key] = value
 
+    def _scan_red_flag_text(self, case: YaoBiCaseState, user_text: str) -> None:
+        """Deterministic keyword scan for red flags (union with LLM slot extraction).
+
+        Simple negation handling: a keyword preceded closely by 没有/无/不/未 etc.
+        ("没有大小便失禁") is treated as a denial and does not set the slot.
+        """
+
+        for slot, keywords in RED_FLAG_TEXT_KEYWORDS.items():
+            if _slot_positive(case.ortho_neuro_slots.get(slot)):
+                continue
+            for keyword in keywords:
+                idx = user_text.find(keyword)
+                if idx == -1:
+                    continue
+                window = user_text[max(0, idx - 6):idx]
+                if any(neg in window for neg in _NEGATION_MARKERS):
+                    continue
+                case.ortho_neuro_slots[slot] = True
+                break
+
     def _detect_red_flags(self, case: YaoBiCaseState) -> None:
         if case.red_flags_overridden:
             case.red_flags = []
@@ -246,24 +372,25 @@ class YaoBiInterviewEngine:
         flags: list[str] = []
         emergency = False
         # Cauda equina syndrome: hard stop, must go to ER immediately.
-        if o.get("bowel_bladder_dysfunction"):
+        # _slot_positive keeps a denial string ("否"/"正常") from firing a false emergency.
+        if _slot_positive(o.get("bowel_bladder_dysfunction")):
             flags.append("大小便功能异常，需警惕马尾神经受压 → 立即急诊")
             emergency = True
-        if o.get("saddle_anesthesia"):
+        if _slot_positive(o.get("saddle_anesthesia")):
             flags.append("会阴区麻木，需警惕马尾神经受压 → 立即急诊")
             emergency = True
         # High-risk: serious but can be clarified/corrected by the user.
-        if o.get("progressive_weakness"):
+        if _slot_positive(o.get("progressive_weakness")):
             flags.append("进行性下肢无力，需排查神经受压")
-        if o.get("severe_trauma"):
+        if _slot_positive(o.get("severe_trauma")):
             flags.append("明显外伤后腰痛，需排查骨折")
-        if h.get("osteoporosis") and (p.get("pain_severity") or o.get("severe_trauma")):
+        if _slot_positive(h.get("osteoporosis")) and (_slot_positive(p.get("pain_severity")) or _slot_positive(o.get("severe_trauma"))):
             flags.append("骨质疏松合并急性剧痛，需排查压缩性骨折")
-        if o.get("fever"):
+        if _slot_positive(o.get("fever")):
             flags.append("发热合并腰背痛，需排查感染")
-        if o.get("tumor_history") and p.get("night_pain"):
+        if _slot_positive(o.get("tumor_history")) and _slot_positive(p.get("night_pain")):
             flags.append("肿瘤病史合并夜间痛，需排查转移")
-        if o.get("unexplained_weight_loss"):
+        if _slot_positive(o.get("unexplained_weight_loss")):
             flags.append("不明原因消瘦，需排查肿瘤")
         case.red_flags = flags
         case.safety_level = "emergency" if emergency else ("high" if flags else "low")
@@ -310,7 +437,9 @@ class YaoBiInterviewEngine:
         scores = [max(0.1, float(c.get("score") or 1)) for c in cands]
         total = sum(scores) or 1.0
         patterns = [
-            {"pattern": c["name"], "prob": round(s / total, 3), "evidence": c.get("evidence_tags", [])}
+            # Keep the raw rule score alongside the share-normalized prob: downstream
+            # uncertainty thresholds are calibrated on raw scores, not probabilities.
+            {"pattern": c["name"], "prob": round(s / total, 3), "score": int(c.get("score") or 0), "evidence": c.get("evidence_tags", [])}
             for c, s in zip(cands, scores)
         ]
         probs = [p["prob"] for p in patterns if p["prob"] > 0]
@@ -327,11 +456,18 @@ class YaoBiInterviewEngine:
         req = unanswered(REQUIRED_SLOTS.get(case.state, []))
         # 2) always make sure the core safety slots are covered
         safety = unanswered(SAFETY_SLOTS)
-        # 3) discriminative slots for the leading candidate patterns
+        # 3) discriminative slots for the leading candidate patterns, re-ranked by
+        # expected information gain (BED-style active questioning): ask what most
+        # reduces the entropy of the syndrome posterior, not a fixed slot order.
         disc_pairs: list[tuple[str, str]] = []
         for pattern in case.candidate_patterns[:3]:
             disc_pairs += DISCRIMINATIVE.get(pattern["pattern"], [])
         disc = unanswered(disc_pairs)
+        eig_ranked = expected_information_gain(case.candidate_patterns, SLOT_TAG_MAP, disc)
+        case.last_question_selection = [
+            {"slot": item["slot"], "eig_bits": item["eig_bits"]} for item in eig_ranked[:6]
+        ]
+        disc = [item["slot"] for item in eig_ranked]
         ordered: list[str] = []
         for key in req + safety[:2] + disc:
             if key not in ordered:
@@ -487,6 +623,9 @@ class YaoBiInterviewEngine:
             "uncertainty": case.uncertainty_score,
             "case_summary": self._summary(case),
             "target_slots": target_slots or [],
+            # EIG audit trail: why these follow-ups were chosen (bits of expected
+            # entropy reduction over the syndrome posterior).
+            "question_selection": case.last_question_selection,
             "done": done,
             "report": report["answer"] if report else None,
             "report_source": (report.get("source") if report else None),
