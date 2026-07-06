@@ -186,3 +186,22 @@ def test_frontend_surfaces_provenance_in_tao_badge():
     app = (root / "app.js").read_text(encoding="utf-8")
     assert "provenance" in app
     assert "规则库版本" in app
+
+
+def test_colab_notebook_integrates_all_layers():
+    import json
+
+    nb = json.loads(Path("colab/YaoBi_Skill_Colab.ipynb").read_text(encoding="utf-8"))
+    src = "".join("".join(c["source"]) for c in nb["cells"])
+    # 治理层：出处 / 审计 / 反馈 / 指标 / 分级告警
+    for needle in ["provenance", "/api/feedback", "/api/metrics", "requires_dual_signoff", "audit-"]:
+        assert needle in src, f"Colab notebook missing governance feature: {needle}"
+    # 研究方法层：共形集 / EIG / 接地 / 语义一致性 / 基准
+    for needle in ["conformal", "question_selection", "groundedness", "TAO_SELF_CONSISTENCY", "backend.evaluation.benchmark"]:
+        assert needle in src, f"Colab notebook missing research-methods feature: {needle}"
+    # 原有核心链路仍在
+    for needle in ["/api/chat", "/api/interview", "review_action", "ngrok"]:
+        assert needle in src
+    # 单元格编号 ①–⑬ 连续
+    for mark in "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬":
+        assert mark in src, f"Colab notebook missing step {mark}"

@@ -81,9 +81,9 @@ TAO_BACKEND=transformers TAO_MODEL_ID=CMLM/Dao1-30b-a3b \
 
 ## Colab 一键复现（含 ngrok 公网 UI）
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pariskang/Yao-Bi-Agent/blob/claude/focused-planck-3dv9we/colab/YaoBi_Skill_Colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pariskang/Yao-Bi-Agent/blob/claude/project-feature-review-5wr1l7/colab/YaoBi_Skill_Colab.ipynb)
 
-[`colab/YaoBi_Skill_Colab.ipynb`](colab/YaoBi_Skill_Colab.ipynb) 在 Google Colab 上一键复现全部功能：启动 `backend.server`（默认本地 **全量 FP16** 加载 `CMLM/Dao1-30b-a3b`，推荐 A100 80GB / H100）、经 **ngrok** 暴露 `https://xxxx.ngrok-free.app` 公网链接，UI 即可**真正调用语言模型**自主选择技能与问诊，并复现规则管线、多智能体协作、全量测试与脱敏挖掘。无 GPU 时可在笔记本第 ② 步切换 mock / 小模型 / 外部 HTTP 接口。详见 [`colab/README.md`](colab/README.md)。
+[`colab/YaoBi_Skill_Colab.ipynb`](colab/YaoBi_Skill_Colab.ipynb) 在 Google Colab 上一键复现全部功能：启动 `backend.server`（默认本地 **全量 FP16** 加载 `CMLM/Dao1-30b-a3b`，推荐 A100 80GB / H100）、经 **ngrok** 暴露 `https://xxxx.ngrok-free.app` 公网链接，UI 即可**真正调用语言模型**自主选择技能与问诊，并逐单元验证 v0.5 治理层（决策出处/审计日志/医师反馈/分级用药告警）与 v0.6 研究方法层（共形证型预测集/EIG 主动问诊/实体接地/语义一致性）、金标准基准、规则管线、多智能体协作、全量测试（206 项）与脱敏挖掘。无 GPU 时可在笔记本第 ② 步切换 mock / 小模型 / 外部 HTTP 接口。详见 [`colab/README.md`](colab/README.md)。
 
 ## 自动问诊：YaoBi-CaseGuide Skill
 
