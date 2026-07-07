@@ -69,3 +69,16 @@
     route_score: 4
     core_module: [熟地黄, 山茱萸, 山药, 杜仲, 巴戟天, 菟丝子, 续断, 附片]
   rationale: 肝肾不足、肾阳不足、骨质疏松、久病腰痛的经验路线。
+- id: F007
+  name: 四妙丸路线
+  category: formula
+  priority: 73
+  trigger:
+    any: [yellow_greasy_coating, burning_pain, dark_urine, red_tongue, heat_aggravation]
+    at_least: 2
+  contra: [cold_aversion, deep_cold_pain, cold_aggravation]
+  effect:
+    formula_route: 四妙丸加减
+    route_score: 5
+    core_module: [苍术, 黄柏, 牛膝, 薏苡仁]
+  rationale: 湿热下注、腰腿灼热疼痛、苔黄腻、小便黄的经验路线。

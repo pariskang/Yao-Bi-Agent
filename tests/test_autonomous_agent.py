@@ -63,11 +63,15 @@ def test_agent_runs_multi_step_and_delegates_to_subagents():
     # synthesized answer references each delegated subagent
     assert "自主规划了" in turn["answer"]
     assert turn["answer"].count("###") >= 3
-    # ReAct-style trace: thought -> action -> observation per step
-    assert len(turn["trace"]) == len(turn["steps"])
-    for entry in turn["trace"]:
-        assert "delegate→" in entry["action"]
+    # ReAct-style trace: thought -> action -> observation per step, plus a final
+    # critique entry (observe -> critique closes the loop after execution).
+    assert len(turn["trace"]) == len(turn["steps"]) + 1
+    for entry in turn["trace"][:-1]:
+        assert "delegate→" in entry["action"] or "replan→" in entry["action"]
         assert entry["observation"]
+    assert turn["trace"][-1]["action"].startswith("critique")
+    assert turn["agent_loop"][:5] == ["understand", "plan", "execute", "observe", "critique"]
+    assert "critique" in turn
 
 
 def test_agent_single_step_returns_direct_answer():

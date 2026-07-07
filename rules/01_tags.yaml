@@ -83,3 +83,19 @@ tags:
     aliases: [体重下降]
   anticoagulant_use:
     aliases: [抗凝药, 华法林, 利伐沙班, 阿司匹林]
+  yellow_greasy_coating:
+    aliases: [苔黄腻, 黄腻苔]
+  red_tongue:
+    aliases: [舌红, 舌质红, 舌质偏红]
+  burning_pain:
+    aliases: [灼热, 灼痛, 烧灼感]
+  dark_urine:
+    aliases: [小便黄, 小便色黄, 尿黄, 尿色深]
+  thirst:
+    aliases: [口渴, 渴喜冷饮]
+  heat_aggravation:
+    aliases: [天热加重, 天热时加重, 遇热加重, 热天加重]
+  heavy_lower_limb:
+    aliases: [下肢沉重, 肢体困重, 身重, 双腿沉重]
+  night_pain:
+    aliases: [夜间痛, 夜里痛明显, 夜痛]

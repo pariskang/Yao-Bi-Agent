@@ -27,7 +27,10 @@ def run_case_pipeline(raw_text: str, use_llm: bool = False, dao_client: DaoClien
         medications=case_json.get("medications") or [],
         conditions=(case_json.get("comorbidity_conditions") or []) + (case_json.get("western_diagnosis") or []),
     )
-    safety = safety_guard_skill(case_json, modules["matched_modules"], normalized["normalized_tags"])
+    # The primary formula route's core herbs join the safety scan: a route carrying
+    # 附片/细辛 must surface a clinician-review caution even when no herb module matched.
+    safety_pool = modules["matched_modules"] + ([formula["primary_route"]] if formula.get("primary_route") else [])
+    safety = safety_guard_skill(case_json, safety_pool, normalized["normalized_tags"])
     uncertainty = uncertainty_skill(
         routed["syndrome_candidates"], normalized["normalized_tags"], case_json.get("missing_fields"),
     )

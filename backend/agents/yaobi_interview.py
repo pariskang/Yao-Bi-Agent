@@ -30,6 +30,7 @@ from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
 from backend.llm.output_guard import guard_consultation
 from backend.skills.active_questioning import expected_information_gain
+from backend.skills.clinical_entity_skill import is_affirmed
 from backend.skills.conflict_checker_skill import conflict_checker_skill
 from backend.skills.formula_base_selector_skill import formula_base_selector_skill
 from backend.skills.herb_module_composer_skill import herb_module_composer_skill
@@ -138,8 +139,6 @@ RED_FLAG_TEXT_KEYWORDS: dict[str, list[str]] = {
     "tumor_history": ["肿瘤", "癌症"],
     "unexplained_weight_loss": ["体重下降", "不明原因消瘦"],
 }
-_NEGATION_MARKERS = ("没有", "没", "无", "不", "未", "否认", "排除")
-
 # String slot values that mean "the patient denied it" — a red-flag slot holding
 # "否"/"正常" must not count as positive (the LLM may return strings, not booleans).
 _NEGATIVE_SLOT_STRINGS = {"否", "没有", "无", "正常", "不是", "没", "无异常", "否认", "阴性", "false", "no", "none", "unknown"}
@@ -346,22 +345,17 @@ class YaoBiInterviewEngine:
     def _scan_red_flag_text(self, case: YaoBiCaseState, user_text: str) -> None:
         """Deterministic keyword scan for red flags (union with LLM slot extraction).
 
-        Simple negation handling: a keyword preceded closely by 没有/无/不/未 etc.
-        ("没有大小便失禁") is treated as a denial and does not set the slot.
+        Polarity resolution is shared with the extraction pipeline
+        (``clinical_entity_skill``): denials ("没有大小便失禁"、"大小便正常") and
+        questions ("会不会发热？") never set a red-flag slot — only affirmed
+        mentions do.
         """
 
         for slot, keywords in RED_FLAG_TEXT_KEYWORDS.items():
             if _slot_positive(case.ortho_neuro_slots.get(slot)):
                 continue
-            for keyword in keywords:
-                idx = user_text.find(keyword)
-                if idx == -1:
-                    continue
-                window = user_text[max(0, idx - 6):idx]
-                if any(neg in window for neg in _NEGATION_MARKERS):
-                    continue
+            if any(is_affirmed(user_text, keyword) for keyword in keywords):
                 case.ortho_neuro_slots[slot] = True
-                break
 
     def _detect_red_flags(self, case: YaoBiCaseState) -> None:
         if case.red_flags_overridden:

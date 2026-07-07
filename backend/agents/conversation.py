@@ -42,6 +42,23 @@ SYMPTOM_KEYWORD_TAG = {
     "高龄": "elderly", "骨质疏松": "osteoporosis",
 }
 
+# Patient-role scope: health education, red-flag awareness, safety notices, and system
+# guidance only. Clinical reasoning intents (syndrome, formula, herbs, doses, mined
+# evidence, case commentary) are clinician-facing and are redirected server-side —
+# regardless of what the client claims — to a see-a-doctor education answer.
+PATIENT_ALLOWED_INTENTS = {"red_flag_inquiry", "safety_inquiry", "capabilities", "agent_inquiry"}
+
+PATIENT_SCOPE_ANSWER = (
+    "患者端不提供证型判断、方药建议或剂量等诊疗内容——这些需要执业医师面诊后确定。\n\n"
+    "我可以为您提供：\n"
+    "- **危险信号自查**：外伤后疼痛、发热寒战、夜间痛进行性加重、大小便异常、会阴麻木、"
+    "下肢无力等情况需尽快线下就医或急诊评估；\n"
+    "- **就医建议**：腰痛持续不缓解或反复发作，建议至中医骨伤科/脊柱专科面诊，"
+    "携带既往影像与用药记录；\n"
+    "- **健康教育**：避免久坐与腰部受凉，急性期减少负重活动。\n\n"
+    "> 本系统为研究原型，不能替代医生诊疗。"
+)
+
 
 def query_mined(question: str, mined: dict[str, Any]) -> dict[str, Any]:
     """Mine the de-identified dataset to answer a free-text question (根据提问挖掘)."""
@@ -267,6 +284,14 @@ class ConversationSession:
         }
 
     def _dispatch(self, intent: str, question: str, full: bool = False) -> dict[str, Any]:
+        # Server-side patient scope: clinical-reasoning intents never execute for the
+        # patient role, whatever the client declared. This is an allowlist by intent,
+        # enforced before any skill runs — not a post-hoc text filter.
+        if self.user_role == "patient" and intent not in PATIENT_ALLOWED_INTENTS:
+            return {
+                "answer": PATIENT_SCOPE_ANSWER, "evidence": [], "skills": ["patient_scope_guard"],
+                "used_llm": False, "intent_redirected": True,
+            }
         handlers = {
             "syndrome_inquiry": self._h_syndrome, "formula_inquiry": self._h_formula,
             "herb_inquiry": self._h_herb, "safety_inquiry": self._h_safety,

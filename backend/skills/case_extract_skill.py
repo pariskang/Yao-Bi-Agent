@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from backend.skills.clinical_entity_skill import affirmed_terms, scan_entities
+
 FIELD_PATTERNS = {
     "sex": [(r"患者?(男|女)", 1), (r"性别[:：]?(男|女)", 1)],
     "age": [(r"(\d{1,3})\s*岁", 1)],
@@ -19,7 +21,23 @@ KEYWORDS = {
     "western_diagnosis": ["骨质疏松", "腰椎间盘突出", "腰椎管狭窄", "腰椎滑脱", "压缩性骨折", "坐骨神经痛"],
 }
 
-RED_FLAG_TERMS = ["外伤", "跌倒", "车祸", "大小便", "会阴麻木", "尿不出来", "发热", "寒战", "肿瘤", "体重下降", "走路拖脚"]
+# Red-flag surface terms → screening category. These are *candidates*: polarity
+# resolution (affirmed / negated / uncertain) happens in clinical_entity_skill and the
+# candidate→confirmed grading happens in safety_guard_skill — a raw keyword hit alone
+# must never drive the safety status.
+RED_FLAG_CATEGORY = {
+    "外伤": "trauma_fracture_risk", "跌倒": "trauma_fracture_risk", "车祸": "trauma_fracture_risk",
+    "高处坠落": "trauma_fracture_risk",
+    "大小便失禁": "cauda_equina_symptoms", "大小便异常": "cauda_equina_symptoms",
+    "大小便": "cauda_equina_symptoms", "会阴麻木": "cauda_equina_symptoms",
+    "鞍区麻木": "cauda_equina_symptoms", "尿不出来": "cauda_equina_symptoms",
+    "尿潴留": "cauda_equina_symptoms",
+    "发热": "fever_or_infection", "寒战": "fever_or_infection", "感染": "fever_or_infection",
+    "肿瘤": "cancer_history", "癌症": "cancer_history",
+    "体重下降": "unexplained_weight_loss", "不明原因消瘦": "unexplained_weight_loss",
+    "走路拖脚": "progressive_weakness", "进行性无力": "progressive_weakness",
+}
+RED_FLAG_TERMS = list(RED_FLAG_CATEGORY)
 REQUIRED_FIELDS = ["疼痛性质", "是否放射痛", "夜寐", "胃纳", "二便", "舌象", "脉象"]
 
 # Feeds the herb-drug / comorbidity interaction checker (rules/06_conflict_rules.yaml).
@@ -32,22 +50,6 @@ COMORBIDITY_TERMS = [
     "肝功能不全", "肾功能不全", "肝硬化", "尿毒症", "消化性溃疡", "胃溃疡",
     "妊娠", "怀孕", "低血钾", "水肿",
 ]
-_NEGATION_MARKERS = ("没有", "没", "无", "不", "未", "否认", "排除")
-
-
-def _positive_mentions(text: str, terms: list[str]) -> list[str]:
-    """Terms mentioned without a closely preceding denial ("否认高血压" is skipped)."""
-
-    found: list[str] = []
-    for term in terms:
-        idx = text.find(term)
-        if idx == -1:
-            continue
-        window = text[max(0, idx - 4):idx]
-        if any(neg in window for neg in _NEGATION_MARKERS):
-            continue
-        found.append(term)
-    return found
 
 
 def _first_match(text: str, patterns: list[tuple[str, int]]) -> Any:
@@ -90,13 +92,20 @@ def case_extract_skill(raw_text: str) -> dict[str, Any]:
     extracted["duration_class"] = _duration_class(str(extracted["duration"]))
     evidence: dict[str, list[str]] = {}
     for field, terms in KEYWORDS.items():
-        values = [term for term in terms if term in raw_text]
+        # Polarity-aware: "无恶心"、"未见齿痕" must not become positive findings.
+        values = affirmed_terms(raw_text, terms)
         extracted[field] = values
         evidence[field] = values
-    red_flags = [term for term in RED_FLAG_TERMS if term in raw_text]
-    extracted["red_flags"] = red_flags
-    extracted["medications"] = _positive_mentions(raw_text, MEDICATION_TERMS)
-    extracted["comorbidity_conditions"] = _positive_mentions(raw_text, COMORBIDITY_TERMS)
+    # Red flags as polarity-resolved entities: affirmed candidates keep the legacy
+    # ``red_flags`` key; denials and questions are recorded separately so downstream
+    # safety grading (safety_guard_skill) can distinguish them.
+    rf_entities = scan_entities(raw_text, RED_FLAG_CATEGORY, category_map=RED_FLAG_CATEGORY)
+    extracted["red_flag_entities"] = rf_entities
+    extracted["red_flags"] = [e["entity"] for e in rf_entities if e["polarity"] == "affirmed"]
+    extracted["denied_red_flags"] = [e["entity"] for e in rf_entities if e["polarity"] == "negated"]
+    extracted["uncertain_red_flags"] = [e["entity"] for e in rf_entities if e["polarity"] == "uncertain"]
+    extracted["medications"] = affirmed_terms(raw_text, MEDICATION_TERMS)
+    extracted["comorbidity_conditions"] = affirmed_terms(raw_text, COMORBIDITY_TERMS)
     missing = []
     if not any(term in raw_text for term in ["酸痛", "刺痛", "胀痛", "冷痛", "隐痛"]):
         missing.append("疼痛性质")
