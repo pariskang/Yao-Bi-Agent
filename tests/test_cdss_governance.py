@@ -132,11 +132,11 @@ def test_health_exposes_provenance(monkeypatch, tmp_path):
 
 def test_feedback_endpoint_validates_and_counts(monkeypatch, tmp_path):
     server = _server(monkeypatch, tmp_path)
-    bad = server.handle_feedback({"action": "meh"})
+    bad = server.handle_feedback({"action": "meh", "doctor_mode": True})
     assert bad["ok"] is False
     ok = server.handle_feedback({
         "action": "confirmed", "target": "chat_turn", "intent": "syndrome_inquiry",
-        "used_llm": True, "reason": "辨证合理",
+        "used_llm": True, "reason": "辨证合理", "doctor_mode": True,
     })
     assert ok["ok"] is True
     assert ok["recorded"]["action"] == "confirmed"
@@ -273,6 +273,6 @@ def test_rules_fingerprint_reacts_to_rule_edits(tmp_path, monkeypatch):
 
 def test_feedback_bounds_client_supplied_fields(monkeypatch, tmp_path):
     server = _server(monkeypatch, tmp_path)
-    result = server.handle_feedback({"action": "rejected", "intent": "x" * 999, "answer_source": "y" * 999})
+    result = server.handle_feedback({"action": "rejected", "intent": "x" * 999, "answer_source": "y" * 999, "doctor_mode": True})
     assert len(result["recorded"]["intent"]) <= 120
     assert len(result["recorded"]["answer_source"]) <= 120

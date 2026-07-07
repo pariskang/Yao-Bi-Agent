@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from backend.engine.rule_engine import load_rule_file
+from backend.skills.clinical_entity_skill import is_affirmed
 
 # Structured-field value → tag mapping (kept for extractor keyword values).
 TAG_MAP = {
@@ -86,13 +87,16 @@ def case_normalize_skill(case_json: dict[str, Any]) -> dict[str, Any]:
                 tags.add(tag)
                 evidence.setdefault(tag, []).append(value)
     text = (case_json.get("evidence") or {}).get("raw_text", "")
-    if any(term in text for term in ["放射", "坐骨", "小腿", "足部"]):
+    # Polarity-aware: "无放射痛"、"不向小腿放射" must not tag radiating_leg_pain.
+    if any(is_affirmed(text, term) for term in ["放射", "坐骨", "小腿", "足部"]):
         tags.add("radiating_leg_pain")
         evidence.setdefault("radiating_leg_pain", []).append("原文提示放射或远端下肢受累")
     # Alias scan over the raw narrative using the controlled vocabulary (01_tags.yaml).
+    # Denied mentions ("无口苦"、"夜寐可") stay out of the tag set — negated narrative
+    # evidence polluting syndrome scoring is exactly the failure mode this guards.
     if text:
         for alias, tag in _alias_index():
-            if alias in text and tag not in tags:
+            if tag not in tags and alias in text and is_affirmed(text, alias):
                 tags.add(tag)
                 evidence.setdefault(tag, []).append(alias)
     return {"normalized_tags": sorted(tags), "tag_evidence": evidence}

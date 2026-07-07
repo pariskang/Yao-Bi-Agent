@@ -199,6 +199,44 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 | **语义自一致性** | 语义熵幻觉检测（Farquhar et al., **Nature** 630, 2024） | `TAO_SELF_CONSISTENCY=N` 多采样→按临床结论实体集聚类→聚类熵+一致率；不稳定结论自动附加复核警示（非阻断，默认关） |
 | **声明级实体接地** | RAG 忠实性/归因（Grounded Attributions ICLR 2025；claim-level grounding） | 会诊文本中每个证型/方剂/药物实体对照本案规则证据核对，输出接地率与"模型自身知识"清单供医师定点复核——透明层而非审查层（`backend/skills/groundedness_skill.py`） |
 
+## 安全与智能体闭环层（v0.7：否定语义、服务端角色边界与批判者闭环）
+
+针对外部智能体评审的 P0/P1 整改（本仓库当前版本；`pyproject.toml` 与 `/api/health` 的
+`app_version` 同步为 0.7.0）：
+
+- **否定语义实体抽取（P0）**：新增 `backend/skills/clinical_entity_skill.py` 统一 polarity
+  解析（affirmed / negated / uncertain + 时态 + 来源片段）。"否认外伤、无发热寒战、无大小便
+  异常、大小便正常、排除感染"等阴性描述不再被识别为阳性发现；抽取、标签归一化、红旗扫描、
+  合并症/用药识别全部只消费 `polarity=affirmed` 的实体。
+- **红旗 candidate→confirmed 分级（P0）**：raw 关键词只是候选；确认后按类别分级——马尾综合征/
+  进行性无力/发热感染确认即 urgent，外伤需脆性背景（骨质疏松/高龄/剧痛）升级，肿瘤史需夜间痛
+  或消瘦佐证；疑问句只到 caution 并生成 `need_further_inquiry` 追问；阴性红旗单独记录为
+  `denied_red_flags`（审计可见、永不报警）。
+- **服务端角色边界（P0）**：角色由服务端裁决，默认 `patient`（最小权限）。部署设置
+  `YAOBI_CLINICIAN_TOKEN` 后，医生端必须携带 `X-Clinician-Token` 头（或 `clinician_token`
+  字段）才能获得 clinician 角色；`/api/reasoning`、`/api/summary`、`/api/collaboration`、
+  `/api/feedback` 对非医生角色直接拒绝。
+- **患者端白名单输出（P0）**：患者响应经 `filter_patient_payload` 白名单过滤——仅暴露教育/
+  就医建议字段，`medication_advice`/`clinician_draft` 恒为 null，答案文本二次过守卫，违规即
+  替换为安全话术；证型/方药/剂量类 intent 在患者角色下于技能执行前即被重定向为健康教育。
+- **智能体闭环（P1）**：自主智能体升级为 plan → execute → observe → **critique → replan**：
+  安全批判者发现未复核红旗时自动补执行红旗排查（重规划）；证据批判者标记无规则/挖掘证据支撑
+  的步骤；不确定性批判者在规则引擎弃权时把缺失鉴别信息转为追问而非硬给结论。轨迹输出
+  `agent_loop` 与 `critique` 字段供审计。
+- **证候证据链与反证（P1）**：新增湿热痹阻（R007）/寒湿痹阻（R008）规则与四妙丸路线（F007）；
+  规则支持 `contra` 反证减分（苔黄腻/灼热/尿黄对寒证与少阳气郁按反证消解——"湿热被少阳牵引"
+  的已知缺口已转正）；每个候选证型输出 supporting / contradicting / missing evidence 证据链。
+- **评估扩容（P1）**：金标准病例扩至 21 例（新增否定描述、红旗边界、湿热/寒湿病例），另有
+  `tests/test_negation_safety.py` 否定语义 + 越权/注入 + 角色边界回归集（39 项）。
+- **Web 安全加固（P1）**：CORS 默认同源（跨源需显式 `YAOBI_ALLOW_ORIGIN`）、每请求
+  `request_id` 贯穿响应与审计、500 错误不再泄露内部异常文本、内置 per-IP 限流
+  （`YAOBI_RATE_LIMIT`，默认 120 次/分钟）；前端病情数据改存 sessionStorage（关标签页即清除）
+  并提供一键清空，UI 默认患者模式。
+
+**定位声明：本项目是"中医腰痹智能问诊/辨证辅助研究原型"，不是可上线的临床诊疗系统；全部输出
+为供执业医师审核的研究/教学草案，当前评估基于小规模内部标注集，尚未经独立专家盲评与真实
+临床验证，不可替代医生诊疗。**
+
 ## CDSS 草案模块
 
 项目新增 `cdss_recommendation_skill`，用于医生端 CDSS 自动生成候选诊断、候选证型、方剂路线和药物模块草案。该草案状态固定为 `draft_for_clinician_review`，不是最终诊断、不是签名处方、不是患者可见医嘱，也不会生成患者可执行剂量；最终医嘱仍需 `physician_review_skill` 医师手工录入并签名。

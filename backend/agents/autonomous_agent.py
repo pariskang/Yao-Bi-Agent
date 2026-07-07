@@ -1,15 +1,21 @@
-"""Autonomous multi-step QA agent (Plan → delegate to subagents → synthesize).
+"""Autonomous multi-step QA agent (plan → execute → observe → critique → replan → synthesize).
 
-This upgrades the single-intent conversational router into a frontier-style agent:
+This upgrades the single-intent conversational router into a closed-loop agent:
 
 * **Plan** — decompose a question into an ordered plan of skill calls. Deterministic
   keyword planning is always available; an optional, guarded language-model planner may
   reorder/expand the plan but only with intents from the registered allowlist.
-* **Delegate to subagents** — each plan step is delegated to the subagent that owns that
-  intent (``ConversationSession.invoke``), so one question can autonomously call several
-  skills, with later steps able to build on earlier observations.
-* **Synthesize** — combine the per-subagent observations into one answer and emit a
-  ReAct-style trace (thought → action → observation) for audit and UI.
+* **Execute / observe** — each plan step is delegated to the subagent that owns that
+  intent (``ConversationSession.invoke``); observations accumulate in the trace.
+* **Critique** — after execution a deterministic critic reviews the observations:
+  a *safety critic* checks whether an unaddressed red-flag/risk state exists, an
+  *evidence critic* flags steps whose answers carry no rule/mined evidence, and an
+  *uncertainty critic* asks whether the rule engine would abstain and what missing
+  facts would change the assessment.
+* **Replan** — a failed safety critique injects a red-flag screening step; an abstaining
+  engine turns the answer into follow-up questions instead of a confident conclusion.
+* **Synthesize** — combine observations + critique into one answer with a ReAct-style
+  trace (thought → action → observation) for audit and UI.
 
 Safety invariants are unchanged: subagents only run registered skills over deterministic
 rules / de-identified mined data; patient requests for diagnosis/prescription/dose are
@@ -25,6 +31,9 @@ from backend.agents.skill_router import ALLOWED_INTENTS, INTENT_BY_ID, INTENTS, 
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
 from backend.skills.patient_request_guard_skill import patient_request_guard_skill
+from backend.skills.safety_guard_skill import safety_guard_skill
+from backend.skills.syndrome_router_skill import syndrome_router_skill
+from backend.skills.uncertainty_skill import uncertainty_skill
 
 
 def plan_question(
@@ -123,26 +132,105 @@ class AutonomousQAAgent:
             steps.append({"step": i, "intent": intent, "label": observation["label"], "reason": step.get("reason", ""), "answer": observation["answer"], "skills": observation["skills"], "evidence": observation["evidence"], "used_llm": observation["used_llm"]})
             trace.append({"step": i, "thought": step.get("reason", ""), "action": f"delegate→{observation['label']}({intent})", "observation": observation["answer"], "skills": observation["skills"]})
 
-        answer = self._synthesize(question, planned, steps)
+        critique = self._critique_and_replan(question, steps, trace, subagents)
+        answer = self._synthesize(question, planned, steps, critique)
+        loop = ["understand", "plan", "execute", "observe", "critique"] + (["replan"] if critique["replanned"] else [])
         turn = {
             "question": question, "blocked": False,
             "plan": [{"intent": s["intent"], "label": INTENT_BY_ID.get(s["intent"], {}).get("label", s["intent"]), "reason": s.get("reason", "")} for s in plan],
             "plan_method": planned["method"], "plan_runtime": planned["llm_runtime"],
             "steps": steps, "trace": trace, "subagents_used": subagents,
+            "critique": critique, "agent_loop": loop,
             "multi_step": len(steps) > 1, "used_llm": used_llm, "answer": answer,
             "disclaimer": "自主智能体仅规划与调用受限技能，回答基于确定性规则与脱敏数据；不构成最终诊断、处方或可执行剂量。",
         }
         self.history.append(turn)
         return turn
 
-    def _synthesize(self, question: str, planned: dict[str, Any], steps: list[dict[str, Any]]) -> str:
+    def _critique_and_replan(
+        self,
+        question: str,
+        steps: list[dict[str, Any]],
+        trace: list[dict[str, Any]],
+        subagents: list[str],
+    ) -> dict[str, Any]:
+        """Deterministic critic pass after plan execution (observe → critique → replan).
+
+        Safety critic: if the case's own red-flag/risk state is not "safe" and the plan
+        never addressed safety, a red-flag screening step is injected (replanning).
+        Evidence critic: steps whose answers carry no rule/mined evidence are flagged so
+        the synthesis marks them as weakly grounded. Uncertainty critic: when the rule
+        engine abstains, the missing discriminating facts become follow-up questions.
+        """
+
+        tags = self.session.case_state.get("normalized_tags") or []
+        red = self.session.case_state.get("red_flags") or {}
+        safety = safety_guard_skill(
+            {"evidence": {"raw_text": question}, "red_flags": red.get("positive_items") or []},
+            None, tags,
+        )
+        replanned = False
+        if safety["safety_status"] != "safe" and not {"safety_inquiry", "red_flag_inquiry"} & set(subagents):
+            observation = self.session.invoke("red_flag_inquiry", question)
+            step_no = len(steps) + 1
+            steps.append({
+                "step": step_no, "intent": "red_flag_inquiry", "label": observation["label"],
+                "reason": "安全批判者发现未复核的红旗/风险线索，重规划补充红旗排查。",
+                "answer": observation["answer"], "skills": observation["skills"],
+                "evidence": observation["evidence"], "used_llm": observation["used_llm"],
+            })
+            trace.append({
+                "step": step_no, "thought": "安全批判者：案情存在未复核的红旗/风险线索，重规划补充红旗排查。",
+                "action": f"replan→{observation['label']}(red_flag_inquiry)",
+                "observation": observation["answer"], "skills": observation["skills"],
+            })
+            subagents.append("red_flag_inquiry")
+            replanned = True
+
+        ungrounded = [s["intent"] for s in steps if not s.get("evidence")]
+        candidates = syndrome_router_skill(tags).get("syndrome_candidates") or []
+        uncertainty = uncertainty_skill(candidates, tags)["uncertainty"]
+        critique = {
+            "safety_status": safety["safety_status"],
+            "confirmed_red_flags": [f.get("term") or f.get("id") for f in safety.get("confirmed_red_flags") or []],
+            "need_further_inquiry": safety.get("need_further_inquiry") or [],
+            "ungrounded_steps": ungrounded,
+            "abstain": bool(uncertainty.get("abstain")),
+            "assessment_note": uncertainty.get("assessment_note") or "",
+            "missing_facts": [g.get("suggestion") for g in uncertainty.get("differential_gaps") or []][:3],
+            "replanned": replanned,
+        }
+        trace.append({
+            "step": len(steps) + 1,
+            "thought": "批判者复核：安全状态、证据支撑与不确定性自评。",
+            "action": "critique(safety+evidence+uncertainty)",
+            "observation": (
+                f"安全状态 {critique['safety_status']}；"
+                f"弱证据步骤 {len(ungrounded)} 个；"
+                + ("规则引擎建议弃权，需补充关键信息。" if critique["abstain"] else "证据强度可接受。")
+            ),
+            "skills": ["safety_guard_skill", "uncertainty_skill"],
+        })
+        return critique
+
+    def _synthesize(self, question: str, planned: dict[str, Any], steps: list[dict[str, Any]], critique: dict[str, Any] | None = None) -> str:
         if not steps:
             return "未能形成执行计划，请换一种问法或参考功能引导。"
         if len(steps) == 1:
-            return steps[0]["answer"]
-        plan_line = "为回答此问题，自主规划了 " + str(len(steps)) + " 步并委派给对应子智能体：" + " → ".join(s["label"] for s in steps) + "。"
-        body = "\n\n".join(f"### {s['step']}. {s['label']}（{s['intent']}）\n{s['answer']}" for s in steps)
-        return f"{plan_line}\n\n{body}"
+            body = steps[0]["answer"]
+        else:
+            plan_line = "为回答此问题，自主规划了 " + str(len(steps)) + " 步并委派给对应子智能体：" + " → ".join(s["label"] for s in steps) + "。"
+            body = plan_line + "\n\n" + "\n\n".join(f"### {s['step']}. {s['label']}（{s['intent']}）\n{s['answer']}" for s in steps)
+        notes: list[str] = []
+        if critique:
+            if critique["safety_status"] != "safe":
+                notes.append(f"⚠️ 安全批判者：当前安全状态为 **{critique['safety_status']}**，红旗/风险线索须优先线下复核。")
+            if critique["abstain"]:
+                notes.append("ℹ️ 不确定性批判者：现有证据不足以形成稳定结论，建议先补充关键信息再判断。")
+            notes.extend(f"- {fact}" for fact in critique.get("missing_facts") or [])
+        if notes:
+            body += "\n\n---\n\n**批判者复核（critique）**\n\n" + "\n".join(notes)
+        return body
 
     def starters(self) -> list[dict[str, Any]]:
         return self.session.starters()

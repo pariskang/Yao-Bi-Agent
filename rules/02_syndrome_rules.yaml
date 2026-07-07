@@ -44,6 +44,8 @@
   trigger:
     any: [slow_pulse, cold_aversion, cold_extremities, deep_cold_pain]
     at_least: 2
+  # 明确热象是阳虚寒凝的反证：苔黄腻/灼热/尿黄/舌红出现时按反证减分。
+  contra: [yellow_greasy_coating, burning_pain, dark_urine, red_tongue]
   effect:
     syndrome: 肾阳不足证
     score: 5
@@ -57,6 +59,8 @@
   trigger:
     any: [bitter_taste, dry_mouth, insomnia, young_patient, emotional_constraint]
     at_least: 2
+  # 湿热实象（苔黄腻/灼热/尿黄）为强特异性证据，出现时不应再由口苦口干牵引到少阳气郁。
+  contra: [yellow_greasy_coating, burning_pain, dark_urine]
   effect:
     syndrome: 少阳气郁证
     score: 4
@@ -75,4 +79,34 @@
     score: 4
     modules: [顾护中焦模块, 健脾化湿底盘]
   rationale: 胃纳差、乏力、齿痕等提示脾运不足，需顾护中焦。
+  safety_level: low
+- id: R007
+  name: 湿热痹阻规则
+  category: syndrome
+  priority: 82
+  trigger:
+    any: [yellow_greasy_coating, burning_pain, dark_urine, red_tongue, thirst, heat_aggravation]
+    at_least: 2
+  # 寒象为湿热痹阻的反证。
+  contra: [cold_aversion, deep_cold_pain, cold_aggravation, warmth_relieves, white_greasy_coating]
+  effect:
+    syndrome: 湿热痹阻证
+    score: 5
+    modules: [清热利湿模块]
+  rationale: 苔黄腻、腰部灼热、小便黄、舌红等提示湿热下注、痹阻经络。
+  safety_level: low
+- id: R008
+  name: 寒湿痹阻规则
+  category: syndrome
+  priority: 78
+  trigger:
+    any: [white_greasy_coating, cold_aggravation, warmth_relieves, heavy_lower_limb, greasy_coating]
+    at_least: 2
+  # 热象为寒湿痹阻的反证。
+  contra: [yellow_greasy_coating, burning_pain, dark_urine, red_tongue]
+  effect:
+    syndrome: 寒湿痹阻证
+    score: 4
+    modules: [健脾化湿底盘, 温阳散寒模块]
+  rationale: 苔白腻、遇冷/阴雨加重、得温则减、肢体困重提示寒湿痹阻经络。
   safety_level: low

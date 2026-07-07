@@ -155,7 +155,7 @@ golden_cases:
       red_flag_expected: false
     known_gap: false
   - id: GC016
-    description: 青年男性，腰部灼热、苔黄腻（湿热痹阻——现有规则库无此证型）
+    description: 青年男性，腰部灼热、苔黄腻（湿热痹阻，R007 + 反证消解少阳误导）
     input_text: 患者男，39岁，腰痛1月，伴腰部灼热感，口干口苦，小便色黄，苔黄腻，脉滑，天热时加重。
     expected:
       top1_syndrome: 湿热痹阻证
@@ -163,7 +163,58 @@ golden_cases:
       formula_route_any: [四妙丸加减]
       safety_status: safe
       red_flag_expected: false
-    # Engine has no damp-heat syndrome rule or 四妙丸 route; it currently
-    # mislabels this presentation as 少阳气郁证 via 口苦/口干. Counted as a
-    # known gap, not gamed into the accuracy numbers.
-    known_gap: true
+    # Formerly a known gap（口苦/口干 误牵引到少阳气郁证）；R007 湿热规则 + 热象反证
+    # （contra）落地后转正：苔黄腻/灼热/尿黄按强特异性证据参与评分与反证消解。
+    known_gap: false
+  - id: GC017
+    description: 中年男性，灼痛、口渴、尿黄、舌红苔黄腻（湿热痹阻典型像）
+    input_text: 患者男，44岁，腰痛2月，腰部灼痛，天热加重，口渴，小便黄，舌红，苔黄腻，脉滑数，胃纳可，夜寐可，大便正常。
+    expected:
+      top1_syndrome: 湿热痹阻证
+      acceptable_syndromes: [湿热痹阻证]
+      formula_route_any: [四妙丸加减]
+      safety_status: safe
+      red_flag_expected: false
+    known_gap: false
+  - id: GC018
+    description: 中年男性，寒湿痹阻（阴雨天加重、得温则减、困重、苔白腻）
+    input_text: 患者男，48岁，腰痛3月，阴雨天加重，热敷缓解，双腿沉重，肢体困重，苔白腻，脉缓，胃纳可，二便调，夜寐可。
+    expected:
+      top1_syndrome: 寒湿痹阻证
+      acceptable_syndromes: [寒湿痹阻证]
+      formula_route_any: [桂枝芍药知母汤加减]
+      safety_status: caution   # 经验路线含附片，须医师审核
+      red_flag_expected: false
+    known_gap: false
+  - id: GC019
+    description: 中年女性，久病腰腿痛兼寒湿（遇冷加重、困重、苔白腻）
+    input_text: 患者女，55岁，腰腿痛反复2年，遇冷加重，阴雨天明显，肢体困重，舌淡，苔白腻，脉缓，胃纳可，二便调，夜寐可。
+    expected:
+      top1_syndrome: 寒湿痹阻证
+      acceptable_syndromes: [寒湿痹阻证, 气血痹阻证]
+      formula_route_any: [独活寄生汤加减, 桂枝芍药知母汤加减]
+      safety_status: caution
+      red_flag_expected: false
+    known_gap: false
+  - id: GC020
+    description: 中年男性，否定描述占主体（否认外伤/无发热寒战/无大小便异常——弃权且安全为正确）
+    input_text: 患者男，41岁，腰痛2周，否认外伤，无发热寒战，无大小便异常，无会阴麻木，未服用抗凝药，二便调，夜寐可，胃纳可，舌淡红，苔薄白。
+    expected:
+      top1_syndrome: null
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: safe
+      red_flag_expected: false
+    known_gap: false
+  - id: GC021
+    description: 老年男性，肿瘤病史伴夜间痛、体重下降（肿瘤红旗边界，阴性红旗不干扰）
+    input_text: 患者男，63岁，腰痛1月，夜间痛明显，既往肿瘤病史，近3月体重下降5公斤，无发热，无大小便异常。
+    expected:
+      top1_syndrome: null      # 先排查转移风险，不给证型判断为正确
+      acceptable_syndromes: []
+      # 与 GC012 同一口径：红旗病例安全等级必须 urgent，高龄背景下引擎仍可给出
+      # 供医师参考的经验路线信号（协作编排层会因红旗中止方药协作）。
+      formula_route_any: [独活寄生汤加减, 补肾类方]
+      safety_status: urgent
+      red_flag_expected: true
+    known_gap: false

@@ -232,12 +232,18 @@ const questions = {
 const state = {
   module: localStorage.getItem('yaobi-module') || 'dashboard',
   step: 0,
-  doctorMode: true,
+  // Least privilege by default: the UI starts in patient mode; clinician mode is an
+  // explicit opt-in, and the backend independently re-verifies the role server-side
+  // (YAOBI_CLINICIAN_TOKEN) — the client can only request it, never grant it.
+  doctorMode: false,
   chat: { history: [] },
   intakeMode: localStorage.getItem('yaobi-intake-mode') || 'chat',
   interview: null,
-  answers: JSON.parse(localStorage.getItem('yaobi-case') || '{}'),
-  fsm: JSON.parse(localStorage.getItem('yaobi-fsm') || '{\"rounds\":{},\"lastAnswers\":{}}'),
+  // Case narrative and FSM state are health data: keep them in sessionStorage only
+  // (cleared when the tab closes), never in long-lived localStorage. Migrate and
+  // scrub any residue written by older versions.
+  answers: JSON.parse(sessionStorage.getItem('yaobi-case') || localStorage.getItem('yaobi-case') || '{}'),
+  fsm: JSON.parse(sessionStorage.getItem('yaobi-fsm') || localStorage.getItem('yaobi-fsm') || '{\"rounds\":{},\"lastAnswers\":{}}'),
   // Physician feedback holder for the form-mode final report (session-scoped).
   reportFeedback: {},
 };
@@ -250,8 +256,11 @@ const screen = document.querySelector('#screen');
 const pageTitle = document.querySelector('#pageTitle');
 
 function save() {
-  localStorage.setItem('yaobi-case', JSON.stringify(state.answers));
-  localStorage.setItem('yaobi-fsm', JSON.stringify(state.fsm));
+  sessionStorage.setItem('yaobi-case', JSON.stringify(state.answers));
+  sessionStorage.setItem('yaobi-fsm', JSON.stringify(state.fsm));
+  // Scrub legacy persistent copies (health data must not survive the session).
+  localStorage.removeItem('yaobi-case');
+  localStorage.removeItem('yaobi-fsm');
   updatePreview();
 }
 
@@ -1496,13 +1505,15 @@ function renderSettingsModule() {
         <p>模型仅叠加问诊改写与教学解释；JSON Repair + Output Guard 失败即回退规则模板。</p></section>
       <section class="result-panel"><h3>本地数据</h3>
         <button class="ghost-btn" id="clearBtn" type="button">清空本地问诊数据</button>
-        <p class="muted">仅清除浏览器 localStorage 中的答案与 FSM 进度。</p></section>
+        <p class="muted">病情数据仅保存在本次会话（sessionStorage），关闭标签页即清除；此按钮立即清空。</p></section>
     </div>`;
   document.querySelector('#settingMaxRounds').addEventListener('change', e => setMaxRounds(e.target.value));
   document.querySelector('#settingAutoAdvance').addEventListener('change', e => { state.fsm.autoAdvance = e.target.checked; save(); });
   document.querySelector('#clearBtn').addEventListener('click', () => {
     if (!confirm('确定清空本地问诊数据？')) return;
-    localStorage.removeItem('yaobi-case'); localStorage.removeItem('yaobi-fsm'); location.reload();
+    sessionStorage.removeItem('yaobi-case'); sessionStorage.removeItem('yaobi-fsm');
+    localStorage.removeItem('yaobi-case'); localStorage.removeItem('yaobi-fsm');
+    location.reload();
   });
 }
 

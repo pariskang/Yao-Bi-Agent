@@ -139,6 +139,47 @@ def guard_consultation(text: str, user_role: str = "clinician") -> dict[str, Any
     }
 
 
+# ------------------------------------------------------------------ patient payload floor
+# Strict whitelist of turn fields a patient-facing API response may expose. Everything
+# else (clinician drafts, herb modules, rule traces, dose statistics…) is dropped
+# server-side — the patient view is an allowlist, not a blocklist.
+PATIENT_TURN_VISIBLE_FIELDS = (
+    "question", "intent", "intent_label", "blocked", "disclaimer",
+    "suggested_followups", "safety_notice", "trace",
+)
+
+_PATIENT_GUARDED_FALLBACK = (
+    "为了您的安全，这部分内容需要执业医师当面评估后才能提供。"
+    "如腰痛持续加重、夜间痛明显、伴发热、外伤后疼痛或大小便异常，请尽快线下就诊。"
+)
+
+
+def filter_patient_payload(turn: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a turn payload to the patient-visible structured schema.
+
+    The answer text must still pass the strict patient guard — a clinician-grade
+    draft that leaked into a patient turn is replaced by the safe fallback. Fields
+    like ``medication_advice`` are pinned to ``null`` by construction so no upstream
+    change can accidentally expose prescribing content to patients.
+    """
+
+    answer = str(turn.get("answer") or "")
+    guard = guard_tao_output(answer)
+    filtered: dict[str, Any] = {key: turn[key] for key in PATIENT_TURN_VISIBLE_FIELDS if key in turn}
+    filtered.update({
+        "role": "patient",
+        "patient_visible_message": answer if guard["allowed"] else _PATIENT_GUARDED_FALLBACK,
+        "answer": answer if guard["allowed"] else _PATIENT_GUARDED_FALLBACK,
+        "forbidden_content_detected": not guard["allowed"],
+        "guard_violations": [v["category"] for v in guard["violations"]],
+        "requires_doctor_review": True,
+        "medication_advice": None,
+        "clinician_draft": None,
+        "answer_source": "patient_safe_view",
+    })
+    return filtered
+
+
 def guard_probe(text: str) -> dict[str, Any]:
     """Probes are questions only: block any diagnosis verdict / prescription / dose leakage."""
 

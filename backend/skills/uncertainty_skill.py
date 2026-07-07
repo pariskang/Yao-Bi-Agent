@@ -32,6 +32,9 @@ TAG_CN = {
     "teeth_marks": "舌边齿痕", "fatigue": "乏力", "weak_stomach": "素体胃弱",
     "lower_limb_numbness": "下肢麻木", "radiating_leg_pain": "下肢放射痛",
     "cold_aggravation": "遇冷加重", "warmth_relieves": "得温则减",
+    "yellow_greasy_coating": "苔黄腻", "red_tongue": "舌红", "burning_pain": "腰部灼热",
+    "dark_urine": "小便黄", "thirst": "口渴", "heat_aggravation": "遇热加重",
+    "heavy_lower_limb": "肢体困重", "night_pain": "夜间痛",
 }
 
 

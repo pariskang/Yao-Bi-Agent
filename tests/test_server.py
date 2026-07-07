@@ -120,11 +120,18 @@ def test_interview_is_llm_driven_fsm_to_report(monkeypatch):
     # Tao extracts slots, the FSM advances, Tao asks follow-ups, then emits a report.
     server = _server(monkeypatch)
     server.handle_interview({"session_id": "iv", "reset": True})
+    # With the damp-cold/damp-heat rules the posterior is flatter for this mixed
+    # presentation, so the agent keeps asking discriminating questions (the intended
+    # uncertainty behaviour) — the transcript answers them until the report is emitted.
     msgs = [
         "腰痛反复多年，舌暗紫，苔白腻，遇冷加重",
         "腰部酸胀痛，向左腿放射，左小腿发麻，没有无力",
         "怕冷，腰膝酸软，热敷舒服，脉细",
         "之前诊断腰椎间盘突出，做过核磁，没有大小便异常，无发热无肿瘤史",
+        "双腿沉重，肢体困重，阴雨天加重明显",
+        "夜里不痛，白天活动后加重",
+        "口不苦，无口干，不口渴",
+        "胃口可以，睡眠一般，小便清",
     ]
     states, last = [], None
     for m in msgs:

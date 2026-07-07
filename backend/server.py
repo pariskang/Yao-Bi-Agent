@@ -20,6 +20,7 @@ through environment variables consumed by ``DaoClient`` (``TAO_BACKEND``, ``TAO_
 from __future__ import annotations
 
 import argparse
+import hmac
 import http.server
 import json
 import os
@@ -40,6 +41,7 @@ from backend.agents.yaobi_interview import YaoBiCaseState, YaoBiInterviewEngine
 from backend.audit import get_audit_log, get_counters
 from backend.audit.audit_log import text_digest
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
+from backend.llm.output_guard import filter_patient_payload
 from backend.provenance import get_provenance
 from backend.skills.case_extract_skill import case_extract_skill
 from backend.skills.case_normalize_skill import case_normalize_skill
@@ -98,7 +100,34 @@ def _case_state(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _role(data: dict[str, Any]) -> str:
-    return "clinician" if data.get("doctor_mode", True) else "patient"
+    """Server-side role resolution — the client may *request* clinician mode, never grant it.
+
+    Least privilege: the default role is ``patient``. A request only becomes
+    ``clinician`` when it explicitly asks for doctor mode **and** — if the deployment
+    configured ``YAOBI_CLINICIAN_TOKEN`` — presents that token (body field
+    ``clinician_token`` or ``X-Clinician-Token`` header, injected by the handler).
+    Without a configured token (local research demo) the explicit request is honored,
+    but production deployments must set the token so the role is a server decision.
+    """
+
+    if not data.get("doctor_mode"):
+        return "patient"
+    expected = os.getenv("YAOBI_CLINICIAN_TOKEN") or ""
+    if expected:
+        supplied = str(data.get("clinician_token") or "")
+        return "clinician" if hmac.compare_digest(supplied, expected) else "patient"
+    return "clinician"
+
+
+def _clinician_only(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Deny clinician-draft endpoints to non-clinician callers (server-side RBAC)."""
+
+    if _role(data) != "clinician":
+        return {
+            "error": "clinician_role_required",
+            "message": "该端点仅面向执业医师端。患者端请使用问诊、危险信号自查与健康教育功能。",
+        }
+    return None
 
 
 def _enrich_with_question(data: dict[str, Any], question: str) -> dict[str, Any]:
@@ -197,16 +226,26 @@ def handle_chat(data: dict[str, Any]) -> dict[str, Any]:
     question = str(data.get("question") or "").strip()
     if not question:
         return {"error": "empty question"}
-    session = ConversationSession(case_state=_case_state(_enrich_with_question(data, question)), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=_role(data))
-    return {"turn": session.ask(question), "tao": tao_info()}
+    role = _role(data)
+    session = ConversationSession(case_state=_case_state(_enrich_with_question(data, question)), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=role)
+    turn = session.ask(question)
+    if role == "patient":
+        # Strict allowlist view: patient responses expose only whitelisted fields and
+        # a re-guarded answer text (see output_guard.filter_patient_payload).
+        turn = filter_patient_payload(turn)
+    return {"turn": turn, "role": role, "tao": tao_info()}
 
 
 def handle_autonomous(data: dict[str, Any]) -> dict[str, Any]:
     question = str(data.get("question") or "").strip()
     if not question:
         return {"error": "empty question"}
-    agent = AutonomousQAAgent(case_state=_case_state(_enrich_with_question(data, question)), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=_role(data))
-    return {"turn": agent.run(question), "tao": tao_info()}
+    role = _role(data)
+    agent = AutonomousQAAgent(case_state=_case_state(_enrich_with_question(data, question)), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=role)
+    turn = agent.run(question)
+    if role == "patient":
+        turn = filter_patient_payload(turn)
+    return {"turn": turn, "role": role, "tao": tao_info()}
 
 
 def handle_followup_probe(data: dict[str, Any]) -> dict[str, Any]:
@@ -230,16 +269,25 @@ def handle_followup_probe(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_reasoning(data: dict[str, Any]) -> dict[str, Any]:
-    session = ConversationSession(case_state=_case_state(data), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=_role(data))
+    denied = _clinician_only(data)
+    if denied:
+        return denied
+    session = ConversationSession(case_state=_case_state(data), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role="clinician")
     return {"result": session.invoke("reasoning_inquiry"), "tao": tao_info()}
 
 
 def handle_summary(data: dict[str, Any]) -> dict[str, Any]:
-    session = ConversationSession(case_state=_case_state(data), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=_role(data))
+    denied = _clinician_only(data)
+    if denied:
+        return denied
+    session = ConversationSession(case_state=_case_state(data), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role="clinician")
     return {"result": session.invoke("experience_inquiry"), "tao": tao_info()}
 
 
 def handle_collaboration(data: dict[str, Any]) -> dict[str, Any]:
+    denied = _clinician_only(data)
+    if denied:
+        return denied
     result = AgentOrchestrator().run(_case_state(data), use_llm=TAO_ENABLED, dao_client=CLIENT)
     result.pop("blackboard", None)  # internal working memory, not needed by the UI
     result["tao"] = tao_info()
@@ -312,6 +360,9 @@ def handle_feedback(data: dict[str, Any]) -> dict[str, Any]:
     /api/metrics so rule curators can see which recommendations clinicians trust.
     """
 
+    denied = _clinician_only(data)
+    if denied:
+        return {"ok": False, **denied}
     action = str(data.get("action") or "").strip()
     if action not in _FEEDBACK_ACTIONS:
         return {"ok": False, "error": f"action must be one of {sorted(_FEEDBACK_ACTIONS)}"}
@@ -388,6 +439,32 @@ ROUTES_POST = {
 _AUDITED_ENDPOINTS = {"/api/chat", "/api/autonomous", "/api/interview", "/api/collaboration", "/api/followup_probe"}
 
 
+# Fixed-window per-IP rate limiter (stdlib only). YAOBI_RATE_LIMIT=requests/minute;
+# 0 disables. Bounds abuse on public deployments without external dependencies.
+_RATE_LOCK = Lock()
+_RATE_BUCKETS: dict[str, tuple[float, int]] = {}
+
+
+def _rate_limited(ip: str) -> bool:
+    try:
+        limit = int(os.getenv("YAOBI_RATE_LIMIT", "120"))
+    except ValueError:
+        limit = 120
+    if limit <= 0:
+        return False
+    now = time.time()
+    with _RATE_LOCK:
+        if len(_RATE_BUCKETS) > 4096:
+            for key in [k for k, (start, _) in _RATE_BUCKETS.items() if now - start >= 60]:
+                _RATE_BUCKETS.pop(key, None)
+        start, count = _RATE_BUCKETS.get(ip, (now, 0))
+        if now - start >= 60:
+            start, count = now, 0
+        count += 1
+        _RATE_BUCKETS[ip] = (start, count)
+        return count > limit
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     """Serves /api/* as JSON and everything else as static files from frontend/."""
 
@@ -398,10 +475,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
     def end_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        # Same-origin by default: the server hosts the frontend itself, so no CORS
+        # header is needed. Cross-origin access (e.g. a separately hosted UI) must be
+        # opted into explicitly via YAOBI_ALLOW_ORIGIN — never a blanket "*" default.
+        allow_origin = os.getenv("YAOBI_ALLOW_ORIGIN", "")
+        if allow_origin:
+            self.send_header("Access-Control-Allow-Origin", allow_origin)
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Clinician-Token")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
 
     def do_OPTIONS(self) -> None:
@@ -442,6 +525,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         handler = ROUTES_GET.get(path)
         if handler is not None:
+            if _rate_limited(self.client_address[0]):
+                self._send_json({"error": "rate_limited", "message": "请求过于频繁，请稍后再试。"}, status=429)
+                return
             self._dispatch(handler, {})
             return
         super().do_GET()
@@ -452,29 +538,43 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if handler is None:
             self._send_json({"error": f"unknown endpoint {path}"}, status=404)
             return
+        if _rate_limited(self.client_address[0]):
+            self._send_json({"error": "rate_limited", "message": "请求过于频繁，请稍后再试。"}, status=429)
+            return
         try:
             data = self._read_json()
         except self._BadRequest as exc:
             self._send_json({"error": str(exc)}, status=400)
             return
+        # Clinician credential travels as a header; expose it to role resolution
+        # without letting a body field silently override it.
+        header_token = self.headers.get("X-Clinician-Token")
+        if header_token:
+            data["clinician_token"] = header_token
         self._dispatch(handler, data)
 
     def _dispatch(self, handler: Any, data: dict[str, Any]) -> None:
         path = self.path.split("?", 1)[0]
+        request_id = uuid.uuid4().hex[:16]
         started = time.time()
         COUNTERS.increment(f"requests:{path}")
         try:
             result = handler(data)
         except Exception as exc:  # never crash the UI; log the full cause server-side only
             tb = traceback.format_exc()
-            print(f"[yaobi-server] {self.path} failed:\n{tb}", file=sys.stderr, flush=True)
+            print(f"[yaobi-server] {self.path} failed (request {request_id}):\n{tb}", file=sys.stderr, flush=True)
             COUNTERS.increment(f"errors:{path}")
-            AUDIT.record("api_error", {"endpoint": path, "error": f"{type(exc).__name__}: {exc}"})
-            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=500)
+            AUDIT.record("api_error", {"endpoint": path, "request_id": request_id, "error": f"{type(exc).__name__}: {exc}"})
+            # Internal details stay server-side (stderr + audit); the client gets a
+            # correlation id, not the exception text.
+            self._send_json({"error": "internal_error", "message": "服务器内部错误，请稍后重试。", "request_id": request_id}, status=500)
             return
+        if isinstance(result, dict):
+            result.setdefault("request_id", request_id)
         if path in _AUDITED_ENDPOINTS:
             AUDIT.record("api_decision", {
                 "endpoint": path,
+                "request_id": request_id,
                 "latency_ms": int((time.time() - started) * 1000),
                 **_decision_summary(path, data, result if isinstance(result, dict) else {}),
             })

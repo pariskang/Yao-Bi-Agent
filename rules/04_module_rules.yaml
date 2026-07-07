@@ -53,3 +53,9 @@ modules:
     triggers: [insomnia, irritability, bitter_taste, restlessness]
     role: concurrent
     note: 腰痹兼睡眠差、烦躁、郁热扰心。
+  damp_heat_clear:
+    name: 清热利湿模块
+    herbs: [苍术, 黄柏, 牛膝, 薏苡仁, 萆薢]
+    triggers: [yellow_greasy_coating, burning_pain, dark_urine, red_tongue, heat_aggravation]
+    role: add_on
+    note: 湿热下注、腰腿灼热、苔黄腻、小便黄的清利经验模块。

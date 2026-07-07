@@ -22,12 +22,16 @@ def formula_base_selector_skill(normalized_tags: list[str], syndrome_candidates:
         route = hit.effect.get("formula_route")
         if route:
             # Same corroboration bonus as syndrome scoring: evidence beyond two tags
-            # strengthens the route, making "high" confidence reachable.
+            # strengthens the route, making "high" confidence reachable. Contradicting
+            # case tags (the rule's `contra` list) subtract, mirroring syndrome scoring.
             bonus = max(0, len(set(hit.evidence_tags)) - 2)
-            scores[route] += int(hit.effect.get("route_score", 0)) + bonus
+            penalty = RuleEngine.CONTRA_PENALTY * len(hit.contra_tags)
+            scores[route] += int(hit.effect.get("route_score", 0)) + bonus - penalty
             route_hits[route].append(hit.to_dict())
     routes = []
     for route, score in sorted(scores.items(), key=lambda item: item[1], reverse=True):
+        if score <= 0:
+            continue
         first = route_hits[route][0]
         routes.append({
             "name": route,

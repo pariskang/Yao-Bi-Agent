@@ -11,7 +11,7 @@ from backend.evaluation.benchmark import (
     run_benchmark,
 )
 
-RULE_SYNDROMES = ["气血痹阻证", "气滞血瘀证", "肝肾不足证", "肾阳不足证", "少阳气郁证", "脾虚不运证"]
+RULE_SYNDROMES = ["气血痹阻证", "气滞血瘀证", "肝肾不足证", "肾阳不足证", "少阳气郁证", "脾虚不运证", "湿热痹阻证", "寒湿痹阻证"]
 
 
 @pytest.fixture(scope="module")
@@ -68,7 +68,7 @@ def test_benchmark_shape_and_known_gap_accounting(benchmark_result):
 
 def test_golden_cases_cover_every_rule_syndrome_twice():
     cases = load_golden_cases()
-    assert 14 <= len(cases) <= 16
+    assert 18 <= len(cases) <= 30
     for syndrome in RULE_SYNDROMES:
         covering = [
             case for case in cases

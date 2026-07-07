@@ -33,10 +33,6 @@ def check_conflicts(items: list[dict[str, Any]]) -> list[dict[str, str]]:
     return conflicts
 
 
-# Denial phrasing immediately before a matched term ("没有高血压") negates the report.
-_NEGATION_MARKERS = ("没有", "没", "无", "不", "未", "否认", "排除")
-
-
 def _terms_match(reported: str, rule_term: str) -> bool:
     # Substring-tolerant in both directions: a reported "阿司匹林肠溶片" matches
     # the rule term "阿司匹林", and a reported "溃疡" matches "消化性溃疡".
@@ -45,12 +41,12 @@ def _terms_match(reported: str, rule_term: str) -> bool:
     rule_term = rule_term.strip()
     if not reported or not rule_term:
         return False
-    idx = reported.find(rule_term)
-    if idx != -1:
+    if rule_term in reported:
         # Guard against free-text denials leaking in ("...没有高血压也没有心脏病"):
-        # a closely preceding negation marker means the condition was denied.
-        window = reported[max(0, idx - 4):idx]
-        return not any(neg in window for neg in _NEGATION_MARKERS)
+        # shared polarity resolution treats denied mentions as non-matches.
+        from backend.skills.clinical_entity_skill import is_affirmed
+
+        return is_affirmed(reported, rule_term)
     # The reverse direction ("溃疡" reported, rule term "消化性溃疡") requires the
     # reported string to be a plausible short term, not a single character or sentence.
     return 2 <= len(reported) <= 12 and reported in rule_term
