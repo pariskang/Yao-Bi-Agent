@@ -199,6 +199,35 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 | **语义自一致性** | 语义熵幻觉检测（Farquhar et al., **Nature** 630, 2024） | `TAO_SELF_CONSISTENCY=N` 多采样→按临床结论实体集聚类→聚类熵+一致率；不稳定结论自动附加复核警示（非阻断，默认关） |
 | **声明级实体接地** | RAG 忠实性/归因（Grounded Attributions ICLR 2025；claim-level grounding） | 会诊文本中每个证型/方剂/药物实体对照本案规则证据核对，输出接地率与"模型自身知识"清单供医师定点复核——透明层而非审查层（`backend/skills/groundedness_skill.py`） |
 
+## 反思状态机与契约层（v0.9：多轮自主反思 + 全量 schema contract）
+
+**多轮自主反思状态机**（`backend/agents/reflective_agent.py`，端点 `POST /api/reflective`）——
+把单轮 critique 升级为完整的目标驱动闭环：
+
+```text
+UNDERSTAND → PLAN → EXECUTE → REFLECT ─┬→ PLAN（批判者补充新工具，重规划下一轮）
+                                       ├→ ESCALATE（安全批判者硬否决：确认红旗即中止，扣留证型/方药内容）
+                                       ├→ ASK_FOLLOWUP（证据不足/冲突 → 主动追问而非作答）
+                                       ├→ ABSTAIN（无可澄清缺口时诚实弃权）
+                                       └→ ANSWER（汇总观察 + 批判者反思记录）
+```
+
+整个生命周期收敛在一个统一、契约校验的 `AgentState`：`goal / known_facts / negated_facts /
+uncertain_facts / risk_state / candidate_decisions / tool_plan / observations /
+critic_findings / next_action / transitions`。每轮反思运行四个确定性批判者：**安全**（urgent
+即硬否决）、**证据**（无证据观察标记；候选证型存在反证时转为澄清追问，不静默平均）、
+**不确定性**（弃权/窄分差 → 排队佐证工具或生成鉴别追问）、**完整性**（问题涉及但未执行的
+维度排队下一轮）。轮次有硬上限（默认 3）、每个工具至多执行一次，终止性有保证；`transitions`
+输出完整状态机轨迹供审计（示例：`plan → execute → reflect → plan → execute → reflect → answer`）。
+
+**全量 schema contract**（`backend/contracts.py`，零依赖）——所有跨技能载荷的最小形状契约：
+临床实体、抽取结果、归一化标签、证候候选（含证据链）、方剂路线、药物模块、安全评估、
+不确定性块、工具观察、路由决策、批判者结论、Agent 状态、患者视图。生产技能在产出处自校验，
+黑板写入按 key 校验，患者视图契约把 `medication_advice`/`clinician_draft` **钉死为 null**
+（const-pinning——任何上游改动都无法把处方内容送进患者响应而不触发契约失败）。执行模式
+`YAOBI_CONTRACT_MODE`：测试套件全程 `enforce`（漂移即失败，见 `tests/conftest.py`），
+生产默认 `warn`（违约计数进 /api/metrics + 审计日志，绝不因契约缺陷中断临床请求）。
+
 ## 多云模型接入层（v0.8：Poe / Azure OpenAI / MiniMax + 第二轮安全整改）
 
 `TAO_BACKEND` 现支持 7 种运行时：`disabled` / `mock` / `http`（自带 OpenAI 兼容端点）/

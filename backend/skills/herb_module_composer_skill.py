@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from backend.contracts import HERB_RESULT, validate
 from backend.engine.rule_engine import RULES_DIR, load_yaml
 
 
@@ -24,4 +25,4 @@ def herb_module_composer_skill(normalized_tags: list[str], formula_route: dict[s
                 "note": module.get("note", ""),
                 "non_prescriptive": True,
             })
-    return {"matched_modules": sorted(matched, key=lambda item: item["score"], reverse=True)}
+    return validate({"matched_modules": sorted(matched, key=lambda item: item["score"], reverse=True)}, HERB_RESULT, "herb_module_composer_skill")

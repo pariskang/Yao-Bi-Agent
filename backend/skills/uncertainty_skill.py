@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.contracts import UNCERTAINTY_BLOCK, validate
 from backend.engine.rule_engine import load_rule_file
 
 # Minimum top score for the engine to voice a syndrome tendency at all.
@@ -93,7 +94,7 @@ def uncertainty_skill(
             "abstain_reason": "no_candidate",
             "assessment_note": "现有信息未命中任何证型规则，系统不给出证型倾向；建议补充四诊（疼痛性质、寒热、舌象、脉象）后再评估。",
         })
-        return {"uncertainty": block}
+        return {"uncertainty": validate(block, UNCERTAINTY_BLOCK, "uncertainty_skill")}
 
     top = candidates[0]
     top_score = int(top.get("score") or 0)
@@ -147,7 +148,7 @@ def uncertainty_skill(
             {"tag": t, "label": TAG_CN.get(t, t)} for t in top_gap
         ]
 
-    return {"uncertainty": block}
+    return {"uncertainty": validate(block, UNCERTAINTY_BLOCK, "uncertainty_skill")}
 
 
 def uncertainty_markdown(block: dict[str, Any]) -> str:

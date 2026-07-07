@@ -36,6 +36,7 @@ from typing import Any
 
 from backend.agents.autonomous_agent import AutonomousQAAgent
 from backend.agents.conversation import ConversationSession
+from backend.agents.reflective_agent import ReflectiveClinicalAgent
 from backend.agents.orchestrator import AgentOrchestrator
 from backend.agents.skill_router import suggested_questions
 from backend.agents.yaobi_interview import YaoBiCaseState, YaoBiInterviewEngine
@@ -170,7 +171,7 @@ def _decision_summary(path: str, data: dict[str, Any], result: dict[str, Any]) -
 
     summary: dict[str, Any] = {}
     turn = result.get("turn") if isinstance(result.get("turn"), dict) else None
-    if path in {"/api/chat", "/api/autonomous"} and turn:
+    if path in {"/api/chat", "/api/autonomous", "/api/reflective"} and turn:
         summary = {
             "intent": turn.get("intent"),
             "method": turn.get("method") or turn.get("plan_method"),
@@ -248,6 +249,26 @@ def handle_autonomous(data: dict[str, Any]) -> dict[str, Any]:
         return {"error": "empty question"}
     role = _role(data)
     agent = AutonomousQAAgent(case_state=_case_state(_enrich_with_question(data, question)), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=role)
+    turn = agent.run(question)
+    if role == "patient":
+        turn = filter_patient_payload(turn)
+    return {"turn": turn, "role": role, "tao": tao_info()}
+
+
+def handle_reflective(data: dict[str, Any]) -> dict[str, Any]:
+    """Multi-round reflective state machine: plan→execute→observe→reflect→replan until a
+    terminal action (answer / ask_followup / escalate / abstain). Full agent state,
+    critic findings and transitions ship with the turn for audit."""
+
+    question = str(data.get("question") or "").strip()
+    if not question:
+        return {"error": "empty question"}
+    role = _role(data)
+    agent = ReflectiveClinicalAgent(
+        case_state=_case_state(_enrich_with_question(data, question)),
+        use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=role,
+        max_rounds=int(data.get("max_rounds", 3) or 3),
+    )
     turn = agent.run(question)
     if role == "patient":
         turn = filter_patient_payload(turn)
@@ -441,6 +462,7 @@ ROUTES_GET = {"/api/health": handle_health, "/api/starters": handle_starters, "/
 ROUTES_POST = {
     "/api/chat": handle_chat,
     "/api/autonomous": handle_autonomous,
+    "/api/reflective": handle_reflective,
     "/api/followup_probe": handle_followup_probe,
     "/api/reasoning": handle_reasoning,
     "/api/summary": handle_summary,
@@ -450,7 +472,7 @@ ROUTES_POST = {
     "/api/warmup": handle_warmup,
 }
 # POST endpoints whose decisions are audit-logged (feedback logs itself with full detail).
-_AUDITED_ENDPOINTS = {"/api/chat", "/api/autonomous", "/api/interview", "/api/collaboration", "/api/followup_probe"}
+_AUDITED_ENDPOINTS = {"/api/chat", "/api/autonomous", "/api/reflective", "/api/interview", "/api/collaboration", "/api/followup_probe"}
 
 
 # Fixed-window per-IP rate limiter (stdlib only). YAOBI_RATE_LIMIT=requests/minute;

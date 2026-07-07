@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.contracts import NORMALIZED_CASE, validate
 from backend.engine.rule_engine import load_rule_file
 from backend.skills.clinical_entity_skill import is_affirmed
 
@@ -99,4 +100,4 @@ def case_normalize_skill(case_json: dict[str, Any]) -> dict[str, Any]:
             if tag not in tags and alias in text and is_affirmed(text, alias):
                 tags.add(tag)
                 evidence.setdefault(tag, []).append(alias)
-    return {"normalized_tags": sorted(tags), "tag_evidence": evidence}
+    return validate({"normalized_tags": sorted(tags), "tag_evidence": evidence}, NORMALIZED_CASE, "case_normalize_skill")

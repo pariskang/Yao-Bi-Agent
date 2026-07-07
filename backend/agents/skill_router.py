@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.contracts import ROUTING_DECISION, validate
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
 from backend.skills.patient_request_guard_skill import patient_request_guard_skill
@@ -125,11 +126,11 @@ def route_intent(
 
     guard = patient_request_guard_skill(question, user_role=user_role)
     if guard["blocked"] and user_role == "patient":
-        return {
+        return validate({
             "intent": "safety_block", "method": "patient_request_guard", "confidence": 1.0,
             "matched_keywords": [], "blocked": True, "guard": guard,
             "llm_runtime": {"enabled": use_llm, "status": "skipped_safety_block"},
-        }
+        }, ROUTING_DECISION, "skill_router.route_intent")
 
     hint_intent, confidence, hits = keyword_route(question)
     runtime: dict[str, Any] = {"enabled": use_llm, "status": "not_requested" if not use_llm else "pending", "fallback_used": True, "backend": getattr(getattr(dao_client, "config", None), "backend", None)}
@@ -158,11 +159,11 @@ def route_intent(
         except (DaoRuntimeError, JsonRepairError, ValueError, KeyError, TypeError) as exc:
             runtime.update({"status": "fallback", "error": str(exc)})
 
-    return {
+    return validate({
         "intent": intent, "method": method, "confidence": confidence,
         "matched_keywords": hits, "blocked": False, "guard": guard,
         "hint_intent": hint_intent, "llm_runtime": runtime,
-    }
+    }, ROUTING_DECISION, "skill_router.route_intent")
 
 
 def suggested_questions(max_per_group: int = 2) -> list[dict[str, Any]]:

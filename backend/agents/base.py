@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from backend.contracts import BLACKBOARD_CONTRACTS, validate
+
 
 @dataclass
 class Blackboard:
@@ -30,6 +32,9 @@ class Blackboard:
     halt_reason: str | None = None
 
     def put(self, key: str, value: Any) -> None:
+        contract = BLACKBOARD_CONTRACTS.get(key)
+        if contract is not None and isinstance(value, dict):
+            validate(value, contract, f"blackboard:{key}")
         self.outputs[key] = value
 
     def get(self, key: str, default: Any = None) -> Any:

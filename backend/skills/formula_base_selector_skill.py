@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from backend.contracts import FORMULA_RESULT, validate
 from backend.engine.rule_engine import RuleEngine
 from backend.engine.scoring import confidence_from_score
 
@@ -42,4 +43,4 @@ def formula_base_selector_skill(normalized_tags: list[str], syndrome_candidates:
             "rationale": first["rationale"],
             "non_prescriptive": True,
         })
-    return {"formula_routes": routes, "primary_route": routes[0] if routes else None, "formula_rule_hits": [h.to_dict() for h in hits]}
+    return validate({"formula_routes": routes, "primary_route": routes[0] if routes else None, "formula_rule_hits": [h.to_dict() for h in hits]}, FORMULA_RESULT, "formula_base_selector_skill")

@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from backend.contracts import PATIENT_VIEW, validate
+
 # Chinese numerals that appear in colloquial dose / frequency instructions ("三克"、"一日三次").
 _CHN_NUM = "一二三四五六七八九十两半"
 
@@ -180,7 +182,7 @@ def filter_patient_payload(turn: dict[str, Any]) -> dict[str, Any]:
         "clinician_draft": None,
         "answer_source": "patient_safe_view",
     })
-    return filtered
+    return validate(filtered, PATIENT_VIEW, "output_guard.filter_patient_payload")
 
 
 def guard_probe(text: str) -> dict[str, Any]:

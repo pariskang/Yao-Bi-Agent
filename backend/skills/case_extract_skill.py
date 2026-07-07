@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from backend.contracts import CASE_FACTS, validate
 from backend.skills.clinical_entity_skill import affirmed_terms, scan_entities
 
 FIELD_PATTERNS = {
@@ -128,4 +129,4 @@ def case_extract_skill(raw_text: str) -> dict[str, Any]:
             missing.append(label)
     extracted["missing_fields"] = missing
     extracted["evidence"] = {"raw_text": raw_text, **evidence}
-    return extracted
+    return validate(extracted, CASE_FACTS, "case_extract_skill")

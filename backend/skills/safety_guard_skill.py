@@ -22,6 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from backend.contracts import SAFETY_ASSESSMENT, validate
 from backend.engine.rule_engine import RULES_DIR, load_yaml
 from backend.skills.case_extract_skill import RED_FLAG_CATEGORY
 from backend.skills.clinical_entity_skill import is_affirmed
@@ -131,7 +132,7 @@ def safety_guard_skill(case_json: dict[str, Any], matched_modules: list[dict[str
 
     need_further_inquiry = [f"请澄清是否存在：{flag['term']}" for flag in uncertain if flag.get("term")]
 
-    return {
+    return validate({
         "safety_status": status,
         # Backward-compatible alias of confirmed_red_flags: only confirmed findings.
         "red_flags": confirmed,
@@ -142,4 +143,4 @@ def safety_guard_skill(case_json: dict[str, Any], matched_modules: list[dict[str
         "medication_risks": sorted(set(medication_risks)),
         "required_disclaimer": True,
         "disclaimer": config.get("required_disclaimer"),
-    }
+    }, SAFETY_ASSESSMENT, "safety_guard_skill")

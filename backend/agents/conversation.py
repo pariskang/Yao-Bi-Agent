@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from backend.agents.orchestrator import AgentOrchestrator
+from backend.contracts import TOOL_OBSERVATION, validate
 from backend.agents.skill_router import INTENT_BY_ID, INTENTS, route_intent, suggested_questions
 from backend.llm.dao_client import DaoClient
 from backend.skills.case_experience_summary_skill import case_experience_summary_skill
@@ -320,7 +321,7 @@ class ConversationSession:
             intent = "capabilities"
         result = self._dispatch(intent, question)
         meta = INTENT_BY_ID.get(intent, {})
-        return {
+        return validate({
             "intent": intent,
             "label": meta.get("label", intent),
             "group": meta.get("group"),
@@ -328,7 +329,7 @@ class ConversationSession:
             "skills": result.get("skills", []),
             "evidence": result.get("evidence", []),
             "used_llm": bool(result.get("used_llm")),
-        }
+        }, TOOL_OBSERVATION, "conversation.invoke")
 
     def starters(self) -> list[dict[str, Any]]:
         return suggested_questions()
