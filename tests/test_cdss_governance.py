@@ -14,6 +14,8 @@ from backend.skills.uncertainty_skill import uncertainty_markdown, uncertainty_s
 def _server(monkeypatch, tmp_path):
     monkeypatch.setenv("TAO_BACKEND", "mock")
     monkeypatch.setenv("YAOBI_AUDIT_DIR", str(tmp_path))
+    # Tests exercise clinician flows without a token: explicit demo opt-in.
+    monkeypatch.setenv("YAOBI_ALLOW_UNAUTH_CLINICIAN_DEMO", "1")
     import backend.server as server_module
 
     return importlib.reload(server_module)

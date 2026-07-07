@@ -30,7 +30,22 @@ from backend.llm.prompt_templates import (
     SYSTEM_PROMPT,
 )
 
-DaoBackend = Literal["disabled", "mock", "http", "transformers"]
+DaoBackend = Literal["disabled", "mock", "http", "poe", "azure", "minimax", "transformers"]
+
+# Backends that speak an OpenAI-compatible chat-completions dialect over HTTPS.
+# ``http`` is the raw bring-your-own-endpoint mode; poe/azure/minimax are hosted
+# providers with their own base URL, credential header and model naming, resolved in
+# ``DaoClient._provider_request``. All share the same retry/fallback discipline.
+OPENAI_COMPAT_BACKENDS = frozenset({"http", "poe", "azure", "minimax"})
+
+# Backends that need no local weights (usable the moment credentials are present).
+REMOTE_BACKENDS = frozenset({"mock"}) | OPENAI_COMPAT_BACKENDS
+
+DEFAULT_MODEL_ID = "CMLM/Dao1-30b-a3b"
+
+# Hosted-provider default models, used when neither the provider-specific env var nor
+# an explicit TAO_MODEL_ID override is given.
+_PROVIDER_DEFAULT_MODEL = {"poe": "Claude-Sonnet-4.5", "minimax": "MiniMax-Text-01"}
 
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 
@@ -69,7 +84,7 @@ def load_inference_profiles() -> dict[str, dict[str, Any]]:
 
 @dataclass
 class DaoGenerationConfig:
-    model_id: str = "CMLM/Dao1-30b-a3b"
+    model_id: str = DEFAULT_MODEL_ID
     backend: DaoBackend = "disabled"
     endpoint_url: str | None = None
     api_key: str | None = None
@@ -84,6 +99,9 @@ class DaoGenerationConfig:
     load_in_4bit: bool = False
     load_in_8bit: bool = False
     timeout_seconds: int = 120
+    # Supply-chain control for the local transformers backend: remote model code is
+    # opt-out-able (TAO_TRUST_REMOTE_CODE=false) for hardened deployments.
+    trust_remote_code: bool = True
 
     @classmethod
     def from_env(cls) -> "DaoGenerationConfig":
@@ -103,6 +121,7 @@ class DaoGenerationConfig:
             load_in_4bit=os.getenv("TAO_LOAD_IN_4BIT", "false").lower() == "true",
             load_in_8bit=os.getenv("TAO_LOAD_IN_8BIT", "false").lower() == "true",
             timeout_seconds=int(os.getenv("TAO_TIMEOUT_SECONDS", "120")),
+            trust_remote_code=os.getenv("TAO_TRUST_REMOTE_CODE", "true").lower() == "true",
         )
 
 
@@ -171,7 +190,7 @@ class DaoClient:
         backend = self.config.backend
         if backend == "disabled":
             state = "disabled"
-        elif backend in {"mock", "http"}:
+        elif backend in REMOTE_BACKENDS:
             state = "ready"
         else:
             state = self.__class__._load_state
@@ -193,8 +212,8 @@ class DaoClient:
 
         backend = self.config.backend
         if backend == "disabled":
-            return {"ok": False, "state": "disabled", "backend": backend, "reason": "Tao backend disabled (set TAO_BACKEND=transformers/http/mock)."}
-        if backend in {"mock", "http"}:
+            return {"ok": False, "state": "disabled", "backend": backend, "reason": "Tao backend disabled (set TAO_BACKEND=transformers/http/poe/azure/minimax/mock)."}
+        if backend in REMOTE_BACKENDS:
             self.__class__._load_state = "ready"
             return {"ok": True, "state": "ready", "backend": backend, "model_id": self.config.model_id}
         if backend == "transformers":
@@ -250,11 +269,11 @@ class DaoClient:
         """
 
         if self.config.backend == "disabled":
-            raise DaoRuntimeError(f"Tao {task} runtime is disabled. Set TAO_BACKEND=http or transformers to enable.")
+            raise DaoRuntimeError(f"Tao {task} runtime is disabled. Set TAO_BACKEND=http/poe/azure/minimax or transformers to enable.")
         if self.config.backend == "mock":
             return mock_value
         params = self._profile_params(profile)
-        if self.config.backend == "http":
+        if self.config.backend in OPENAI_COMPAT_BACKENDS:
             return self._generate_http(body, history=history, params=params)
         if self.config.backend == "transformers":
             return self._generate_transformers(self.build_prompt(body, history), params=params)
@@ -419,7 +438,7 @@ class DaoClient:
         if self.config.backend == "mock":
             return "Tao mock direct reply: 已收到问题；当前项目中模型输出仍需规则与安全 guard 复核。"
         params = self._profile_params("teaching_explanation")
-        if self.config.backend == "http":
+        if self.config.backend in OPENAI_COMPAT_BACKENDS:
             return self._generate_http(user_input, history=history, params=params)
         if self.config.backend == "transformers":
             return self._generate_transformers(self.build_prompt(user_input, history), stream_callback=stream_callback, params=params)
@@ -756,13 +775,74 @@ class DaoClient:
     _HTTP_MAX_ATTEMPTS = 3
     _HTTP_BACKOFF_SECONDS = 1.0
 
+    def _provider_model(self, backend: str, env_var: str) -> str:
+        """Effective model for a hosted provider: env var > explicit TAO_MODEL_ID > default.
+
+        The Dao1 default model id would be meaningless on Poe/MiniMax, so it never
+        leaks there — only a deliberately set TAO_MODEL_ID overrides the provider default.
+        """
+
+        explicit = os.getenv(env_var)
+        if explicit:
+            return explicit
+        if self.config.model_id != DEFAULT_MODEL_ID:
+            return self.config.model_id
+        return _PROVIDER_DEFAULT_MODEL.get(backend, self.config.model_id)
+
+    def _provider_request(self) -> tuple[str, dict[str, str], str]:
+        """Resolve (url, auth headers, model) for the OpenAI-compatible backends.
+
+        * ``http``    — bring-your-own endpoint: TAO_ENDPOINT_URL (+ optional TAO_API_KEY).
+        * ``poe``     — Poe API (OpenAI-compatible): POE_API_KEY, optional POE_API_BASE /
+          POE_MODEL (model names as listed on poe.com, e.g. Claude-Sonnet-4.5, GPT-5).
+        * ``azure``   — Azure OpenAI: AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_DEPLOYMENT +
+          AZURE_OPENAI_API_KEY (+ optional AZURE_OPENAI_API_VERSION); auth via api-key header.
+        * ``minimax`` — MiniMax chatcompletion_v2: MINIMAX_API_KEY, optional
+          MINIMAX_API_BASE / MINIMAX_MODEL (default MiniMax-Text-01).
+        """
+
+        backend = self.config.backend
+        if backend == "http":
+            if not self.config.endpoint_url:
+                raise DaoRuntimeError("TAO_ENDPOINT_URL is required when TAO_BACKEND=http.")
+            headers = {"Authorization": f"Bearer {self.config.api_key}"} if self.config.api_key else {}
+            return self.config.endpoint_url, headers, self.config.model_id
+        if backend == "poe":
+            key = os.getenv("POE_API_KEY") or self.config.api_key
+            if not key:
+                raise DaoRuntimeError("POE_API_KEY (or TAO_API_KEY) is required when TAO_BACKEND=poe.")
+            base = (os.getenv("POE_API_BASE") or "https://api.poe.com/v1").rstrip("/")
+            return f"{base}/chat/completions", {"Authorization": f"Bearer {key}"}, self._provider_model("poe", "POE_MODEL")
+        if backend == "azure":
+            endpoint = (os.getenv("AZURE_OPENAI_ENDPOINT") or "").rstrip("/")
+            deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT") or (
+                self.config.model_id if self.config.model_id != DEFAULT_MODEL_ID else ""
+            )
+            key = os.getenv("AZURE_OPENAI_API_KEY") or self.config.api_key
+            if not (endpoint and deployment and key):
+                raise DaoRuntimeError(
+                    "AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT and AZURE_OPENAI_API_KEY "
+                    "are required when TAO_BACKEND=azure."
+                )
+            version = os.getenv("AZURE_OPENAI_API_VERSION") or "2024-06-01"
+            url = f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={version}"
+            # Azure authenticates with the api-key header and takes the deployment from the URL.
+            return url, {"api-key": key}, deployment
+        if backend == "minimax":
+            key = os.getenv("MINIMAX_API_KEY") or self.config.api_key
+            if not key:
+                raise DaoRuntimeError("MINIMAX_API_KEY (or TAO_API_KEY) is required when TAO_BACKEND=minimax.")
+            url = os.getenv("MINIMAX_API_BASE") or "https://api.minimax.io/v1/text/chatcompletion_v2"
+            return url, {"Authorization": f"Bearer {key}"}, self._provider_model("minimax", "MINIMAX_MODEL")
+        raise DaoRuntimeError(f"Unsupported OpenAI-compatible Tao backend: {backend}")
+
     def _generate_http(
         self,
         user_content: str,
         history: list[dict[str, str]] | None = None,
         params: dict[str, Any] | None = None,
     ) -> str:
-        """Call an OpenAI-compatible endpoint with plain chat messages.
+        """Call an OpenAI-compatible chat endpoint (http/poe/azure/minimax) with plain messages.
 
         The endpoint applies its own chat template, so we must NOT send the locally
         templated ``<|im_start|>`` prompt string here — only raw message contents.
@@ -770,28 +850,25 @@ class DaoClient:
         their deterministic-fallback guarantee instead of surfacing an HTTP 500.
         """
 
-        if not self.config.endpoint_url:
-            raise DaoRuntimeError("TAO_ENDPOINT_URL is required when TAO_BACKEND=http.")
+        url, auth_headers, model = self._provider_request()
         params = params or self._profile_params("teaching_explanation")
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         for turn in history or []:
             messages.append({"role": turn["role"], "content": turn["content"]})
         messages.append({"role": "user", "content": user_content})
         payload = {
-            "model": self.config.model_id,
+            "model": model,
             "messages": messages,
             "temperature": params["temperature"],
             "top_p": params["top_p"],
             "max_tokens": params["max_new_tokens"],
         }
         data = json.dumps(payload).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        headers = {"Content-Type": "application/json", **auth_headers}
 
         last_error: Exception | None = None
         for attempt in range(self._HTTP_MAX_ATTEMPTS):
-            request = urllib.request.Request(self.config.endpoint_url, data=data, headers=headers, method="POST")
+            request = urllib.request.Request(url, data=data, headers=headers, method="POST")
             try:
                 with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
                     body = json.loads(response.read().decode("utf-8"))
@@ -810,6 +887,13 @@ class DaoClient:
                 f"HTTP Tao endpoint failed after {self._HTTP_MAX_ATTEMPTS} attempts: "
                 f"{type(last_error).__name__}: {last_error}"
             ) from last_error
+
+        # MiniMax reports application-level failures inside an HTTP-200 body.
+        base_resp = body.get("base_resp") or {}
+        if base_resp.get("status_code") not in (None, 0):
+            raise DaoRuntimeError(
+                f"MiniMax endpoint error {base_resp.get('status_code')}: {base_resp.get('status_msg')}"
+            )
 
         if "choices" in body:
             choice = body["choices"][0]
@@ -842,7 +926,7 @@ class DaoClient:
                 try:
                     dtype = getattr(torch, self.config.torch_dtype, torch.float16)
                     from_pretrained_kwargs: dict[str, Any] = {
-                        "trust_remote_code": True,
+                        "trust_remote_code": self.config.trust_remote_code,
                         "device_map": self.config.device_map,
                         "attn_implementation": self.config.attn_implementation,
                     }
@@ -858,7 +942,7 @@ class DaoClient:
                         )
                     else:
                         from_pretrained_kwargs["torch_dtype"] = dtype
-                    self.__class__._tokenizer = transformers.AutoTokenizer.from_pretrained(self.config.model_id, trust_remote_code=True)
+                    self.__class__._tokenizer = transformers.AutoTokenizer.from_pretrained(self.config.model_id, trust_remote_code=self.config.trust_remote_code)
                     self.__class__._model = transformers.AutoModelForCausalLM.from_pretrained(
                         self.config.model_id,
                         **from_pretrained_kwargs,

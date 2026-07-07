@@ -112,10 +112,32 @@ def tao_consultation_skill(
             return {"answer": fallback_text, "source": "deterministic_rules_fallback", "used_llm": False, "tao_runtime": meta}
         if "执业医师" not in text[-160:]:
             text += _DISCLAIMER
-        meta.update({"status": "accepted", "fallback_used": False})
-        # Faithfulness transparency (non-blocking): label which clinical entities are
-        # rule-backed vs model-own-knowledge, so the physician reviews the right spots.
+        # Faithfulness gate: label which clinical entities are rule-backed vs
+        # model-own-knowledge. Below the hard floor (TAO_GROUNDING_MIN, default 0.5)
+        # the consultation is rejected outright and the deterministic rule answer is
+        # served instead — the model may extend the *explanation* layer, never carry
+        # the structured decision on its own knowledge. Between the floor and the
+        # warning threshold (0.7) the text passes but gains a prominent review notice.
         groundedness = check_groundedness(text, evidence)
+        ratio = groundedness.get("grounding_ratio")
+        try:
+            min_ratio = float(os.getenv("TAO_GROUNDING_MIN", "0.5"))
+        except ValueError:
+            min_ratio = 0.5
+        # The hard reject applies to real model backends only: `mock` is the canned
+        # wiring-test backend whose fixed text is deliberately rich, never production.
+        if ratio is not None and ratio < min_ratio and client.config.backend != "mock":
+            meta.update({"status": "grounding_rejected", "groundedness": groundedness})
+            return {
+                "answer": fallback_text, "source": "deterministic_rules_fallback", "used_llm": False,
+                "tao_runtime": meta, "groundedness": groundedness,
+            }
+        meta.update({"status": "accepted", "fallback_used": False})
+        if ratio is not None and ratio < 0.7:
+            text += (
+                f"\n\n> ⚠️ 证据接地警示：本文实体接地率仅 {ratio:.0%}，"
+                f"{groundedness.get('annotation', '')} 医师复核前不得作为决策依据。"
+            )
         consistency = _semantic_consistency(
             client, {"question": question, "scope": scope, "evidence": evidence, "user_role": user_role}, text,
         )

@@ -89,6 +89,19 @@ def _entities_in_text(text: str) -> dict[str, set[str]]:
     return found
 
 
+@lru_cache(maxsize=1)
+def _formula_core_herbs() -> dict[str, tuple[str, ...]]:
+    """Base formula name → its rule-defined core herbs (from 03_formula_rules.yaml)."""
+
+    cores: dict[str, tuple[str, ...]] = {}
+    for rule in load_rule_file("03_formula_rules.yaml") or []:
+        effect = rule.get("effect") or {}
+        route = effect.get("formula_route")
+        if route:
+            cores[_base_formula(route)] = tuple(effect.get("core_module") or [])
+    return cores
+
+
 def _evidence_entities(evidence: dict[str, Any]) -> dict[str, set[str]]:
     ev: dict[str, set[str]] = {"syndrome": set(), "formula": set(), "herb": set()}
     for candidate in evidence.get("syndrome_candidates") or []:
@@ -96,7 +109,12 @@ def _evidence_entities(evidence: dict[str, Any]) -> dict[str, set[str]]:
             ev["syndrome"].add(candidate["name"])
     for route in evidence.get("formula_routes") or []:
         if route.get("name"):
-            ev["formula"].add(_base_formula(route["name"]))
+            base = _base_formula(route["name"])
+            ev["formula"].add(base)
+            # A rule-backed formula grounds its canonical core herbs too: discussing
+            # 独活/桑寄生 inside a grounded 独活寄生汤 route is rule provenance, not
+            # model-own knowledge.
+            ev["herb"].update(_formula_core_herbs().get(base, ()))
     for module in evidence.get("herb_modules") or []:
         ev["herb"].update(module.get("herbs") or [])
     return ev

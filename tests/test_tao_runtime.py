@@ -81,7 +81,8 @@ def test_dao_direct_chat_mock_and_transformers_source_contract():
     assert "TextIteratorStreamer" in source
     assert "AutoTokenizer.from_pretrained" in source
     assert "AutoModelForCausalLM.from_pretrained" in source
-    assert "trust_remote_code=True" in source
+    # Supply-chain hardening: remote code execution is configurable, not hard-wired.
+    assert "trust_remote_code=self.config.trust_remote_code" in source
     assert '"attn_implementation": self.config.attn_implementation' in source
 
 

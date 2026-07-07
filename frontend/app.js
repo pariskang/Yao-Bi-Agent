@@ -78,7 +78,7 @@ function renderTaoBadge() {
     ? `语言模型在线：${taoRuntimeTag()}${provTag ? '\n' + provTag : ''}`
     : '未连接 Tao 后端：离线规则模式（标签如实显示为关键词）';
   el.innerHTML = online
-    ? `<span class="dot"></span>Tao 在线 · ${api.state.tao.backend}`
+    ? `<span class="dot"></span>Tao 在线 · ${escapeHtml(api.state.tao.backend)}`
     : `<span class="dot"></span>离线 · 规则模式`;
 }
 
@@ -681,14 +681,28 @@ function renderQuestion(q, stage) {
   const options = tpl.querySelector('.options');
   const current = answerValue(q.id);
   if (q.probe || q.type === 'free') {
-    options.innerHTML = `<input class="free-note" type="text" placeholder="可简要回答，作为补充线索（非必填）" value="${current || ''}" />`;
-    options.querySelector('input').addEventListener('input', e => setAnswer(q.id, e.target.value));
+    // DOM API instead of innerHTML: user-entered text must never be re-parsed as markup
+    // (attribute injection via a crafted `"` in the stored answer).
+    options.textContent = '';
+    const freeInput = document.createElement('input');
+    freeInput.className = 'free-note';
+    freeInput.type = 'text';
+    freeInput.placeholder = '可简要回答，作为补充线索（非必填）';
+    freeInput.value = current || '';
+    options.appendChild(freeInput);
+    freeInput.addEventListener('input', e => setAnswer(q.id, e.target.value));
     tpl.querySelector('.free-note:last-child')?.remove();
     return card;
   }
   if (q.type === 'number') {
-    options.innerHTML = `<input class="free-note" type="number" placeholder="${q.placeholder || ''}" value="${current || ''}" />`;
-    options.querySelector('input').addEventListener('input', e => setAnswer(q.id, Number(e.target.value)));
+    options.textContent = '';
+    const numInput = document.createElement('input');
+    numInput.className = 'free-note';
+    numInput.type = 'number';
+    numInput.placeholder = q.placeholder || '';
+    numInput.value = current || '';
+    options.appendChild(numInput);
+    numInput.addEventListener('input', e => setAnswer(q.id, Number(e.target.value)));
   } else if (q.type === 'range') {
     options.innerHTML = `<input type="range" min="0" max="10" value="${current ?? 5}" /><strong>${current ?? 5} 分</strong>`;
     const range = options.querySelector('input'); const label = options.querySelector('strong');
@@ -1255,18 +1269,18 @@ function paintAgents(model, real) {
     <section class="result-panel"><p class="eyebrow">draft_for_clinician_review · ${source}</p>
       <h3>协作时间轴（后端 AgentOrchestrator）</h3>
       <ol class="agent-timeline">${trace.map((t, i) => `
-        <li class="agent-step ${t.status}">
+        <li class="agent-step ${escapeHtml(t.status)}">
           <div class="agent-head">
             <span class="agent-order">${i + 1}</span>
-            <strong>${t.name}</strong>
-            <span class="kind-badge ${t.kind}">${t.kind === 'llm' ? '语言模型' : '规则'}</span>
+            <strong>${escapeHtml(t.name)}</strong>
+            <span class="kind-badge ${escapeHtml(t.kind)}">${t.kind === 'llm' ? '语言模型' : '规则'}</span>
             ${t.used_llm ? '<span class="kind-badge llm-on">Tao 在环</span>' : ''}
-            <span class="agent-status ${t.status}">${statusCn[t.status] || t.status}</span>
+            <span class="agent-status ${escapeHtml(t.status)}">${escapeHtml(statusCn[t.status] || t.status)}</span>
             ${t.confidence != null ? `<span class="agent-conf">置信度 ${Number(t.confidence).toFixed(2)}</span>` : ''}
           </div>
-          <p class="agent-role">${t.role}</p>
-          <p class="agent-summary">${t.summary}</p>
-          <p class="agent-handoff">→ 接力：${t.handoff}</p>
+          <p class="agent-role">${escapeHtml(t.role)}</p>
+          <p class="agent-summary">${escapeHtml(t.summary)}</p>
+          <p class="agent-handoff">→ 接力：${escapeHtml(t.handoff)}</p>
         </li>`).join('')}</ol>
     </section>
     <section class="result-panel"><h3>自主协作机制说明</h3>

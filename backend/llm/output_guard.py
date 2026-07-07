@@ -142,10 +142,13 @@ def guard_consultation(text: str, user_role: str = "clinician") -> dict[str, Any
 # ------------------------------------------------------------------ patient payload floor
 # Strict whitelist of turn fields a patient-facing API response may expose. Everything
 # else (clinician drafts, herb modules, rule traces, dose statistics…) is dropped
-# server-side — the patient view is an allowlist, not a blocklist.
+# server-side — the patient view is an allowlist, not a blocklist. The agent trace is
+# deliberately NOT whitelisted: it carries sub-agent observations, skill names and
+# intermediate clinical reasoning, any of which could leak clinician-grade content the
+# moment an upstream skill forgets to role-filter.
 PATIENT_TURN_VISIBLE_FIELDS = (
     "question", "intent", "intent_label", "blocked", "disclaimer",
-    "suggested_followups", "safety_notice", "trace",
+    "suggested_followups", "safety_notice",
 )
 
 _PATIENT_GUARDED_FALLBACK = (

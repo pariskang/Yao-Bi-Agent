@@ -103,6 +103,7 @@ def test_eig_zero_when_single_candidate():
 
 def test_interview_exposes_question_selection(monkeypatch):
     monkeypatch.setenv("TAO_BACKEND", "mock")
+    monkeypatch.setenv("YAOBI_ALLOW_UNAUTH_CLINICIAN_DEMO", "1")
     from backend.agents.yaobi_interview import YaoBiCaseState, YaoBiInterviewEngine
     from backend.llm.dao_client import DaoClient
 
@@ -161,6 +162,7 @@ def test_groundedness_handles_no_entities():
 
 def test_consultation_returns_groundedness(monkeypatch):
     monkeypatch.setenv("TAO_BACKEND", "mock")
+    monkeypatch.setenv("YAOBI_ALLOW_UNAUTH_CLINICIAN_DEMO", "1")
     import importlib
 
     import backend.server as server_module
@@ -188,6 +190,7 @@ def test_cluster_by_meaning_groups_agreeing_answers():
 def test_self_consistency_off_by_default(monkeypatch):
     monkeypatch.delenv("TAO_SELF_CONSISTENCY", raising=False)
     monkeypatch.setenv("TAO_BACKEND", "mock")
+    monkeypatch.setenv("YAOBI_ALLOW_UNAUTH_CLINICIAN_DEMO", "1")
     import importlib
 
     import backend.server as server_module
@@ -199,6 +202,7 @@ def test_self_consistency_off_by_default(monkeypatch):
 def test_self_consistency_stable_on_deterministic_mock(monkeypatch):
     monkeypatch.setenv("TAO_SELF_CONSISTENCY", "3")
     monkeypatch.setenv("TAO_BACKEND", "mock")
+    monkeypatch.setenv("YAOBI_ALLOW_UNAUTH_CLINICIAN_DEMO", "1")
     import importlib
 
     import backend.server as server_module

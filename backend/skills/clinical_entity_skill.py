@@ -34,8 +34,13 @@ POLARITY_UNCERTAIN = "uncertain"
 # Clause boundaries: polarity never crosses these (each clause carries its own negation).
 _CLAUSE_BOUNDARIES = "，,。;；!！?？\n"
 
-# Pre-negation cues, longest first so 没有/无明显 win before 没/无.
-_NEGATION_PREFIXES = ("没有", "否认", "排除", "未见", "无明显", "不伴", "没", "无", "未", "不", "非")
+# Pre-negation cues, longest first so compound cues (未出现/不伴有/无明显) win before
+# their single-character tails — "未出现发热" must resolve via 未出现, not have 出现
+# treated as a scope breaker that strands the 未.
+_NEGATION_PREFIXES = (
+    "未再出现", "未出现", "未发现", "未提示", "未诉", "未伴有", "未伴", "未见明显", "未见",
+    "不伴有", "不伴", "无明显", "没有", "否认", "排除", "没", "无", "未", "不", "非",
+)
 
 # Post-negation cues: the term is followed by a normality assertion（"大小便正常"、"二便调"）.
 _NEGATION_SUFFIXES = ("正常", "无异常", "未见异常", "阴性", "（-）", "(-)", "调", "通畅", "自如", "如常")
@@ -45,11 +50,13 @@ _SUFFIX_FILLERS = "均尚基本亦也都情况"
 # A question about a symptom is not a report of the symptom（"会发热吗？"、"是否外伤"）.
 _UNCERTAIN_MARKERS = ("是否", "会不会", "有没有", "要不要", "能不能", "吗", "？", "?", "可能")
 
-# Tokens that end a negation's forward scope inside one clause（"没力气伴腰痛" ⇒ 腰痛 affirmed）.
-_SCOPE_BREAKERS = ("伴", "但", "而", "出现", "仍", "转为", "加重", "现")
-
-# Forward reach of a pre-negation cue（covers enumerations like "无发热、寒战、消瘦"）.
-_NEGATION_WINDOW = 12
+# Tokens that end a negation's forward scope inside one clause（"没力气伴腰痛" ⇒ 腰痛
+# affirmed；"无发热但出现尿潴留" ⇒ 尿潴留 affirmed）. 诱因 covers the ubiquitous
+# "无明显诱因…" opener so it never negates the symptoms that follow it.
+_SCOPE_BREAKERS = (
+    "但是", "不过", "然而", "随后", "转为", "出现", "加重", "目前", "诱因",
+    "伴", "但", "而", "仍", "现",
+)
 
 # Historical-context cues: the finding belongs to the past history, not this episode.
 _HISTORICAL_MARKERS = ("既往", "曾经", "曾", "以前", "过去", "病史")
@@ -78,7 +85,14 @@ def _containing_clause(clauses: list[tuple[int, str]], idx: int) -> tuple[int, s
 
 
 def _pre_negated(clause: str, term_start: int) -> bool:
-    """A negation cue precedes the term in-clause, within scope, with no breaker between."""
+    """A negation cue precedes the term in-clause with no scope breaker between.
+
+    The negation scope extends to the end of the clause: clinical narratives chain
+    long pertinent-negative enumerations（"无发热、寒战、咳嗽咳痰、大小便异常、会阴
+    麻木"）and a fixed character window would silently re-affirm the tail items —
+    the dangerous direction. Contrast/transition tokens (_SCOPE_BREAKERS) still cut
+    the scope, so "无发热，但今晨出现尿潴留" keeps 尿潴留 affirmed.
+    """
 
     prefix = clause[:term_start]
     best_end = -1
@@ -89,8 +103,6 @@ def _pre_negated(clause: str, term_start: int) -> bool:
     if best_end == -1:
         return False
     between = clause[best_end:term_start]
-    if len(between) > _NEGATION_WINDOW:
-        return False
     return not any(breaker in between for breaker in _SCOPE_BREAKERS)
 
 

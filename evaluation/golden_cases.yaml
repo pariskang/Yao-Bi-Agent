@@ -218,3 +218,33 @@ golden_cases:
       safety_status: urgent
       red_flag_expected: true
     known_gap: false
+  - id: GC022
+    description: 复合否定前缀（未出现/未见明显——外部评审反例回归）
+    input_text: 患者男，40岁，腰痛2周，未出现发热寒战，未见明显外伤，未诉大小便异常，夜寐可，胃纳可。
+    expected:
+      top1_syndrome: null
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: safe
+      red_flag_expected: false
+    known_gap: false
+  - id: GC023
+    description: 长串阴性枚举（否定作用域须覆盖列举尾部——外部评审反例回归）
+    input_text: 患者女，45岁，腰痛1月，无发热、寒战、咳嗽咳痰、头痛头晕、大小便异常、会阴麻木，二便调，夜寐可。
+    expected:
+      top1_syndrome: null
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: safe
+      red_flag_expected: false
+    known_gap: false
+  - id: GC024
+    description: 器官功能正常表述（大小便可——裸词不得作为马尾红旗）
+    input_text: 患者男，50岁，腰痛3天，大小便可，无会阴麻木，无下肢无力，胃纳可，夜寐可。
+    expected:
+      top1_syndrome: null
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: safe
+      red_flag_expected: false
+    known_gap: false

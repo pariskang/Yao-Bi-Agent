@@ -13,8 +13,9 @@ guard and falls back to rules on any violation.
 
 Zero extra dependencies (stdlib ``http.server`` only). The Tao runtime is selected purely
 through environment variables consumed by ``DaoClient`` (``TAO_BACKEND``, ``TAO_MODEL_ID``,
-``TAO_LOAD_IN_4BIT`` …), so the same server runs with mock, an HTTP endpoint, or a local
-``transformers`` model such as ``CMLM/Dao1-30b-a3b``.
+``TAO_LOAD_IN_4BIT`` …), so the same server runs with mock, an OpenAI-compatible endpoint
+(``http`` / hosted ``poe`` / ``azure`` / ``minimax``), or a local ``transformers`` model
+such as ``CMLM/Dao1-30b-a3b``.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from backend.agents.skill_router import suggested_questions
 from backend.agents.yaobi_interview import YaoBiCaseState, YaoBiInterviewEngine
 from backend.audit import get_audit_log, get_counters
 from backend.audit.audit_log import text_digest
-from backend.llm.dao_client import DaoClient, DaoRuntimeError
+from backend.llm.dao_client import OPENAI_COMPAT_BACKENDS, DaoClient, DaoRuntimeError
 from backend.llm.output_guard import filter_patient_payload
 from backend.provenance import get_provenance
 from backend.skills.case_extract_skill import case_extract_skill
@@ -53,7 +54,7 @@ FRONTEND_DIR = ROOT / "frontend"
 
 # Shared, process-wide client (the heavy transformers model is cached on the class).
 CLIENT = DaoClient()
-TAO_ENABLED = CLIENT.config.backend in {"mock", "http", "transformers"}
+TAO_ENABLED = CLIENT.config.backend in {"mock", "transformers"} | OPENAI_COMPAT_BACKENDS
 
 # Map frontend intake stages to FSM states and the fields Tao may hint at (must mirror the
 # allowed fields so a generated probe cannot drive a state jump or invent a new field).
@@ -116,7 +117,12 @@ def _role(data: dict[str, Any]) -> str:
     if expected:
         supplied = str(data.get("clinician_token") or "")
         return "clinician" if hmac.compare_digest(supplied, expected) else "patient"
-    return "clinician"
+    # No token configured: deny by default. A deployment that forgot to set the token
+    # must NOT silently expose clinician content — an unauthenticated clinician demo
+    # is a conscious, explicit opt-in for local research use only.
+    if os.getenv("YAOBI_ALLOW_UNAUTH_CLINICIAN_DEMO") == "1":
+        return "clinician"
+    return "patient"
 
 
 def _clinician_only(data: dict[str, Any]) -> dict[str, Any] | None:
@@ -313,6 +319,14 @@ def handle_interview(data: dict[str, Any]) -> dict[str, Any]:
     override of the safety referral (POST body: ``review_action``, ``physician_notes``,
     ``override_reason``).  Only meaningful when the session is in ``SAFETY_REFERRAL`` state.
     """
+
+    # Physician review actions (confirm / revise / override) change or clear the
+    # safety-referral state — they are clinician-only. Without this gate a patient
+    # could forge review_action=override and resume a red-flag-halted interview.
+    if str(data.get("review_action") or "").strip():
+        denied = _clinician_only(data)
+        if denied:
+            return denied
 
     # A missing session_id gets a server-generated one (returned to the caller) instead of
     # a shared "default" key that would leak state across unrelated clients.

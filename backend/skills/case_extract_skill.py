@@ -28,8 +28,14 @@ KEYWORDS = {
 RED_FLAG_CATEGORY = {
     "外伤": "trauma_fracture_risk", "跌倒": "trauma_fracture_risk", "车祸": "trauma_fracture_risk",
     "高处坠落": "trauma_fracture_risk",
+    # Cauda-equina candidates are *abnormality expressions only* — never the bare
+    # organ/function word: "大小便可"、"二便调" are normal-findings phrasing and must
+    # not even enter the candidate stream.
     "大小便失禁": "cauda_equina_symptoms", "大小便异常": "cauda_equina_symptoms",
-    "大小便": "cauda_equina_symptoms", "会阴麻木": "cauda_equina_symptoms",
+    "大小便障碍": "cauda_equina_symptoms", "大小便控制异常": "cauda_equina_symptoms",
+    "小便失禁": "cauda_equina_symptoms", "大便失禁": "cauda_equina_symptoms",
+    "排尿困难": "cauda_equina_symptoms", "解不出小便": "cauda_equina_symptoms",
+    "会阴麻木": "cauda_equina_symptoms", "会阴区麻木": "cauda_equina_symptoms",
     "鞍区麻木": "cauda_equina_symptoms", "尿不出来": "cauda_equina_symptoms",
     "尿潴留": "cauda_equina_symptoms",
     "发热": "fever_or_infection", "寒战": "fever_or_infection", "感染": "fever_or_infection",

@@ -12,6 +12,8 @@ import importlib
 
 def _server(monkeypatch, backend: str = "mock"):
     monkeypatch.setenv("TAO_BACKEND", backend)
+    # Tests exercise clinician flows without a token: explicit demo opt-in.
+    monkeypatch.setenv("YAOBI_ALLOW_UNAUTH_CLINICIAN_DEMO", "1")
     import backend.server as server_module
 
     return importlib.reload(server_module)
@@ -196,6 +198,7 @@ def test_interview_physician_confirm(monkeypatch):
     _interview(server, "ph_c", "大小便失禁，会阴麻木")      # triggers emergency
     res = server.handle_interview({
         "session_id": "ph_c",
+        "doctor_mode": True,
         "review_action": "confirm",
         "physician_notes": "已联系120，患者正在转运",
     })
@@ -211,6 +214,7 @@ def test_interview_physician_revise(monkeypatch):
     _interview(server, "ph_r", "大小便失禁，会阴麻木")
     res = server.handle_interview({
         "session_id": "ph_r",
+        "doctor_mode": True,
         "review_action": "revise",
         "physician_notes": "建议收住脊柱外科病房，暂不急诊手术",
     })
@@ -260,6 +264,7 @@ def test_interview_physician_override_resumes_fsm(monkeypatch):
     _interview(server, "ph_o", "大小便失禁，会阴麻木")      # triggers emergency
     res = server.handle_interview({
         "session_id": "ph_o",
+        "doctor_mode": True,
         "review_action": "override",
         "override_reason": "患者描述有误，实际无膀胱症状",
     })

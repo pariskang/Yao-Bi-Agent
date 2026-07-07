@@ -199,10 +199,54 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 | **语义自一致性** | 语义熵幻觉检测（Farquhar et al., **Nature** 630, 2024） | `TAO_SELF_CONSISTENCY=N` 多采样→按临床结论实体集聚类→聚类熵+一致率；不稳定结论自动附加复核警示（非阻断，默认关） |
 | **声明级实体接地** | RAG 忠实性/归因（Grounded Attributions ICLR 2025；claim-level grounding） | 会诊文本中每个证型/方剂/药物实体对照本案规则证据核对，输出接地率与"模型自身知识"清单供医师定点复核——透明层而非审查层（`backend/skills/groundedness_skill.py`） |
 
+## 多云模型接入层（v0.8：Poe / Azure OpenAI / MiniMax + 第二轮安全整改）
+
+`TAO_BACKEND` 现支持 7 种运行时：`disabled` / `mock` / `http`（自带 OpenAI 兼容端点）/
+**`poe`** / **`azure`** / **`minimax`** / `transformers`（本地 Dao1）。三个托管后端复用同一
+OpenAI 兼容通道（stdlib `urllib`，零新增依赖），共享重试、超时与"失败即回退确定性规则"纪律：
+
+| 后端 | 必需环境变量 | 可选环境变量（默认值） |
+|---|---|---|
+| `poe` | `POE_API_KEY`（poe.com/api_key） | `POE_MODEL`（Claude-Sonnet-4.5）、`POE_API_BASE`（https://api.poe.com/v1） |
+| `azure` | `AZURE_OPENAI_ENDPOINT`、`AZURE_OPENAI_DEPLOYMENT`、`AZURE_OPENAI_API_KEY` | `AZURE_OPENAI_API_VERSION`（2024-06-01）；鉴权走 `api-key` 头 |
+| `minimax` | `MINIMAX_API_KEY` | `MINIMAX_MODEL`（MiniMax-Text-01）、`MINIMAX_API_BASE`（https://api.minimax.io/v1/text/chatcompletion_v2）；HTTP 200 内的 `base_resp` 应用级错误同样触发规则回退 |
+
+```bash
+# 例：用 Poe 上的 Claude 驱动技能路由与会诊（安全守卫与规则回退不变）
+TAO_BACKEND=poe POE_API_KEY=... python -m backend.server --port 8000
+# 例：Azure OpenAI 部署
+TAO_BACKEND=azure AZURE_OPENAI_ENDPOINT=https://myres.openai.azure.com \
+  AZURE_OPENAI_DEPLOYMENT=gpt-4o AZURE_OPENAI_API_KEY=... python -m backend.server
+# 例：MiniMax
+TAO_BACKEND=minimax MINIMAX_API_KEY=... python -m backend.server
+```
+
+显式设置 `TAO_MODEL_ID` 可覆盖任一托管后端的默认模型；`Dao1` 默认模型 id 绝不会泄漏给托管
+提供商。`TAO_TRUST_REMOTE_CODE=false` 可关闭本地 transformers 后端的远程代码执行（供应链加固）。
+
+v0.8 同步落地第二轮外部评审的 P0/P1 整改：
+
+- **P0 `/api/interview` 医师审核权限**：`review_action`（confirm/revise/override）必须通过服务端
+  医生角色校验——患者伪造 `override` 覆盖红旗急停的漏洞已封堵，且被拒后会话急停状态不变。
+- **P0 医生模式默认拒绝**：未配置 `YAOBI_CLINICIAN_TOKEN` 时 `doctor_mode` 不再默认放行；
+  本地无鉴权 demo 必须显式设置 `YAOBI_ALLOW_UNAUTH_CLINICIAN_DEMO=1`（Colab 启动单元已内置）。
+- **P0 否定语义边界**：复合否定前缀（未出现/未诉/未发现/不伴有…）；否定作用域从固定 12 字窗口
+  扩展到子句尾（转折词 但/但是/不过/然而/随后/出现/现… 仍切断作用域，"无发热，但今晨出现尿潴留"
+  维持 urgent）；裸词"大小便"不再作为马尾红旗候选，仅保留异常表达（失禁/障碍/尿潴留/排尿困难…）。
+  三个评审反例进入金标准回归（GC022–GC024，共 24 例）。
+- **P1 停药/改药请求拦截**：`patient_request_guard` 新增 `medication_change_request` 类别——
+  停药/减量/换药/煎服法问询，以及抗凝药（利伐沙班/华法林/阿司匹林…）+动作词组合，一律引导
+  联系开药医生，不在线作答。
+- **P1 患者端移除 trace**：患者响应白名单不再包含 agent trace（子智能体 observation 是潜在泄漏通道）。
+- **P1 会诊接地硬门槛**：实体接地率低于 `TAO_GROUNDING_MIN`（默认 0.5）时整段模型会诊被拒、
+  回退确定性规则（模型只能扩展解释层，不能独立承载结构化决策）；0.5–0.7 之间强制附加醒目复核
+  警示。接地判定升级为"方剂组成感知"：规则支持的方剂路线，其 `core_module` 组成药同样计为已接地。
+- **P1 前端 XSS**：问诊自由输入/数字输入改 DOM API 构建（杜绝属性注入）；协作时间轴的
+  role/summary/handoff 与 Tao backend 标签全部 `escapeHtml`。
+
 ## 安全与智能体闭环层（v0.7：否定语义、服务端角色边界与批判者闭环）
 
-针对外部智能体评审的 P0/P1 整改（本仓库当前版本；`pyproject.toml` 与 `/api/health` 的
-`app_version` 同步为 0.7.0）：
+针对外部智能体评审的 P0/P1 整改（`app_version` 现随版本推进，见上）：
 
 - **否定语义实体抽取（P0）**：新增 `backend/skills/clinical_entity_skill.py` 统一 polarity
   解析（affirmed / negated / uncertain + 时态 + 来源片段）。"否认外伤、无发热寒战、无大小便
