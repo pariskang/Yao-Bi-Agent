@@ -118,6 +118,35 @@ class AutonomousQAAgent:
             self.history.append(turn)
             return turn
 
+        # Cumulative case memory + red-flag hard gate BEFORE planning (same invariant as
+        # the pipeline / chat paths): an urgent, unexcluded red flag replaces the whole
+        # plan with the emergency screening step — no clinical reasoning subagent runs.
+        state_updates = self.session.absorb_question_facts(question)
+        if (self.session.case_state.get("red_flags") or {}).get("status") == "urgent":
+            observation = self.session.invoke("red_flag_inquiry", question)
+            positives = (self.session.case_state.get("red_flags") or {}).get("positive_items") or []
+            turn = {
+                "question": question, "blocked": False, "red_flag_gated": True,
+                "plan": [{"intent": "red_flag_inquiry", "label": observation["label"], "reason": "红旗未排除，先行急诊/危险信号排查。"}],
+                "plan_method": "red_flag_gate", "state_updates": state_updates,
+                "steps": [{"step": 1, "intent": "red_flag_inquiry", "label": observation["label"],
+                           "reason": "红旗未排除，先行急诊/危险信号排查。", "answer": observation["answer"],
+                           "skills": observation["skills"], "evidence": observation["evidence"],
+                           "used_llm": observation["used_llm"]}],
+                "subagents_used": ["red_flag_inquiry"], "used_llm": observation["used_llm"],
+                "answer": (
+                    "⛔ **红旗危险信号未排除，自主智能体中止辨证与方药规划，仅执行危险信号排查。**\n\n"
+                    + (f"命中线索：{('、'.join(str(p) for p in positives[:6]))}。\n\n" if positives else "")
+                    + observation["answer"]
+                ),
+                "trace": [{"step": 1, "thought": "红旗门控：急诊级危险信号未排除，替换全部计划为红旗排查。",
+                           "action": "red_flag_gate→red_flag_inquiry", "observation": observation["answer"],
+                           "skills": observation["skills"]}],
+                "disclaimer": "红旗未排除前不输出证型、方剂或药物模块；请先完成急诊/线下评估。",
+            }
+            self.history.append(turn)
+            return turn
+
         planned = plan_question(question, max_steps=self.max_steps, use_llm=self.use_llm, dao_client=self.dao_client)
         plan = planned["plan"]
         steps: list[dict[str, Any]] = []
@@ -140,7 +169,7 @@ class AutonomousQAAgent:
             "plan": [{"intent": s["intent"], "label": INTENT_BY_ID.get(s["intent"], {}).get("label", s["intent"]), "reason": s.get("reason", "")} for s in plan],
             "plan_method": planned["method"], "plan_runtime": planned["llm_runtime"],
             "steps": steps, "trace": trace, "subagents_used": subagents,
-            "critique": critique, "agent_loop": loop,
+            "critique": critique, "agent_loop": loop, "state_updates": state_updates,
             "multi_step": len(steps) > 1, "used_llm": used_llm, "answer": answer,
             "disclaimer": "自主智能体仅规划与调用受限技能，回答基于确定性规则与脱敏数据；不构成最终诊断、处方或可执行剂量。",
         }

@@ -26,7 +26,7 @@ modules:
   blood_stasis:
     name: 活血化瘀模块
     herbs: [丹参, 川芎, 桃仁, 红花, 赤芍, 牡丹皮, 郁金, 香附]
-    triggers: [dark_tongue, fixed_pain, sprain, strain, stasis_pattern, stabbing_pain]
+    triggers: [dark_tongue, fixed_pain, strain_or_sprain, stasis_pattern, stabbing_pain]
     role: add_on
     note: 处理劳损、瘀阻、疼痛固定。
   insect_channel:

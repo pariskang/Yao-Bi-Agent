@@ -162,7 +162,7 @@ def uncertainty_markdown(block: dict[str, Any]) -> str:
     conformal = u.get("conformal") or {}
     if conformal.get("prediction_set"):
         lines.append(
-            f"- 共形鉴别集（{conformal.get('target_coverage', 0):.0%} 目标覆盖，不可排除的证型）："
+            f"- 共形候选集（项目内校准，尚不能排除的证型，非诊断概率）："
             f"{'、'.join(conformal['prediction_set'])}。{conformal.get('coverage_note', '')}"
         )
     for gap in u.get("differential_gaps") or []:

@@ -112,10 +112,30 @@ def tao_consultation_skill(
             return {"answer": fallback_text, "source": "deterministic_rules_fallback", "used_llm": False, "tao_runtime": meta}
         if "执业医师" not in text[-160:]:
             text += _DISCLAIMER
-        meta.update({"status": "accepted", "fallback_used": False})
-        # Faithfulness transparency (non-blocking): label which clinical entities are
-        # rule-backed vs model-own-knowledge, so the physician reviews the right spots.
+        # Faithfulness transparency: label which clinical entities are rule-backed vs
+        # model-own-knowledge, so the physician reviews the right spots.
         groundedness = check_groundedness(text, evidence)
+        # Groundedness floor (blocking in exactly one situation): when the rule engine
+        # offered *no* syndrome candidate and *no* formula route, the model must abstain,
+        # not fill the gap with default TCM content. A formula/syndrome entity that the
+        # user did not mention and no rule backs is treated as confabulation and the
+        # answer falls back to the deterministic abstain text. Teaching questions that
+        # name the formula themselves ("独活寄生汤的方义?") stay answerable.
+        has_rule_basis = bool((evidence.get("syndrome_candidates") or []) or (evidence.get("formula_routes") or []))
+        if not has_rule_basis:
+            invented = [
+                name
+                for kind in ("formula", "syndrome")
+                for name in (groundedness.get("ungrounded") or {}).get(kind, [])
+                if name not in question
+            ]
+            if invented:
+                meta.update({"status": "ungrounded_no_rule_basis", "ungrounded_entities": invented[:6]})
+                return {
+                    "answer": fallback_text, "source": "deterministic_rules_fallback", "used_llm": False,
+                    "tao_runtime": meta, "groundedness": groundedness,
+                }
+        meta.update({"status": "accepted", "fallback_used": False})
         consistency = _semantic_consistency(
             client, {"question": question, "scope": scope, "evidence": evidence, "user_role": user_role}, text,
         )

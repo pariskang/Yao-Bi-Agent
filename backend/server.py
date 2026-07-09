@@ -46,6 +46,7 @@ from backend.provenance import get_provenance
 from backend.skills.case_extract_skill import case_extract_skill
 from backend.skills.case_normalize_skill import case_normalize_skill
 from backend.skills.mined_evidence_skill import load_mined_rules
+from backend.skills.safety_guard_skill import safety_guard_skill
 from backend.skills.tao_followup_probe_skill import tao_followup_probe_skill
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -99,35 +100,81 @@ def _case_state(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _role(data: dict[str, Any]) -> str:
+# Host the HTTP server is actually bound to (set by make_server). None means the
+# handlers are being driven directly as a library / in tests — no network exposure.
+_SERVER_BIND_HOST: str | None = None
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _publicly_bound() -> bool:
+    return _SERVER_BIND_HOST is not None and _SERVER_BIND_HOST not in _LOOPBACK_HOSTS
+
+
+def _resolve_role(data: dict[str, Any]) -> tuple[str, str]:
     """Server-side role resolution — the client may *request* clinician mode, never grant it.
 
     Least privilege: the default role is ``patient``. A request only becomes
-    ``clinician`` when it explicitly asks for doctor mode **and** — if the deployment
-    configured ``YAOBI_CLINICIAN_TOKEN`` — presents that token (body field
-    ``clinician_token`` or ``X-Clinician-Token`` header, injected by the handler).
-    Without a configured token (local research demo) the explicit request is honored,
-    but production deployments must set the token so the role is a server decision.
+    ``clinician`` when it explicitly asks for doctor mode **and**:
+
+    * a configured ``YAOBI_CLINICIAN_TOKEN`` is presented (body field
+      ``clinician_token`` or ``X-Clinician-Token`` header, injected by the handler), or
+    * no token is configured **and** the server is not bound to a public interface
+      (local research demo / direct library use only).
+
+    A publicly bound server (e.g. ``0.0.0.0`` behind Colab + ngrok) with no token
+    configured therefore *cannot* grant clinician mode at all — forgetting to set the
+    token locks the clinician surface instead of opening it to the internet.
+
+    Returns ``(role, source)`` where source records how the decision was made,
+    for the audit trail: ``default_patient`` / ``token_verified`` / ``token_mismatch``
+    / ``local_demo`` / ``public_no_token_denied``.
     """
 
     if not data.get("doctor_mode"):
-        return "patient"
+        return "patient", "default_patient"
     expected = os.getenv("YAOBI_CLINICIAN_TOKEN") or ""
     if expected:
         supplied = str(data.get("clinician_token") or "")
-        return "clinician" if hmac.compare_digest(supplied, expected) else "patient"
-    return "clinician"
+        if hmac.compare_digest(supplied, expected):
+            return "clinician", "token_verified"
+        return "patient", "token_mismatch"
+    if _publicly_bound():
+        return "patient", "public_no_token_denied"
+    return "clinician", "local_demo"
+
+
+def _role(data: dict[str, Any]) -> str:
+    return _resolve_role(data)[0]
 
 
 def _clinician_only(data: dict[str, Any]) -> dict[str, Any] | None:
     """Deny clinician-draft endpoints to non-clinician callers (server-side RBAC)."""
 
-    if _role(data) != "clinician":
-        return {
-            "error": "clinician_role_required",
-            "message": "该端点仅面向执业医师端。患者端请使用问诊、危险信号自查与健康教育功能。",
-        }
+    role, source = _resolve_role(data)
+    if role != "clinician":
+        message = "该端点仅面向执业医师端。患者端请使用问诊、危险信号自查与健康教育功能。"
+        if source == "public_no_token_denied":
+            message = (
+                "医生端已锁定：服务器绑定在公网地址且未配置 YAOBI_CLINICIAN_TOKEN。"
+                "请在部署环境设置该令牌后，医生端携带 X-Clinician-Token 头访问。"
+            )
+        elif source == "token_mismatch":
+            message = "医生端令牌校验失败，请携带正确的 X-Clinician-Token 头（或 clinician_token 字段）。"
+        return {"error": "clinician_role_required", "role_source": source, "message": message}
     return None
+
+
+# Red-flag status severity order for escalate-only merging: a client-declared or
+# previously graded status may be *raised* by newly extracted findings, never lowered.
+_RED_FLAG_SEVERITY = {None: 0, "": 0, "unknown": 0, "safe": 1, "caution": 2, "urgent": 3}
+
+
+def _escalate_status(current: str | None, graded: str | None) -> str | None:
+    # A graded "safe" is not an escalation and must not overwrite None (= not yet
+    # screened): one free-text question finding nothing is not a completed screen.
+    if graded in {"caution", "urgent"} and _RED_FLAG_SEVERITY.get(graded, 0) > _RED_FLAG_SEVERITY.get(current, 0):
+        return graded
+    return current
 
 
 def _enrich_with_question(data: dict[str, Any], question: str) -> dict[str, Any]:
@@ -136,6 +183,12 @@ def _enrich_with_question(data: dict[str, Any], question: str) -> dict[str, Any]
     This lets the chat answer a typed clinical description (e.g. "腰痛、下肢麻木、遇冷加重、
     舌暗苔白腻") with real rule-engine candidates, instead of only the questionnaire tags.
     Extraction stays deterministic; the language model still only selects which skill runs.
+
+    Red flags found in the free text go through the *same* category-tiered grader as the
+    pipeline (``safety_guard_skill``), not a flat "caution" default: typing 会阴麻木/尿不出来
+    must grade urgent here exactly as it would in the intake flow, because the downstream
+    red-flag gates key off ``red_flags.status``. Grading is escalate-only — it can raise a
+    client-declared status, never lower it.
     """
 
     merged = dict(data)
@@ -144,10 +197,15 @@ def _enrich_with_question(data: dict[str, Any], question: str) -> dict[str, Any]
         extracted = case_normalize_skill(case_json).get("normalized_tags") or []
         merged["tags"] = sorted(set(data.get("tags") or []) | set(extracted))
         red = dict(data.get("red_flags") or {})
-        rf_items = list(red.get("positive_items") or []) + list(case_json.get("red_flags") or [])
+        graded = safety_guard_skill(case_json, None, merged["tags"])
+        confirmed_terms = [f.get("term") or f.get("id") for f in graded.get("confirmed_red_flags") or []]
+        rf_items = list(red.get("positive_items") or []) + [t for t in confirmed_terms if t]
         if rf_items:
             red["positive_items"] = sorted(set(rf_items))
-            red.setdefault("status", "caution")
+        red["status"] = _escalate_status(red.get("status"), graded.get("safety_status"))
+        red["need_further_inquiry"] = sorted(
+            set(red.get("need_further_inquiry") or []) | set(graded.get("need_further_inquiry") or [])
+        )
         merged["red_flags"] = red
     except Exception:
         pass  # never let extraction break the request; fall back to provided tags
@@ -172,6 +230,9 @@ def _decision_summary(path: str, data: dict[str, Any], result: dict[str, Any]) -
             "answer_source": turn.get("answer_source"),
             "blocked": turn.get("intent") == "safety_block",
             "question": text_digest(str(data.get("question") or "")),
+            # Role provenance: token_verified / local_demo / token_mismatch / …
+            "role": result.get("role"),
+            "role_source": result.get("role_source"),
         }
         consult = turn.get("consult_runtime") or {}
         if consult.get("fallback_used"):
@@ -226,26 +287,26 @@ def handle_chat(data: dict[str, Any]) -> dict[str, Any]:
     question = str(data.get("question") or "").strip()
     if not question:
         return {"error": "empty question"}
-    role = _role(data)
+    role, role_source = _resolve_role(data)
     session = ConversationSession(case_state=_case_state(_enrich_with_question(data, question)), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=role)
     turn = session.ask(question)
     if role == "patient":
         # Strict allowlist view: patient responses expose only whitelisted fields and
         # a re-guarded answer text (see output_guard.filter_patient_payload).
         turn = filter_patient_payload(turn)
-    return {"turn": turn, "role": role, "tao": tao_info()}
+    return {"turn": turn, "role": role, "role_source": role_source, "tao": tao_info()}
 
 
 def handle_autonomous(data: dict[str, Any]) -> dict[str, Any]:
     question = str(data.get("question") or "").strip()
     if not question:
         return {"error": "empty question"}
-    role = _role(data)
+    role, role_source = _resolve_role(data)
     agent = AutonomousQAAgent(case_state=_case_state(_enrich_with_question(data, question)), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=role)
     turn = agent.run(question)
     if role == "patient":
         turn = filter_patient_payload(turn)
-    return {"turn": turn, "role": role, "tao": tao_info()}
+    return {"turn": turn, "role": role, "role_source": role_source, "tao": tao_info()}
 
 
 def handle_followup_probe(data: dict[str, Any]) -> dict[str, Any]:
@@ -582,6 +643,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 def make_server(port: int = 8000, host: str = "0.0.0.0") -> http.server.ThreadingHTTPServer:
+    # Record the bind host for role resolution: a publicly bound server without a
+    # configured YAOBI_CLINICIAN_TOKEN must never grant clinician mode (see _resolve_role).
+    global _SERVER_BIND_HOST
+    _SERVER_BIND_HOST = host
+    if _publicly_bound() and not os.getenv("YAOBI_CLINICIAN_TOKEN"):
+        print(
+            "[yaobi-server] WARNING: 服务器绑定公网地址但未配置 YAOBI_CLINICIAN_TOKEN——"
+            "医生端已锁定为患者视图。公网演示需要医生端时请设置该令牌。",
+            file=sys.stderr, flush=True,
+        )
     # allow_reuse_address (SO_REUSEADDR) is already set on the base class; being explicit makes
     # a quick restart (e.g. re-running the Colab launch cell) reuse the port instead of failing
     # with "Address already in use" and leaving nothing listening → Connection refused.

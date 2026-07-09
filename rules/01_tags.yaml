@@ -99,3 +99,31 @@ tags:
     aliases: [下肢沉重, 肢体困重, 身重, 双腿沉重]
   night_pain:
     aliases: [夜间痛, 夜里痛明显, 夜痛]
+  young_patient:
+    description: 年龄40岁及以下（由年龄字段计算，无文本别名）
+  qi_deficiency:
+    aliases: [气虚, 气短, 少气懒言, 动则气短]
+  limb_weakness:
+    aliases: [下肢无力, 肢体无力, 腿软, 双腿无力, 抬腿无力]
+  joint_stiffness:
+    aliases: [关节僵硬, 晨僵, 屈伸不利, 转侧不利, 腰部僵硬]
+  spasm_pain:
+    aliases: [痉挛痛, 拘挛, 筋挛, 抽掣痛, 抽筋]
+  muscle_tension:
+    aliases: [肌肉紧张, 腰肌紧张, 板状腰, 肌紧张]
+  dampness:
+    aliases: [湿重, 大便黏, 便溏, 头身困重]
+  wind_damp_obstruction:
+    aliases: [风湿痹阻, 风寒湿痹, 游走痛, 游走性疼痛]
+  chronic_channel_obstruction:
+    aliases: [久痹, 顽痹, 络脉瘀阻, 久病入络]
+  refractory_pain:
+    aliases: [顽固疼痛, 顽固性疼痛, 久治不愈, 屡治不效]
+  severe_numbness:
+    aliases: [麻木明显, 麻木严重, 麻木加重]
+  phlegm_heat:
+    aliases: [痰热, 痰黄, 咳黄痰]
+  irritability:
+    aliases: [烦躁, 易怒, 心烦]
+  restlessness:
+    aliases: [烦躁不安, 坐卧不安, 夜卧不安]

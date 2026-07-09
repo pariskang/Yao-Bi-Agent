@@ -14,6 +14,8 @@ from backend.agents.orchestrator import AgentOrchestrator
 from backend.agents.skill_router import INTENT_BY_ID, INTENTS, route_intent, suggested_questions
 from backend.llm.dao_client import DaoClient
 from backend.skills.case_experience_summary_skill import case_experience_summary_skill
+from backend.skills.case_extract_skill import case_extract_skill
+from backend.skills.case_normalize_skill import case_normalize_skill
 from backend.skills.conflict_checker_skill import conflict_checker_skill
 from backend.skills.formula_base_selector_skill import formula_base_selector_skill
 from backend.skills.herb_module_composer_skill import herb_module_composer_skill
@@ -58,6 +60,17 @@ PATIENT_SCOPE_ANSWER = (
     "- **健康教育**：避免久坐与腰部受凉，急性期减少负重活动。\n\n"
     "> 本系统为研究原型，不能替代医生诊疗。"
 )
+
+# Case-directed clinical reasoning intents that the red-flag gate suspends while the
+# case's red-flag status is "urgent". Dataset-level statistics (mining_inquiry) and the
+# safety / red-flag / meta intents stay available — they are what an urgent case needs.
+RED_FLAG_GATED_INTENTS = {
+    "syndrome_inquiry", "formula_inquiry", "herb_inquiry", "reasoning_inquiry",
+    "experience_inquiry", "evidence_inquiry", "dose_inquiry",
+}
+
+# Escalate-only severity order for merging red-flag status across turns.
+_RED_FLAG_SEVERITY = {None: 0, "": 0, "unknown": 0, "safe": 1, "caution": 2, "urgent": 3}
 
 
 def query_mined(question: str, mined: dict[str, Any]) -> dict[str, Any]:
@@ -117,6 +130,77 @@ class ConversationSession:
         self.user_role = user_role
         self.history: list[dict[str, Any]] = []
         self._mined = load_mined_rules()
+
+    # -- multi-turn case memory --------------------------------------------
+
+    def absorb_question_facts(self, question: str) -> dict[str, Any] | None:
+        """Fold clinical facts stated in this turn into the shared case state.
+
+        Multi-turn reasoning must be cumulative: newly stated tags merge into
+        ``normalized_tags`` and newly stated red flags re-grade the safety status
+        through the same category-tiered grader as the pipeline (escalate-only —
+        a stated urgent finding is never downgraded by a later benign turn).
+        Returns the per-turn state diff (or None when extraction fails).
+        """
+
+        try:
+            case_json = case_extract_skill(question)
+            normalized = case_normalize_skill(case_json)
+        except Exception:
+            return None
+        old_tags = set(self.case_state.get("normalized_tags") or [])
+        new_tags = set(normalized.get("normalized_tags") or [])
+        added_tags = sorted(new_tags - old_tags)
+        merged_tags = sorted(old_tags | new_tags)
+        self.case_state["normalized_tags"] = merged_tags
+
+        red = dict(self.case_state.get("red_flags") or {})
+        graded = safety_guard_skill(case_json, None, merged_tags)
+        confirmed_terms = [f.get("term") or f.get("id") for f in graded.get("confirmed_red_flags") or []]
+        items = set(red.get("positive_items") or []) | {t for t in confirmed_terms if t}
+        old_status = red.get("status")
+        graded_status = graded.get("safety_status")
+        # Escalate-only; a graded "safe" never overwrites None (= not yet screened).
+        if graded_status in {"caution", "urgent"} and _RED_FLAG_SEVERITY.get(graded_status, 0) > _RED_FLAG_SEVERITY.get(old_status, 0):
+            red["status"] = graded_status
+        if items:
+            red["positive_items"] = sorted(items)
+        self.case_state["red_flags"] = red
+
+        changed = bool(added_tags) or red.get("status") != old_status
+        version = int(self.case_state.get("state_version") or 0) + (1 if changed else 0)
+        self.case_state["state_version"] = version
+        return {
+            "state_version": version,
+            "added_tags": added_tags,
+            "red_flag_status": red.get("status"),
+            "red_flag_escalated": red.get("status") != old_status,
+        }
+
+    # -- red-flag gate -------------------------------------------------------
+
+    def _red_flag_gate(self, intent: str) -> dict[str, Any] | None:
+        """Global invariant: while red-flag status is urgent, case-directed clinical
+        reasoning is suspended on every entry path — only the referral notice answers."""
+
+        if intent not in RED_FLAG_GATED_INTENTS:
+            return None
+        red = self.case_state.get("red_flags") or {}
+        if red.get("status") != "urgent":
+            return None
+        positives = red.get("positive_items") or []
+        answer = (
+            "⛔ **红旗危险信号未排除，暂停辨证与方药分析。**\n\n"
+            + (f"命中线索：{('、'.join(str(p) for p in positives[:6]))}。\n\n" if positives else "")
+            + "当前病例存在急诊级危险信号（如马尾综合征、进行性神经损害、感染征象等），"
+            "正确顺序是先完成急诊/线下评估排除严重病变，再进行中医辨证与方药讨论。\n\n"
+            "- 患者请立即线下就医或急诊评估；\n"
+            "- 医师请先完成查体、影像与必要实验室检查；红旗排除后可重新提交病例继续分析。"
+        )
+        return {
+            "answer": answer, "evidence": list(positives), "skills": ["red_flag_gate"],
+            "used_llm": False, "red_flag_gated": True,
+        }
 
     # -- skill handlers (autonomously invoked after routing) --------------
 
@@ -292,6 +376,11 @@ class ConversationSession:
                 "answer": PATIENT_SCOPE_ANSWER, "evidence": [], "skills": ["patient_scope_guard"],
                 "used_llm": False, "intent_redirected": True,
             }
+        # Red-flag hard gate precedes every clinical handler (all roles): urgent means
+        # emergency referral first, syndrome/formula/herb reasoning suspended.
+        gated = self._red_flag_gate(intent)
+        if gated is not None:
+            return gated
         handlers = {
             "syndrome_inquiry": self._h_syndrome, "formula_inquiry": self._h_formula,
             "herb_inquiry": self._h_herb, "safety_inquiry": self._h_safety,
@@ -334,6 +423,9 @@ class ConversationSession:
         return suggested_questions()
 
     def ask(self, question: str) -> dict[str, Any]:
+        # Cumulative case memory: facts stated this turn update the shared state
+        # *before* routing, so the red-flag gate sees newly declared danger signs.
+        state_updates = self.absorb_question_facts(question)
         routing = route_intent(question, use_llm=self.use_llm, dao_client=self.dao_client, user_role=self.user_role)
         if routing["blocked"]:
             answer = routing["guard"]["message"]
@@ -358,6 +450,7 @@ class ConversationSession:
             "answer_source": result.get("consult_source", "deterministic_rules"), "consult_runtime": result.get("tao_runtime"),
             "groundedness": result.get("groundedness"), "semantic_consistency": result.get("semantic_consistency"),
             "matched_keywords": routing.get("matched_keywords", []),
+            "state_updates": state_updates, "red_flag_gated": bool(result.get("red_flag_gated")),
             "suggested_followups": followups,
             "disclaimer": "语言模型结合沈氏经验规则与脱敏挖掘数据进行辨证论治分析（供执业医师审核）；患者端不提供最终诊断、完整处方或可执行剂量。",
         }

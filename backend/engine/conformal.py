@@ -132,11 +132,12 @@ def conformal_prediction_set(
         top_score = max(float(c.get("score") or 0) for c in candidates) or 1.0
         names = [c["name"] for c in candidates if 1.0 - (float(c.get("score") or 0) / top_score) <= q_hat]
     note = (
-        f"目标覆盖率 {cal['target_coverage']:.0%}（校准集 n={cal['calibration_n']}，小样本下集合偏保守；"
-        "覆盖保证是边际的，且相对于项目内标注分布）"
+        f"项目内校准的候选证型集合（校准集 n={cal['calibration_n']}）：提示在当前规则打分下尚不能排除的证型；"
+        f"目标覆盖率 {cal['target_coverage']:.0%} 仅相对项目内标注分布按边际意义成立，小样本下集合偏保守，"
+        "不代表真实临床人群的诊断概率，不构成统计学意义上的临床正确性保证"
     )
     if cal.get("trivial"):
-        note += "；校准样本过少，本集合退化为全部候选（保证仍成立但无排除力）"
+        note += "；校准样本过少，本集合退化为全部候选（无排除力）"
     return {
         "prediction_set": names,
         "set_size": len(names),

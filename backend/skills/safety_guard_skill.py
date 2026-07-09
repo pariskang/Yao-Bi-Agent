@@ -41,6 +41,26 @@ _EMERGENCY_CATEGORIES = {"cauda_equina_symptoms", "progressive_weakness", "fever
 # Trauma is urgent only against a fragility background; otherwise caution.
 _FRAGILITY_TAGS = {"osteoporosis", "elderly", "very_elderly"}
 
+# Categories that hard-halt TCM reasoning entirely (emergency referral is the only
+# valid output). Contextual-urgent flags (e.g. fragility trauma) still mark the case
+# urgent but leave the retrospective clinician-review analysis available.
+EMERGENCY_HALT_CATEGORIES = frozenset(_EMERGENCY_CATEGORIES)
+
+
+def emergency_halt_required(safety: dict[str, Any]) -> bool:
+    """True when confirmed red flags demand an emergency halt of the clinical chain.
+
+    This is the single gate predicate every entry path shares (pipeline, chat,
+    autonomous agent, orchestrator): an urgent status caused by an always-emergency
+    category (cauda equina / progressive weakness / infection) means no syndrome,
+    formula or herb output may be produced — only the referral notice.
+    """
+
+    if safety.get("safety_status") != "urgent":
+        return False
+    categories = {flag.get("category") for flag in safety.get("confirmed_red_flags") or []}
+    return bool(categories & EMERGENCY_HALT_CATEGORIES)
+
 
 def _term_category(term: str) -> str | None:
     for key, category in RED_FLAG_CATEGORY.items():

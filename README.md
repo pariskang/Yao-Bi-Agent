@@ -59,7 +59,7 @@ TAO_BACKEND=transformers TAO_MAX_NEW_TOKENS=512 python -m backend.main --tao-cha
 
 ## 本地 / 服务器运行（真·Tao 在环 UI）
 
-`backend/server.py` 是一个零额外依赖（stdlib `http.server`）的 HTTP 服务，**同源提供前端 UI 与 `/api/*` 接口**。前端不再用浏览器端关键词规则模拟，而是调用后端，让语言模型**真正自主选择并调用 skill、自主问诊、并作为主推理者给出深度专业回答**：语言模型把候选证型/方剂/用药/安全等规则证据作为依据，结合自身中医知识输出长篇辨证论治分析（`tao_consultation_skill` + `generate_consultation`），追问由模型自主生成（`generate_probe_questions`）。安全采用**角色感知守卫** `guard_consultation`：医师/科研草案可含方剂、方义与经验剂量范围，但任何角色都不得出现"患者自行服用/无需就医"，患者角色保持严格（无诊断/处方/可执行剂量），违规即回退确定性规则。
+`backend/server.py` 是一个零额外依赖（stdlib `http.server`）的 HTTP 服务，**同源提供前端 UI 与 `/api/*` 接口**。前端不再用浏览器端关键词规则模拟，而是调用后端，让语言模型**真正自主选择并调用 skill、自主问诊、并作为主推理者给出深度专业回答**：语言模型把候选证型/方剂/用药/安全等规则证据作为依据，结合自身中医知识输出长篇辨证论治分析（`tao_consultation_skill` + `generate_consultation`），追问由模型自主生成（`generate_probe_questions`）。安全采用**角色感知守卫** `guard_consultation`：医师/科研草案可含候选方剂、方义与经验剂量范围，但与 `guard_clinician_draft` 完全同级——最终诊断断言、完整处方、可执行服法（水煎服/一日X次）与"患者自行服用/无需就医"一律拦截；患者角色保持严格底线（无诊断/处方/可执行剂量），违规即回退确定性规则。规则证据为空时模型必须弃权追问，不得以默认证型/方剂补齐（接地性下限，`tao_consultation_skill`）。
 
 ```bash
 pip install -e .
@@ -215,7 +215,11 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 - **服务端角色边界（P0）**：角色由服务端裁决，默认 `patient`（最小权限）。部署设置
   `YAOBI_CLINICIAN_TOKEN` 后，医生端必须携带 `X-Clinician-Token` 头（或 `clinician_token`
   字段）才能获得 clinician 角色；`/api/reasoning`、`/api/summary`、`/api/collaboration`、
-  `/api/feedback` 对非医生角色直接拒绝。
+  `/api/feedback` 对非医生角色直接拒绝。v0.8 起进一步收紧：服务器绑定公网地址
+  （如 `0.0.0.0`、Colab + ngrok）而未配置 `YAOBI_CLINICIAN_TOKEN` 时，`doctor_mode`
+  请求一律降级为 `patient`（医生端锁定而非敞开）；免 token 的医生模式仅限回环地址
+  本地演示与库内直调，角色来源（token_verified / local_demo / public_no_token_denied /
+  token_mismatch）随审计记录。
 - **患者端白名单输出（P0）**：患者响应经 `filter_patient_payload` 白名单过滤——仅暴露教育/
   就医建议字段，`medication_advice`/`clinician_draft` 恒为 null，答案文本二次过守卫，违规即
   替换为安全话术；证型/方药/剂量类 intent 在患者角色下于技能执行前即被重定向为健康教育。
@@ -236,6 +240,45 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 **定位声明：本项目是"中医腰痹智能问诊/辨证辅助研究原型"，不是可上线的临床诊疗系统；全部输出
 为供执业医师审核的研究/教学草案，当前评估基于小规模内部标注集，尚未经独立专家盲评与真实
 临床验证，不可替代医生诊疗。**
+
+## 安全治理加固层（v0.8：守卫同级、全局红旗门控与规则一致性）
+
+针对第二轮外部深度评审的 P0/P1 整改（`pyproject.toml` 与 `/api/health` 的 `app_version`
+同步为 0.8.0；整改逐条对照见 [`docs/code_review_response_2026-07.md`](docs/code_review_response_2026-07.md)）：
+
+- **医生端会诊守卫同级（P0）**：`guard_consultation` 对 clinician/researcher 角色直接委托
+  `guard_clinician_draft`——最终诊断断言、完整处方、可执行服法与患者自行用药措辞在"模型为主
+  推理者"的最宽出口上同样被拦；断言类诊断模式改为精确匹配（"最终诊断："/"确诊为"），
+  不再误伤"最终诊断与处方须医师面诊后确定"这类合规提示与"完善影像以明确诊断"这类建议。
+- **公网医生模式强制 token（P0）**：见上节角色边界；未配置 token 的公网部署医生端锁定，
+  启动时打印告警，角色来源进入审计。
+- **红旗急诊硬门控全局前置（P0）**：`safety_guard_skill.emergency_halt_required` 成为所有
+  入口共享的门控谓词——`run_case_pipeline` 在证候/方剂/药物模块**之前**先做红旗分级，确认
+  马尾/进行性无力/感染类急诊红旗即硬中止（仅输出急诊转诊报告，不调用模型）；`ConversationSession`
+  对证型/方剂/用药/推理/经验/剂量/证据类 intent 在 `red_flags.status == urgent` 时统一返回
+  转诊提示；自主智能体在规划前即以红旗排查替换全部计划。脆性外伤等情境性 urgent 保持
+  "标记 urgent + 保留医师复盘分析"（与金标准 GC012 一致）。
+- **自由文本红旗统一分级（P0）**：`/api/chat`、`/api/autonomous` 的问题文本红旗不再一律记
+  "caution"，而是走与管线相同的类别分层分级器（`safety_guard_skill`），"会阴麻木、尿不出来"
+  即刻 urgent 并触发门控；状态合并只升不降（escalate-only），良性文本不会凭一句话把
+  "未筛查"伪装成"safe"。
+- **规则一致性 lint + 死标签转正（P0）**：新增 `tests/test_rule_lint.py` 作为 CI 门——
+  证候/方剂/模块规则引用的每个标签必须在 `rules/01_tags.yaml` 注册（可从文本抽取）或属于
+  声明的证候派生标签（`formula_base_selector_skill.SYNDROME_DERIVED_TAGS`）。本轮共转正
+  17 个此前永不命中的死标签（qi_deficiency / limb_weakness / joint_stiffness / spasm_pain /
+  dampness / wind_damp_obstruction / refractory_pain / severe_numbness / phlegm_heat 等补齐
+  别名；cold_damp_obstruction / stasis_pattern 由证候候选派生；模块规则中的 sprain/strain
+  归并为注册标签 strain_or_sprain）。
+- **会诊接地性下限（P1）**：规则证据（候选证型+方剂路线）为空时，模型会诊必须弃权并追问
+  缺失四诊信息——mock 后端如此实现，真实后端由 `tao_consultation_skill` 强制：无规则依据且
+  文中出现提问者未提及的证型/方剂实体时，整段降级回确定性规则回答
+  （`tao_runtime.status = ungrounded_no_rule_basis`）；教学性提问中用户自己点名的方剂不受影响。
+- **多轮病例记忆（P1）**：`ConversationSession.absorb_question_facts` 把每轮陈述的临床事实
+  累积进共享 case_state（标签合并 + 红旗 escalate-only 重分级 + `state_version` 递增），
+  每轮返回 `state_updates` 状态差异；后续轮次的辨证基于累计状态而非单轮文本。
+- **共形预测表述校准（P1）**：报告与提示中的共形集合改述为"项目内校准的候选证型集合
+  （提示哪些证型尚不能排除）"，明确目标覆盖率仅相对项目内标注分布按边际意义成立，
+  不代表真实临床人群的诊断概率。
 
 ## CDSS 草案模块
 
