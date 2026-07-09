@@ -545,11 +545,36 @@ class DaoClient:
         modules = ev.get("herb_modules") or []
         tags = ev.get("normalized_tags") or []
         safety = ev.get("safety") or {}
-        top = (syns[0].get("name") or syns[0].get("pattern")) if syns else "气血痹阻、筋脉失养"
-        alt = "、".join((s.get("name") or s.get("pattern") or "") for s in syns[1:3]) or "寒湿痹阻、肝肾不足"
-        route = (routes[0].get("name") if routes else None) or "独活寄生汤加减"
-        mods = "、".join(m.get("name", "") for m in modules[:4]) or "祛风湿通络、益气养血、补益肝肾"
         clue = "、".join(tags[:8]) or "待四诊补充"
+        # Abstain instead of confabulating: with no rule-backed syndrome candidate and no
+        # formula route in the evidence bundle, the consultation must not fill the gap
+        # with default TCM content ("气血痹阻"/"独活寄生汤") — it asks for the missing
+        # four-diagnosis facts instead. Real backends are held to the same contract by
+        # tao_consultation_skill's groundedness downgrade.
+        if not syns and not routes:
+            return (
+                f"# 腰痹病案分析（{scope} · 供执业医师审核）\n\n"
+                f"## 证据不足，暂不给出证型与方剂路线\n"
+                f"就所述「{question[:80]}」，当前病例线索（{clue}）不足以在规则证据下形成任何证型倾向或方剂路线；"
+                "为避免无依据推断，本轮不提出具体证型、方剂或药物模块。\n\n"
+                "## 建议补充的关键信息\n"
+                "- 疼痛性质（酸/刺/胀/冷痛）、部位与放射情况，加重与缓解因素（遇冷/劳累/夜间）；\n"
+                "- 舌象（舌色、苔质）与脉象；\n"
+                "- 病程、既往诊断与影像资料；纳眠、二便与合并病用药。\n\n"
+                f"## 安全提示\n安全状态参考：{safety.get('status', '待评估')}。"
+                "如出现大小便异常、会阴麻木、进行性无力、发热寒战、外伤后剧痛等红旗信号，请先急诊/线下评估。\n\n"
+                "> 本分析为供执业医师审核的研究 / 教学草案，最终诊断与处方须医师面诊后确定，患者不可据此自行用药。"
+            )
+        top = (syns[0].get("name") or syns[0].get("pattern")) if syns else "（规则证据未给出证型候选，待医师判定）"
+        alt = "、".join(filter(None, ((s.get("name") or s.get("pattern") or "") for s in syns[1:3]))) or "（无次选）"
+        route = routes[0].get("name") if routes else None
+        route_line = (
+            f"可考虑「{route}」为底化裁：其组方思路与本案病机相合，具体药味取舍、"
+            f"配伍比例与随证加减须医师按面诊所见审定。"
+            if route
+            else "规则证据未给出稳定方剂路线，本轮不提出具体方剂；建议补充关键证候变量后由医师判定。"
+        )
+        mods = "、".join(m.get("name", "") for m in modules[:4]) or "（无匹配模块，待医师补充）"
         return (
             f"# 腰痹病案分析（{scope} · 结合沈钦荣经验 · 供执业医师审核）\n\n"
             f"## 一、四诊辨析与病机\n"
@@ -560,11 +585,7 @@ class DaoClient:
             f"主证倾向「{top}」；次选可虑「{alt}」。辨证依据：上述症舌脉与既往史的相互印证，"
             f"以及沈老“益气养血、温通经络、顾护肝肾脾胃”之经验思路。\n\n"
             f"## 三、治法\n以益气养血、温经通络为主，兼顾活血化瘀、补益肝肾，标本同治。\n\n"
-            f"## 四、选方与方义\n"
-            f"可考虑「{route}」为底化裁：方中独活、桑寄生祛风湿、补肝肾为君；"
-            f"细辛、桂枝温经散寒，当归、川芎养血活血为臣；佐以杜仲、牛膝强筋骨、引药下行；"
-            f"使以炙甘草调和诸药。随证加减：瘀重酌加活血通络之品，寒甚增温阳散寒，"
-            f"麻木掣痛可虑虫类搜剔（需医师审核）。\n\n"
+            f"## 四、选方与方义\n{route_line}\n\n"
             f"## 五、用药功效模块与经验剂量范围\n"
             f"涉及模块：{mods}。各药经验用量区间需由医师按体质、合并病与耐受审定，此处不作患者可执行医嘱。\n\n"
             f"## 六、安全、鉴别与随访\n"

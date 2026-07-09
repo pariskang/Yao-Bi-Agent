@@ -10,7 +10,7 @@ from backend.skills.case_normalize_skill import case_normalize_skill
 from backend.skills.conflict_checker_skill import conflict_checker_skill
 from backend.skills.formula_base_selector_skill import formula_base_selector_skill
 from backend.skills.herb_module_composer_skill import herb_module_composer_skill
-from backend.skills.safety_guard_skill import safety_guard_skill
+from backend.skills.safety_guard_skill import emergency_halt_required, safety_guard_skill
 from backend.skills.syndrome_router_skill import syndrome_router_skill
 from backend.skills.tao_report_generation_skill import tao_report_generation_skill
 from backend.skills.uncertainty_skill import uncertainty_skill
@@ -19,6 +19,17 @@ from backend.skills.uncertainty_skill import uncertainty_skill
 def run_case_pipeline(raw_text: str, use_llm: bool = False, dao_client: DaoClient | None = None) -> dict[str, Any]:
     case_json = case_extract_skill(raw_text)
     normalized = case_normalize_skill(case_json)
+
+    # Red-flag gate BEFORE any TCM reasoning (global invariant, mirrored by the chat /
+    # autonomous / orchestrator entry paths): confirmed emergency-category red flags
+    # (cauda equina, progressive weakness, infection) hard-halt the clinical chain — no
+    # syndrome, formula or herb output is produced, only the emergency referral report.
+    # Contextual-urgent flags (e.g. fragility trauma) keep the case marked urgent while
+    # the retrospective clinician-review analysis continues.
+    gate_safety = safety_guard_skill(case_json, None, normalized["normalized_tags"])
+    if emergency_halt_required(gate_safety):
+        return _halted_result(case_json, normalized, gate_safety, use_llm=use_llm, dao_client=dao_client)
+
     routed = syndrome_router_skill(normalized["normalized_tags"])
     formula = formula_base_selector_skill(normalized["normalized_tags"], routed["syndrome_candidates"])
     modules = herb_module_composer_skill(normalized["normalized_tags"], formula.get("primary_route"))
@@ -34,8 +45,8 @@ def run_case_pipeline(raw_text: str, use_llm: bool = False, dao_client: DaoClien
     uncertainty = uncertainty_skill(
         routed["syndrome_candidates"], normalized["normalized_tags"], case_json.get("missing_fields"),
     )
-    # Conformal differential: the set of syndromes the engine cannot rule out at the
-    # target coverage level (finite-sample guarantee calibrated on the golden cases).
+    # Conformal differential: the project-calibrated set of syndromes the engine cannot
+    # rule out under its own scoring (see backend/engine/conformal.py for caveats).
     try:
         uncertainty["uncertainty"]["conformal"] = conformal_prediction_set(routed["syndrome_candidates"])
     except (OSError, ValueError):
@@ -65,7 +76,71 @@ def run_case_pipeline(raw_text: str, use_llm: bool = False, dao_client: DaoClien
         **modules,
         **conflicts,
         "safety": safety,
+        "red_flag_gate": {
+            "halted": False,
+            "status": gate_safety.get("safety_status"),
+            "confirmed_red_flags": [f.get("term") or f.get("id") for f in gate_safety.get("confirmed_red_flags") or []],
+        },
         **uncertainty,
+        "provenance": provenance,
+        **report,
+    }
+
+
+def _halted_result(
+    case_json: dict[str, Any],
+    normalized: dict[str, Any],
+    safety: dict[str, Any],
+    *,
+    use_llm: bool,
+    dao_client: DaoClient | None,
+) -> dict[str, Any]:
+    """Emergency-halted pipeline output: same shape as the normal result, empty clinical chain.
+
+    The deterministic report still renders (referral notice + red flags); the language
+    model is deliberately not invoked — an emergency notice must not depend on a model.
+    """
+
+    provenance = get_provenance(getattr(dao_client, "config", None) if use_llm else None)
+    report = tao_report_generation_skill(
+        case_json=case_json,
+        normalized_tags=normalized["normalized_tags"],
+        syndrome_candidates=[],
+        formula_route=None,
+        matched_modules=[],
+        conflicts=[],
+        safety=safety,
+        rule_hits=[],
+        dao_client=None,
+        use_llm=False,
+        uncertainty=None,
+        interaction_alerts=[],
+        provenance=provenance,
+    )
+    return {
+        "case_json": case_json,
+        **normalized,
+        "syndrome_candidates": [],
+        "rule_hits": [],
+        "formula_routes": [],
+        "primary_route": None,
+        "formula_rule_hits": [],
+        "matched_modules": [],
+        "conflicts": [],
+        "interaction_alerts": [],
+        "alert_summary": {"interruptive": 0, "advisory": 0, "requires_dual_signoff": False},
+        "safety": safety,
+        "red_flag_gate": {
+            "halted": True,
+            "status": safety.get("safety_status"),
+            "reason": "确认急诊级红旗（马尾/进行性无力/感染类），中止辨证与方药推理，仅输出急诊转诊提示。",
+            "confirmed_red_flags": [f.get("term") or f.get("id") for f in safety.get("confirmed_red_flags") or []],
+        },
+        "uncertainty": {
+            "abstain": True,
+            "assessment_note": "急诊红旗未排除，本例不进行证候与方药评估。",
+            "conformal": None,
+        },
         "provenance": provenance,
         **report,
     }

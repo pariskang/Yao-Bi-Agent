@@ -79,9 +79,11 @@ PATIENT_SELF_ADMIN_PATTERNS = [
 # Content forbidden even in a clinician-facing draft: assertive final verdicts and
 # complete executable regimens. Experience dose *ranges*, 方义, 先煎/后下 safety notes
 # and the bare word 疗程 are deliberately allowed — that is the point of a teaching draft.
+# The diagnosis pattern targets *assertive* verdicts ("最终诊断：X"、"确诊为X"), not the
+# mandated boilerplate "最终诊断与处方须医师面诊后确定" or the advice "完善影像以明确诊断".
 _CLINICIAN_DRAFT_FORBIDDEN = [
-    (r"最终诊断|明确诊断|确诊为", "assertive_final_diagnosis"),
-    (r"处方如下|完整处方|请按.*服用", "complete_prescription"),
+    (r"最终诊断[为是：:]|明确诊断为|诊断明确为|确诊为|可以?确诊", "assertive_final_diagnosis"),
+    (r"处方如下|完整处方|请按.*服用|按方抓药", "complete_prescription"),
     (rf"水煎服|[每一][日天]\s*[{_CHN_NUM}\d]+\s*[次服]|分[{_CHN_NUM}\d]+次(?:服|口服)", "executable_regimen"),
 ]
 
@@ -119,24 +121,19 @@ def guard_consultation(text: str, user_role: str = "clinician") -> dict[str, Any
 
     The clinician/researcher draft is allowed to name candidate syndromes, formula routes,
     方义 and **experience dose ranges** (the whole point of a teaching/research note) — but
-    may never tell the patient to self-medicate or skip the physician. For the patient role
-    we keep the strict floor (no diagnosis / prescription / executable dose at all).
+    it inherits every clinician-draft prohibition: no assertive final diagnosis, no
+    complete executable regimen (处方如下 / 水煎服 / 一日X次), and no patient
+    self-administration phrasing. For the patient role we keep the strict floor
+    (no diagnosis / prescription / executable dose at all).
+
+    Consultation is the *loosest* clinician-facing surface (the model is the primary
+    reasoner there), so it must never be looser than ``guard_clinician_draft`` — that
+    inversion was exactly the P0 gap this delegation closes.
     """
 
     if user_role == "patient":
         return guard_tao_output(text)
-
-    violations: list[dict[str, str]] = []
-    for pattern in PATIENT_SELF_ADMIN_PATTERNS + FORBIDDEN_PATTERNS["replacement_for_clinician"]:
-        if re.search(pattern, text, flags=re.IGNORECASE):
-            violations.append({"category": "patient_self_administration", "pattern": pattern})
-            break
-    return {
-        "allowed": not violations,
-        "violations": violations,
-        "fallback_required": bool(violations),
-        "guardrail": "clinician_research_draft_no_patient_self_administration",
-    }
+    return guard_clinician_draft(text)
 
 
 # ------------------------------------------------------------------ patient payload floor

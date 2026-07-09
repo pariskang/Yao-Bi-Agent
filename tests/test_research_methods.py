@@ -69,7 +69,7 @@ def test_pipeline_report_renders_conformal_set():
     result = run_case_pipeline("患者女，68岁，腰痛反复5年，畏寒，下肢麻木，舌暗苔白腻，既往骨质疏松。")
     conformal = result["uncertainty"]["conformal"]
     assert conformal and conformal["prediction_set"]
-    assert "共形鉴别集" in result["markdown_report"]
+    assert "共形候选集" in result["markdown_report"]
 
 
 # -- EIG active questioning ---------------------------------------------------------------
