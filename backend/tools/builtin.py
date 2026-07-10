@@ -31,6 +31,7 @@ def _build() -> ToolRegistry:
     from backend.skills.case_structuring_skill import case_structuring_skill
     from backend.skills.cdss_recommendation_skill import cdss_recommendation_skill
     from backend.skills.chief_complaint_skill import chief_complaint_skill
+    from backend.skills.clinical_scope_router_skill import clinical_scope_router_skill
     from backend.skills.clinician_handoff_skill import clinician_handoff_skill
     from backend.skills.clinician_review_package_skill import clinician_review_package_skill
     from backend.skills.comorbidity_medication_skill import comorbidity_medication_skill
@@ -70,6 +71,7 @@ def _build() -> ToolRegistry:
         ))
 
     # --- deterministic clinical chain -------------------------------------------------
+    add(clinical_scope_router_skill, "Route a case to its clinical domain and approved capability set; non-lumbar complaints never enter the lumbar-Bi formula chain.", ALL_ROLES, "read")
     add(case_extract_skill, "Extract structured clinical features from a de-identified lumbar Bi case text without diagnosis.", ALL_ROLES, "read")
     add(case_normalize_skill, "Normalize extracted TCM clinical features into controlled rule tags.", ALL_ROLES, "read")
     add(syndrome_router_skill, "Score candidate TCM patterns based on Shen Qinrong lumbar Bi rules.", CLIN_ROLES, "clinical_draft")

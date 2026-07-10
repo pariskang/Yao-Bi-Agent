@@ -250,6 +250,41 @@
     }
   },
   {
+    "name": "clinical_scope_router_skill",
+    "description": "Route a case to its clinical domain and approved capability set; non-lumbar complaints never enter the lumbar-Bi formula chain.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "raw_text": {
+          "type": "string"
+        },
+        "red_flag_categories": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "raw_text"
+      ]
+    },
+    "x_governance": {
+      "allowed_roles": [
+        "clinician",
+        "patient",
+        "researcher",
+        "system"
+      ],
+      "risk_level": "read",
+      "idempotent": true,
+      "execution": "registry"
+    }
+  },
+  {
     "name": "clinician_handoff_skill",
     "description": "Generate a concise clinician handoff summary for review.",
     "parameters": {

@@ -2,7 +2,7 @@ agent_name: ShenQinrong_YaoBi_Hermes_Agent
 case_guide_agent_name: YaoBi_CaseGuide_Hermes_Agent
 # Single version fact: must equal pyproject.toml [project].version and
 # backend/provenance.py APP_VERSION (enforced by tests/test_version_consistency.py).
-version: 0.9.0
+version: 0.10.0
 mode: research_education_clinician_review_only
 base_model: CMLM/Dao1-30b-a3b
 purpose: 名老中医腰痹诊疗经验研究助手 / 临床处方辅助系统的非处方化规则解释内核
@@ -44,7 +44,19 @@ tao_runtime:
 dynamic_logic:
   red_flag_gate:
     position: before_clinical_reasoning
-    halt_categories: [cauda_equina_symptoms, progressive_weakness, fever_or_infection]
+    # Orthopedic emergency ontology v0.10 — kept in sync with
+    # backend/skills/safety_guard_skill.EMERGENCY_HALT_CATEGORIES (CI-enforced).
+    halt_categories:
+      - cauda_equina_symptoms
+      - progressive_weakness
+      - fever_or_infection
+      - major_trauma
+      - open_fracture_dislocation
+      - neurovascular_deficit
+      - compartment_syndrome
+      - vascular_emergency
+      - cardiopulmonary_emergency
+      - cervical_myelopathy
     behavior: emergency_referral_only     # no syndrome/formula/herb output while halted
     contextual_urgent: keep_clinician_review_analysis   # e.g. fragility trauma (GC012)
   if_red_flag_status_urgent:
@@ -70,7 +82,7 @@ dynamic_logic:
 
 case_guide_agent:
   agent_name: YaoBi_CaseGuide_Hermes_Agent
-  version: 0.9.0
+  version: 0.10.0
   purpose: 自动导引患者形成标准化腰痹医案
   mode: research_education_clinician_review_only
   system_prompt: |

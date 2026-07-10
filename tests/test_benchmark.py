@@ -68,7 +68,7 @@ def test_benchmark_shape_and_known_gap_accounting(benchmark_result):
 
 def test_golden_cases_cover_every_rule_syndrome_twice():
     cases = load_golden_cases()
-    assert 18 <= len(cases) <= 30
+    assert 18 <= len(cases) <= 45   # v0.10: +9 骨伤科对抗 + 1 反证哨兵
     for syndrome in RULE_SYNDROMES:
         covering = [
             case for case in cases
