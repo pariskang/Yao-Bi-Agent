@@ -202,7 +202,7 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 ## 安全与智能体闭环层（v0.7：否定语义、服务端角色边界与批判者闭环）
 
 针对外部智能体评审的 P0/P1 整改（本仓库当前版本；`pyproject.toml` 与 `/api/health` 的
-`app_version` 同步为 0.7.0）：
+`app_version` 当时同步为 0.7.0，历史版本记录）：
 
 - **否定语义实体抽取（P0）**：新增 `backend/skills/clinical_entity_skill.py` 统一 polarity
   解析（affirmed / negated / uncertain + 时态 + 来源片段）。"否认外伤、无发热寒战、无大小便
@@ -244,7 +244,7 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 ## 安全治理加固层（v0.8：守卫同级、全局红旗门控与规则一致性）
 
 针对第二轮外部深度评审的 P0/P1 整改（`pyproject.toml` 与 `/api/health` 的 `app_version`
-同步为 0.8.0；整改逐条对照见 [`docs/code_review_response_2026-07.md`](docs/code_review_response_2026-07.md)）：
+当时同步为 0.8.0（现为 0.9.0，见下节）；整改逐条对照见 [`docs/code_review_response_2026-07.md`](docs/code_review_response_2026-07.md)）：
 
 - **医生端会诊守卫同级（P0）**：`guard_consultation` 对 clinician/researcher 角色直接委托
   `guard_clinician_draft`——最终诊断断言、完整处方、可执行服法与患者自行用药措辞在"模型为主
@@ -279,6 +279,41 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 - **共形预测表述校准（P1）**：报告与提示中的共形集合改述为"项目内校准的候选证型集合
   （提示哪些证型尚不能排除）"，明确目标覆盖率仅相对项目内标注分布按边际意义成立，
   不代表真实临床人群的诊断概率。
+
+## Harness 治理层（v0.9：运行时工具注册表、统一 Run 生命周期与审批对象）
+
+针对第三轮外部评审（"顶级 Harness"视角）的整改（`app_version` 同步为 0.9.0；逐条
+处置见 [`docs/harness_review_response_2026-07.md`](docs/harness_review_response_2026-07.md)）：
+
+- **运行时工具注册表（P0）**：`backend/tools/` 把 `config/hermes_tools.json` 从手写描述
+  文件变为**注册表生成物**——工具 schema 由真实函数签名自动生成（漂移在结构上不可能），
+  统一执行入口依次做存在性检查 → 角色授权 → 输入 schema 校验 → 执行计时 → 输出校验 →
+  审计 span，错误按 NotFound/PolicyDenied/InputError/OutputValidation/Execution 分类；
+  `run_case_pipeline` 全链路经注册表执行；`physician_review_skill` 注册为 high_risk 且
+  仅 clinician 可调（连 system 角色不可）。CI 强制 JSON 与注册表、schema 与签名一致。
+- **统一 Run 生命周期（P0）**：`backend/runtime/run_context.py` 提供 9 态 RunStatus
+  状态机（非法迁移即异常）、8 类 StopReason 与统一 RunBudget；自主智能体与多智能体
+  编排输出 `run` 块——红旗门控 → SAFETY_HALTED，守卫拦截 → policy_denied，引擎弃权 →
+  insufficient_evidence，预算耗尽 → budget_exhausted（截断但交付已完成步骤）。
+- **红旗覆盖两阶段审批（P0，并修复真实漏洞）**：修复 `/api/interview` 的
+  `review_action` 无角色校验问题（此前匿名调用者可 override 清除已确认红旗）；覆盖
+  急诊转诊现为正式 ApprovalRequest：reviewer_id + 具体理由 → pending 审批（临床状态
+  不变）→ 同一医师二次确认才执行，确认人不一致即拒绝，全程入链式审计。
+- **版本与 manifest 一致性（P0）**：pyproject / provenance / hermes_agent.yaml 统一
+  0.9.0 并由 CI 断言；hermes_agent.yaml 的 default_sequence 修正为红旗门控前置 + 模块
+  后全量复扫，halt_categories 与代码常量绑定测试。
+- **Provenance 扩展（P0）**：新增 prompt/guard/policy/tool-registry/case-schema 指纹与
+  git commit；`TAO_MODEL_REVISION` 支持模型版本 pin 并随 provenance 输出。
+- **Guard 语义绕过加固（P1）**：NFKC 归一化拦截全角数字绕过（"细辛３克"），新增
+  口语化服法模式（"早晚各服一回""照此煎服""依上述比例""按常规量""三指撮"）；
+  对抗集 16 例全拦截、良性 4 例零误杀。
+- **审计哈希链（P1）**：每条审计事件携带 prev_event_hash/event_hash，`verify_chain`
+  可检出链内篡改并定位断点（进程内链；持久链为部署件）。
+- **黑板所有权与独立批判者（P1）**：Blackboard 写入需声明 producer，受保护键（routed/
+  safety/review_package…）仅所有者可写，每个工件带 producer/seq/draft 元数据；批判者
+  拆分为互不读取对方结论的 safety / evidence / contradiction / policy 独立批判者，
+  新增寒热并见、湿浊津伤并见反证轴；groundedness 增加断言强度层（claim modality）——
+  "实体有据但语气确定"的过度自信表述会被点名供医师复核。
 
 ## CDSS 草案模块
 

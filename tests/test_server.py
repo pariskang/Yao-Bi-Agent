@@ -198,6 +198,7 @@ def test_interview_physician_confirm(monkeypatch):
         "session_id": "ph_c",
         "review_action": "confirm",
         "physician_notes": "已联系120，患者正在转运",
+        "doctor_mode": True, "reviewer_id": "dr-001",
     })
     assert res["physician_review"]["status"] == "confirmed"
     assert "已联系120" in res["physician_review"]["physician_notes"]
@@ -213,6 +214,7 @@ def test_interview_physician_revise(monkeypatch):
         "session_id": "ph_r",
         "review_action": "revise",
         "physician_notes": "建议收住脊柱外科病房，暂不急诊手术",
+        "doctor_mode": True, "reviewer_id": "dr-001",
     })
     assert res["physician_review"]["status"] == "revised"
     assert "脊柱外科" in res["physician_review"]["physician_notes"]
@@ -253,19 +255,61 @@ def test_warmup_reports_disabled_backend_cleanly(monkeypatch):
     assert "reason" in res
 
 
-def test_interview_physician_override_resumes_fsm(monkeypatch):
-    """Physician override clears red flags and the FSM resumes asking clinical questions."""
+def test_interview_review_requires_clinician_role(monkeypatch):
+    """review_action is a clinician-only surface: an anonymous caller cannot touch red flags."""
+    server = _server(monkeypatch)
+    monkeypatch.setattr(server, "_SERVER_BIND_HOST", "0.0.0.0")   # public bind, no token
+    server.handle_interview({"session_id": "rbac_o", "reset": True})
+    _interview(server, "rbac_o", "大小便失禁，会阴麻木")
+    res = server.handle_interview({
+        "session_id": "rbac_o", "review_action": "override",
+        "override_reason": "越权尝试", "reviewer_id": "attacker", "doctor_mode": True,
+    })
+    assert res.get("error") == "clinician_role_required"
+
+
+def test_interview_physician_override_is_two_phase_approval(monkeypatch):
+    """Override = pending approval (no state change) → same-reviewer confirmation → execute."""
     server = _server(monkeypatch)
     server.handle_interview({"session_id": "ph_o", "reset": True})
     _interview(server, "ph_o", "大小便失禁，会阴麻木")      # triggers emergency
+
+    # Missing reviewer_id → refused, nothing changes.
     res = server.handle_interview({
-        "session_id": "ph_o",
-        "review_action": "override",
+        "session_id": "ph_o", "review_action": "override", "doctor_mode": True,
         "override_reason": "患者描述有误，实际无膀胱症状",
     })
-    # Red flags cleared; FSM resumes normal questioning
+    assert res.get("approval_error") == "reviewer_id_and_reason_required"
+    assert res["state"] == "SAFETY_REFERRAL"
+
+    # Phase 1: pending approval created; red flags still standing.
+    res = server.handle_interview({
+        "session_id": "ph_o", "review_action": "override", "doctor_mode": True,
+        "override_reason": "患者描述有误，实际无膀胱症状", "reviewer_id": "dr-001",
+    })
+    approval = res.get("pending_approval") or {}
+    assert approval.get("status") == "pending"
+    assert res["state"] == "SAFETY_REFERRAL"
+    assert res["safety_level"] != "low"
+
+    # A different reviewer cannot confirm someone else's override.
+    res_wrong = server.handle_interview({
+        "session_id": "ph_o", "review_action": "override", "doctor_mode": True,
+        "override_reason": "患者描述有误，实际无膀胱症状", "reviewer_id": "dr-999",
+        "confirm_override": True, "approval_id": approval["approval_id"],
+    })
+    assert res_wrong.get("approval_error") == "approval_confirmation_failed"
+
+    # Phase 2: same reviewer confirms → override executes, FSM resumes.
+    res = server.handle_interview({
+        "session_id": "ph_o", "review_action": "override", "doctor_mode": True,
+        "override_reason": "患者描述有误，实际无膀胱症状", "reviewer_id": "dr-001",
+        "confirm_override": True, "approval_id": approval["approval_id"],
+    })
     assert res["safety_level"] == "low"
     assert res["state"] != "SAFETY_REFERRAL"
     assert res["physician_review"]["status"] == "overridden"
+    assert res["physician_review"]["reviewer_id"] == "dr-001"
+    assert res["physician_review"]["approval_id"] == approval["approval_id"]
     assert "无膀胱症状" in res["physician_review"]["override_reason"]
     assert res["done"] is False                              # interview continues

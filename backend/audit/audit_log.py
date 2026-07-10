@@ -55,7 +55,16 @@ class Counters:
             return dict(self._counts)
 
 
+_GENESIS_HASH = "0" * 16
+
+
 class AuditLog:
+    """Hash-chained append-only audit: each record carries ``prev_event_hash`` and its
+    own ``event_hash`` over the canonical record content, so post-hoc edits or
+    deletions inside a process's chain are detectable with :func:`verify_chain`.
+    (Per-process chain — a restart starts a new chain from the genesis hash; a
+    durable cross-restart chain is a production deployment concern.)"""
+
     def __init__(self, directory: str | os.PathLike[str] | None = None, enabled: bool | None = None) -> None:
         if enabled is None:
             enabled = os.getenv("YAOBI_AUDIT", "1").lower() not in {"0", "false", "off"}
@@ -63,6 +72,7 @@ class AuditLog:
         self.directory = Path(directory or os.getenv("YAOBI_AUDIT_DIR") or (ROOT / "logs"))
         self._lock = Lock()
         self._seq = 0
+        self._prev_hash = _GENESIS_HASH
         self.write_errors = 0
 
     def _path(self) -> Path:
@@ -82,6 +92,10 @@ class AuditLog:
                 "event": event_type,
                 **payload,
             }
+            record["prev_event_hash"] = self._prev_hash
+            canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
+            record["event_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+            self._prev_hash = record["event_hash"]
             try:
                 self.directory.mkdir(parents=True, exist_ok=True)
                 with self._path().open("a", encoding="utf-8") as f:
@@ -91,6 +105,27 @@ class AuditLog:
                 self.write_errors += 1
                 return None
         return record
+
+
+def verify_chain(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Verify a contiguous slice of one process's audit chain.
+
+    Returns {"valid": bool, "checked": n, "first_break_seq": seq | None}. A record is
+    valid iff its ``event_hash`` recomputes from its content + ``prev_event_hash`` and
+    it links to the previous record's hash.
+    """
+
+    prev = records[0].get("prev_event_hash") if records else _GENESIS_HASH
+    for i, record in enumerate(records):
+        body = {k: v for k, v in record.items() if k != "event_hash"}
+        if record.get("prev_event_hash") != prev:
+            return {"valid": False, "checked": i, "first_break_seq": record.get("seq")}
+        canonical = json.dumps(body, ensure_ascii=False, sort_keys=True, default=str)
+        expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+        if record.get("event_hash") != expected:
+            return {"valid": False, "checked": i, "first_break_seq": record.get("seq")}
+        prev = record["event_hash"]
+    return {"valid": True, "checked": len(records), "first_break_seq": None}
 
 
 _AUDIT: AuditLog | None = None

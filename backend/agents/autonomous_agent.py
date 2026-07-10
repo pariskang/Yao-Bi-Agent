@@ -27,9 +27,11 @@ from __future__ import annotations
 from typing import Any
 
 from backend.agents.conversation import ConversationSession
+from backend.agents.critics import contradiction_critic, evidence_critic, policy_critic
 from backend.agents.skill_router import ALLOWED_INTENTS, INTENT_BY_ID, INTENTS, keyword_route
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
+from backend.runtime.run_context import AgentRun, StopReason
 from backend.skills.patient_request_guard_skill import patient_request_guard_skill
 from backend.skills.safety_guard_skill import safety_guard_skill
 from backend.skills.syndrome_router_skill import syndrome_router_skill
@@ -107,13 +109,20 @@ class AutonomousQAAgent:
         self.history: list[dict[str, Any]] = []
 
     def run(self, question: str) -> dict[str, Any]:
+        # Unified run lifecycle: one status machine + one budget + one stop reason,
+        # instead of inferring the outcome from ad-hoc field combinations.
+        run = AgentRun(goal=question, user_role=self.user_role)
+        run.start()
+
         guard = patient_request_guard_skill(question, user_role=self.user_role)
         if guard["blocked"] and self.user_role == "patient":
+            run.finish(StopReason.POLICY_DENIED, note="patient_request_guard blocked the request")
             turn = {
                 "question": question, "blocked": True, "plan": [], "plan_method": "patient_request_guard",
                 "steps": [], "subagents_used": [], "used_llm": False,
                 "answer": guard["message"], "trace": [{"step": 1, "thought": "检测到最终诊断/处方/剂量请求，安全护栏拦截。", "action": "patient_request_guard", "observation": guard["message"]}],
                 "disclaimer": "患者端不提供最终诊断、完整处方或可执行剂量。",
+                "run": run.to_dict(),
             }
             self.history.append(turn)
             return turn
@@ -125,8 +134,9 @@ class AutonomousQAAgent:
         if (self.session.case_state.get("red_flags") or {}).get("status") == "urgent":
             observation = self.session.invoke("red_flag_inquiry", question)
             positives = (self.session.case_state.get("red_flags") or {}).get("positive_items") or []
+            run.finish(StopReason.SAFETY_HALT, note="red_flag_gate replaced the plan")
             turn = {
-                "question": question, "blocked": False, "red_flag_gated": True,
+                "question": question, "blocked": False, "red_flag_gated": True, "run": run.to_dict(),
                 "plan": [{"intent": "red_flag_inquiry", "label": observation["label"], "reason": "红旗未排除，先行急诊/危险信号排查。"}],
                 "plan_method": "red_flag_gate", "state_updates": state_updates,
                 "steps": [{"step": 1, "intent": "red_flag_inquiry", "label": observation["label"],
@@ -147,13 +157,21 @@ class AutonomousQAAgent:
             self.history.append(turn)
             return turn
 
+        if self.use_llm:
+            run.budget.charge("model_call")  # LLM planner call
         planned = plan_question(question, max_steps=self.max_steps, use_llm=self.use_llm, dao_client=self.dao_client)
         plan = planned["plan"]
         steps: list[dict[str, Any]] = []
         trace: list[dict[str, Any]] = []
         subagents: list[str] = []
         used_llm = False
+        budget_stop: StopReason | None = None
         for i, step in enumerate(plan, start=1):
+            budget_stop = run.budget.charge("iteration") or run.budget.charge("tool_call")
+            if budget_stop:
+                trace.append({"step": i, "thought": "预算管理器：运行预算耗尽，停止剩余计划步骤。",
+                              "action": "budget_stop", "observation": run.budget.snapshot()})
+                break
             intent = step["intent"]
             observation = self.session.invoke(intent, question)
             subagents.append(intent)
@@ -164,8 +182,14 @@ class AutonomousQAAgent:
         critique = self._critique_and_replan(question, steps, trace, subagents)
         answer = self._synthesize(question, planned, steps, critique)
         loop = ["understand", "plan", "execute", "observe", "critique"] + (["replan"] if critique["replanned"] else [])
+        if budget_stop:
+            run.finish(StopReason.BUDGET_EXHAUSTED, note="plan truncated by run budget")
+        elif critique.get("abstain"):
+            run.finish(StopReason.INSUFFICIENT_EVIDENCE, note="rule engine abstained; follow-up questions returned")
+        else:
+            run.finish(StopReason.GOAL_COMPLETED)
         turn = {
-            "question": question, "blocked": False,
+            "question": question, "blocked": False, "run": run.to_dict(),
             "plan": [{"intent": s["intent"], "label": INTENT_BY_ID.get(s["intent"], {}).get("label", s["intent"]), "reason": s.get("reason", "")} for s in plan],
             "plan_method": planned["method"], "plan_runtime": planned["llm_runtime"],
             "steps": steps, "trace": trace, "subagents_used": subagents,
@@ -216,14 +240,20 @@ class AutonomousQAAgent:
             subagents.append("red_flag_inquiry")
             replanned = True
 
-        ungrounded = [s["intent"] for s in steps if not s.get("evidence")]
+        # Independent critics: each inspects one dimension and cannot see the others'
+        # verdicts (see backend/agents/critics.py) — shared-blind-spot mitigation.
+        evidence_view = evidence_critic(steps)
+        contradictions = contradiction_critic(tags)
+        policy_view = policy_critic(self.user_role, steps)
         candidates = syndrome_router_skill(tags).get("syndrome_candidates") or []
         uncertainty = uncertainty_skill(candidates, tags)["uncertainty"]
         critique = {
             "safety_status": safety["safety_status"],
             "confirmed_red_flags": [f.get("term") or f.get("id") for f in safety.get("confirmed_red_flags") or []],
             "need_further_inquiry": safety.get("need_further_inquiry") or [],
-            "ungrounded_steps": ungrounded,
+            "ungrounded_steps": evidence_view["ungrounded_steps"],
+            "contradictions": contradictions,
+            "policy": policy_view,
             "abstain": bool(uncertainty.get("abstain")),
             "assessment_note": uncertainty.get("assessment_note") or "",
             "missing_facts": [g.get("suggestion") for g in uncertainty.get("differential_gaps") or []][:3],
@@ -231,14 +261,16 @@ class AutonomousQAAgent:
         }
         trace.append({
             "step": len(steps) + 1,
-            "thought": "批判者复核：安全状态、证据支撑与不确定性自评。",
-            "action": "critique(safety+evidence+uncertainty)",
+            "thought": "独立批判者复核：安全、证据、反证与角色策略各自独立评估。",
+            "action": "critique(safety+evidence+contradiction+policy+uncertainty)",
             "observation": (
                 f"安全状态 {critique['safety_status']}；"
-                f"弱证据步骤 {len(ungrounded)} 个；"
+                f"弱证据步骤 {len(critique['ungrounded_steps'])} 个；"
+                f"反证轴 {len(contradictions)} 条；"
+                + ("角色策略违规！" if not policy_view["ok"] else "")
                 + ("规则引擎建议弃权，需补充关键信息。" if critique["abstain"] else "证据强度可接受。")
             ),
-            "skills": ["safety_guard_skill", "uncertainty_skill"],
+            "skills": ["safety_guard_skill", "uncertainty_skill", "critics"],
         })
         return critique
 
@@ -256,6 +288,8 @@ class AutonomousQAAgent:
                 notes.append(f"⚠️ 安全批判者：当前安全状态为 **{critique['safety_status']}**，红旗/风险线索须优先线下复核。")
             if critique["abstain"]:
                 notes.append("ℹ️ 不确定性批判者：现有证据不足以形成稳定结论，建议先补充关键信息再判断。")
+            for finding in critique.get("contradictions") or []:
+                notes.append(f"⚖️ 反证批判者（{finding['axis']}）：{finding['note']}")
             notes.extend(f"- {fact}" for fact in critique.get("missing_facts") or [])
         if notes:
             body += "\n\n---\n\n**批判者复核（critique）**\n\n" + "\n".join(notes)

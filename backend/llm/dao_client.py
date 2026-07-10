@@ -70,6 +70,10 @@ def load_inference_profiles() -> dict[str, dict[str, Any]]:
 @dataclass
 class DaoGenerationConfig:
     model_id: str = "CMLM/Dao1-30b-a3b"
+    # Optional model revision pin (git tag / commit SHA on the model hub). None loads
+    # "latest" — fine for the research prototype; production must pin a revision so
+    # provenance can attribute an output to exact weights + remote code.
+    model_revision: str | None = None
     backend: DaoBackend = "disabled"
     endpoint_url: str | None = None
     api_key: str | None = None
@@ -89,6 +93,7 @@ class DaoGenerationConfig:
     def from_env(cls) -> "DaoGenerationConfig":
         return cls(
             model_id=os.getenv("TAO_MODEL_ID", cls.model_id),
+            model_revision=os.getenv("TAO_MODEL_REVISION") or None,
             backend=os.getenv("TAO_BACKEND", "disabled"),  # type: ignore[arg-type]
             endpoint_url=os.getenv("TAO_ENDPOINT_URL"),
             api_key=os.getenv("TAO_API_KEY"),
@@ -851,7 +856,7 @@ class DaoClient:
         torch = importlib.import_module("torch")
 
         quant = "4bit" if self.config.load_in_4bit else "8bit" if self.config.load_in_8bit else "none"
-        signature = (self.config.model_id, f"{self.config.torch_dtype}:{quant}", self.config.device_map, self.config.attn_implementation)
+        signature = (self.config.model_id, self.config.model_revision, f"{self.config.torch_dtype}:{quant}", self.config.device_map, self.config.attn_implementation)
         with self._model_lock:
             if (
                 self.__class__._tokenizer is None
@@ -867,6 +872,8 @@ class DaoClient:
                         "device_map": self.config.device_map,
                         "attn_implementation": self.config.attn_implementation,
                     }
+                    if self.config.model_revision:
+                        from_pretrained_kwargs["revision"] = self.config.model_revision
                     # Optional 4-bit / 8-bit quantization lets large models (e.g. the 30B MoE
                     # CMLM/Dao1-30b-a3b) fit a single A100/L4; requires the bitsandbytes package.
                     if self.config.load_in_4bit or self.config.load_in_8bit:
@@ -879,7 +886,10 @@ class DaoClient:
                         )
                     else:
                         from_pretrained_kwargs["torch_dtype"] = dtype
-                    self.__class__._tokenizer = transformers.AutoTokenizer.from_pretrained(self.config.model_id, trust_remote_code=True)
+                    self.__class__._tokenizer = transformers.AutoTokenizer.from_pretrained(
+                        self.config.model_id, trust_remote_code=True,
+                        **({"revision": self.config.model_revision} if self.config.model_revision else {}),
+                    )
                     self.__class__._model = transformers.AutoModelForCausalLM.from_pretrained(
                         self.config.model_id,
                         **from_pretrained_kwargs,
