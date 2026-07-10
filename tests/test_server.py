@@ -180,13 +180,21 @@ def test_interview_emergency_referral_includes_tao_guidance(monkeypatch):
 
 
 def test_interview_high_risk_referral_tao_guidance(monkeypatch):
-    """Non-cauda-equina high-risk flag: safety_level=high (not emergency), done=False."""
+    """v0.11 shared kernel: active fever+back pain is an emergency-category halt in the
+    interview too (previously only "high" here while the pipeline hard-halted — the
+    cross-entry drift of the entry review P0-2). Contextual-urgent cases stay "high"."""
     server = _server(monkeypatch)
     server.handle_interview({"session_id": "high_rf", "reset": True})
     res = _interview(server, "high_rf", "腰背痛伴发热寒战，肿瘤病史，夜间痛加重")
-    assert res["safety_level"] == "high"
-    assert res["done"] is False                              # advisory, user can clarify
+    assert res["safety_level"] == "emergency"                # unified with pipeline GC014
+    assert res["done"] is True                               # hard stop, physician review
     assert res["referral_tao_guidance"] is not None          # Tao still provides guidance
+
+    # Contextual-urgent (fragility fall, no emergency category) remains advisory "high".
+    server.handle_interview({"session_id": "high_rf2", "reset": True})
+    res2 = _interview(server, "high_rf2", "我71岁，三天前跌倒后腰痛加重，以前有骨质疏松")
+    assert res2["safety_level"] == "high"
+    assert res2["done"] is False
 
 
 def test_interview_physician_confirm(monkeypatch):

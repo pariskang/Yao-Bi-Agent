@@ -20,7 +20,9 @@ def test_safety_flags_raw_red_flag():
     assert result["safety"]["safety_status"] == "urgent"
     messages = "\n".join(flag["message"] for flag in result["safety"]["red_flags"])
     assert "原文红旗线索" in messages
-    assert "自行" in messages
+    # v0.11: 自行购药/开方是策略旗（policy_flags），不与临床红旗混同（P1-3）。
+    policy = "\n".join(flag["message"] for flag in result["safety"]["policy_flags"])
+    assert "自行" in policy
 
 
 def test_direct_tao_cli_disabled_returns_friendly_error():

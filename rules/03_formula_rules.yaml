@@ -1,9 +1,14 @@
 - id: F001
   name: 独活寄生汤路线
   category: formula
+  # 方证兼容约束（v0.11）：仅当 top-1 或 medium+ 证型候选与此列表相交时本路线才可入选。
+  compatible_syndromes: [肝肾不足证, 肾阳不足证, 气血痹阻证, 脾虚不运证, 寒湿痹阻证]
   priority: 80
+  # v0.11 收紧：久病为必要条件（独活寄生汤主治久痹），任一支持标签为佐证——
+  # "单纯高龄"不再触发本路线（骨伤科评审 P0-4）。
   trigger:
-    any: [elderly, chronic_yabi, osteoporosis, lumbar_leg_pain, ganshen_buzu]
+    all: [chronic_yabi]
+    any: [elderly, osteoporosis, lumbar_leg_pain, ganshen_buzu, lumbar_knee_soreness, fatigue, thin_pulse]
   effect:
     formula_route: 独活寄生汤加减
     route_score: 5
@@ -12,6 +17,8 @@
 - id: F002
   name: 当归四逆汤路线
   category: formula
+  # 方证兼容约束（v0.11）：仅当 top-1 或 medium+ 证型候选与此列表相交时本路线才可入选。
+  compatible_syndromes: [肾阳不足证, 气滞血瘀证, 气血痹阻证, 肝肾不足证]
   priority: 75
   trigger:
     any: [lower_limb_numbness, radiating_leg_pain, cold_extremities, cold_aversion]
@@ -24,6 +31,8 @@
 - id: F003
   name: 黄芪桂枝五物汤路线
   category: formula
+  # 方证兼容约束（v0.11）：仅当 top-1 或 medium+ 证型候选与此列表相交时本路线才可入选。
+  compatible_syndromes: [气血痹阻证, 脾虚不运证, 肝肾不足证]
   priority: 70
   trigger:
     all: [lower_limb_numbness]
@@ -36,6 +45,8 @@
 - id: F004
   name: 桂枝芍药知母汤路线
   category: formula
+  # 方证兼容约束（v0.11）：仅当 top-1 或 medium+ 证型候选与此列表相交时本路线才可入选。
+  compatible_syndromes: [寒湿痹阻证, 肾阳不足证, 气血痹阻证]
   priority: 72
   trigger:
     any: [cold_damp_obstruction, heavy_lower_limb, white_greasy_coating, cold_aversion, joint_stiffness]
@@ -48,6 +59,8 @@
 - id: F005
   name: 柴胡类方路线
   category: formula
+  # 方证兼容约束（v0.11）：仅当 top-1 或 medium+ 证型候选与此列表相交时本路线才可入选。
+  compatible_syndromes: [少阳气郁证]
   priority: 68
   trigger:
     any: [bitter_taste, dry_mouth, emotional_constraint, insomnia, young_patient]
@@ -60,6 +73,8 @@
 - id: F006
   name: 补肾类方路线
   category: formula
+  # 方证兼容约束（v0.11）：仅当 top-1 或 medium+ 证型候选与此列表相交时本路线才可入选。
+  compatible_syndromes: [肝肾不足证, 肾阳不足证]
   priority: 74
   trigger:
     any: [kidney_yang_deficiency, osteoporosis, chronic_yabi, elderly, lumbar_knee_soreness]
@@ -72,6 +87,8 @@
 - id: F007
   name: 四妙丸路线
   category: formula
+  # 方证兼容约束（v0.11）：仅当 top-1 或 medium+ 证型候选与此列表相交时本路线才可入选。
+  compatible_syndromes: [湿热痹阻证]
   priority: 73
   trigger:
     any: [yellow_greasy_coating, burning_pain, dark_urine, red_tongue, heat_aggravation]

@@ -359,6 +359,9 @@ class YaoBiInterviewEngine:
             if any(is_affirmed(user_text, keyword) for keyword in keywords):
                 case.ortho_neuro_slots[slot] = True
 
+    def _user_narrative(self, case: YaoBiCaseState) -> str:
+        return "。".join(d["content"] for d in case.dialogue_history if d.get("role") == "user")
+
     def _detect_red_flags(self, case: YaoBiCaseState) -> None:
         if case.red_flags_overridden:
             case.red_flags = []
@@ -367,6 +370,30 @@ class YaoBiInterviewEngine:
         o, p, h = case.ortho_neuro_slots, case.pain_slots, case.history_slots
         flags: list[str] = []
         emergency = False
+
+        # SHARED SAFETY KERNEL (v0.11): the interview must grade red flags with the
+        # same category-tiered, temporality- and experiencer-aware kernel as every
+        # other entry — its own slot logic below stays as an *additional* channel,
+        # never the only one. This is what previously let 高能量创伤/发热/开放骨折
+        # reach only "high" here while the pipeline hard-halted (entry review P0-2).
+        try:
+            from backend.skills.case_extract_skill import case_extract_skill
+            from backend.skills.case_normalize_skill import case_normalize_skill
+            from backend.skills.safety_guard_skill import emergency_halt_required, safety_guard_skill
+
+            narrative = self._user_narrative(case)
+            if narrative.strip():
+                case_json = case_extract_skill(narrative)
+                normalized_tags = case_normalize_skill(case_json).get("normalized_tags") or []
+                kernel = safety_guard_skill(case_json, None, normalized_tags)
+                if emergency_halt_required(kernel):
+                    emergency = True
+                if kernel.get("safety_status") == "urgent":
+                    flags.extend(f.get("message") or str(f.get("term")) for f in kernel.get("confirmed_red_flags") or [])
+        except Exception:
+            # FAIL CLOSED: if the shared kernel crashes, the interview must not
+            # silently continue as if the case were safe.
+            flags.append("安全内核解析异常，本轮按高风险处理，请线下评估（已记录待人工复核）。")
         # Cauda equina syndrome: hard stop, must go to ER immediately.
         # _slot_positive keeps a denial string ("否"/"正常") from firing a false emergency.
         if _slot_positive(o.get("bowel_bladder_dysfunction")):

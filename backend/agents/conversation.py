@@ -16,6 +16,7 @@ from backend.llm.dao_client import DaoClient
 from backend.skills.case_experience_summary_skill import case_experience_summary_skill
 from backend.skills.case_extract_skill import case_extract_skill
 from backend.skills.case_normalize_skill import case_normalize_skill
+from backend.skills.clinical_scope_router_skill import question_scope_gate
 from backend.skills.conflict_checker_skill import conflict_checker_skill
 from backend.skills.formula_base_selector_skill import formula_base_selector_skill
 from backend.skills.herb_module_composer_skill import herb_module_composer_skill
@@ -147,7 +148,17 @@ class ConversationSession:
             case_json = case_extract_skill(question)
             normalized = case_normalize_skill(case_json)
         except Exception:
+            # Fail closed: a crashed safety extraction must not silently pass the turn
+            # through to clinical reasoning with stale facts (entry review, §6).
+            self.case_state["safety_extraction_failed"] = True
             return None
+        self.case_state.pop("safety_extraction_failed", None)
+        # Sticky lumbar scope: once the narrative establishes a lumbar complaint, later
+        # anchor-free follow-up questions stay in scope.
+        if question_scope_gate(question, {"normalized_tags": []})["allowed"] and "腰" in question:
+            scope = dict(self.case_state.get("scope") or {})
+            scope["in_scope"] = True
+            self.case_state["scope"] = scope
         old_tags = set(self.case_state.get("normalized_tags") or [])
         new_tags = set(normalized.get("normalized_tags") or [])
         added_tags = sorted(new_tags - old_tags)
@@ -175,6 +186,29 @@ class ConversationSession:
             "added_tags": added_tags,
             "red_flag_status": red.get("status"),
             "red_flag_escalated": red.get("status") != old_status,
+        }
+
+    # -- scope gate ------------------------------------------------------------
+    # Same invariant as the pipeline's scope router, enforced at THIS entry too:
+    # a knee/shoulder/fracture complaint typed into chat must not receive lumbar-Bi
+    # formula reasoning just because it arrived through a different API (the
+    # cross-entry inconsistency was the P0 finding of the 2026-07 entry review).
+
+    def _scope_gate(self, intent: str, question: str) -> dict[str, Any] | None:
+        if intent not in RED_FLAG_GATED_INTENTS:
+            return None
+        if self.case_state.get("safety_extraction_failed"):
+            # Fail closed: if safety extraction crashed, clinical reasoning abstains.
+            return {
+                "answer": "⚠️ 安全信息解析异常，本轮不进行辨证与方药分析（已记录待人工复核）。请重试或线下就诊。",
+                "evidence": [], "skills": ["safety_fail_closed"], "used_llm": False, "scope_gated": True,
+            }
+        gate = question_scope_gate(question, self.case_state)
+        if gate["allowed"]:
+            return None
+        return {
+            "answer": gate["message"], "evidence": gate["reason_codes"],
+            "skills": ["clinical_scope_router_skill"], "used_llm": False, "scope_gated": True,
         }
 
     # -- red-flag gate -------------------------------------------------------
@@ -381,6 +415,10 @@ class ConversationSession:
         gated = self._red_flag_gate(intent)
         if gated is not None:
             return gated
+        # Scope gate: out-of-domain complaints never reach lumbar-Bi clinical handlers.
+        scope_gated = self._scope_gate(intent, question)
+        if scope_gated is not None:
+            return scope_gated
         handlers = {
             "syndrome_inquiry": self._h_syndrome, "formula_inquiry": self._h_formula,
             "herb_inquiry": self._h_herb, "safety_inquiry": self._h_safety,

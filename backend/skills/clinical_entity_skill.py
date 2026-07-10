@@ -55,13 +55,34 @@ _NEGATION_WINDOW = 12
 _HISTORICAL_MARKERS = ("既往", "曾经", "曾", "以前", "过去", "病史")
 
 # Resolution cues: the finding existed but is explicitly stated as resolved. Looked for
-# after the term in the same clause AND in the immediately following short clause, since
+# after the term in the same clause AND in the immediately following clause, since
 # Chinese narratives split them with a comma ("一周前感冒发热，现已痊愈").
 # NOTE: recency phrases like "一周前" alone do NOT downgrade — a fever one week ago
 # without explicit resolution is still clinically relevant for infection screening.
-_RESOLVED_MARKERS = ("已痊愈", "痊愈", "已愈", "已缓解", "已消退", "已退", "已恢复", "已好转", "现已无", "已无")
-# A resolution look-ahead clause must be short and assertive ("现已痊愈"), not a new topic.
-_RESOLVED_LOOKAHEAD_MAX_LEN = 12
+_RESOLVED_MARKERS = ("已痊愈", "痊愈", "已愈", "已缓解", "已消退", "已退", "已恢复", "已好转", "现已无", "已无", "已复位", "复位后")
+
+# Look-ahead binding is STRICT: the next clause counts as resolving THIS term only when
+# it is a *pure* resolution assertion ("现已痊愈"), not a clause about another symptom
+# ("腰痛已缓解" must not mark a preceding 发热 as resolved — that would be a dangerous
+# false negative for infection screening).
+import re as _re
+
+_PURE_RESOLUTION_RE = _re.compile(
+    r"^(?:现|今|目前|此后)?(?:均|都)?已(?:经)?(?:完全|基本)?(?:痊愈|缓解|好转|恢复|消退|复位|退)(?:了)?$"
+)
+
+# Remote-past cues: an event years in the past is history, not this episode ("十年前
+# 车祸" must not fire a current major-trauma emergency). Days/weeks stay current —
+# a fall three days ago is very much this episode.
+_REMOTE_PAST_RE = _re.compile(r"(?:[一二三四五六七八九十两0-9]+|数|多|几)年(?:前|以前)")
+
+# Experiencer cues: the finding belongs to someone else ("父亲昨日车祸后腰痛"),
+# and must never enter the *patient's* red flags. Matched before the term in-clause.
+_OTHER_EXPERIENCER_MARKERS = (
+    "父亲", "母亲", "家父", "家母", "爸爸", "妈妈", "爷爷", "奶奶", "外公", "外婆",
+    "哥哥", "姐姐", "弟弟", "妹妹", "丈夫", "妻子", "老伴", "儿子", "女儿", "孩子",
+    "家属", "家人", "亲戚", "朋友", "同事", "邻居",
+)
 
 
 def _clauses(text: str) -> list[tuple[int, str]]:
@@ -130,12 +151,22 @@ def _temporality(clauses: list[tuple[int, str]], clause_index: int, clause: str,
     if any(m in remainder for m in _RESOLVED_MARKERS):
         return "resolved"
     if clause_index + 1 < len(clauses):
-        next_clause = clauses[clause_index + 1][1]
-        if len(next_clause) <= _RESOLVED_LOOKAHEAD_MAX_LEN and any(m in next_clause for m in _RESOLVED_MARKERS):
+        next_clause = clauses[clause_index + 1][1].strip()
+        # Strict binding: only a *pure* resolution clause resolves this term; a clause
+        # naming another symptom ("腰痛已缓解") binds to that symptom, not this one.
+        if _PURE_RESOLUTION_RE.match(next_clause):
             return "resolved"
-    if any(m in clause[:term_start] for m in _HISTORICAL_MARKERS):
+    prefix = clause[:term_start]
+    if any(m in prefix for m in _HISTORICAL_MARKERS) or _REMOTE_PAST_RE.search(prefix):
         return "historical"
     return "current"
+
+
+def _experiencer(clause: str, term_start: int) -> str:
+    """patient | other — a family member's event must not become the patient's red flag."""
+
+    prefix = clause[:term_start]
+    return "other" if any(m in prefix for m in _OTHER_EXPERIENCER_MARKERS) else "patient"
 
 
 _CONFIDENCE = {POLARITY_AFFIRMED: 0.9, POLARITY_NEGATED: 0.95, POLARITY_UNCERTAIN: 0.7}
@@ -168,17 +199,20 @@ def scan_term(text: str, term: str, blocked_spans: list[tuple[int, int]] | None 
             "polarity": polarity,
             "source_span": clause,
             "temporality": _temporality(clauses, clause_index, clause, idx - clause_start, end - clause_start),
+            "experiencer": _experiencer(clause, idx - clause_start),
             "span": (idx, end),
         })
     if not seen:
         return None
+    # Safety-first aggregation: a patient-experienced affirmation outranks a family
+    # member's ("父亲车祸后腰痛，我也腰痛" — the patient's own finding wins the record).
     ranked = {POLARITY_AFFIRMED: 2, POLARITY_UNCERTAIN: 1, POLARITY_NEGATED: 0}
-    best = max(seen, key=lambda o: ranked[o["polarity"]])
+    best = max(seen, key=lambda o: (ranked[o["polarity"]], o["experiencer"] == "patient"))
     return {
         "entity": term,
         "polarity": best["polarity"],
         "temporality": best["temporality"],
-        "experiencer": "patient",
+        "experiencer": best["experiencer"],
         "source_span": best["source_span"],
         "confidence": _CONFIDENCE[best["polarity"]],
         "occurrences": len(seen),

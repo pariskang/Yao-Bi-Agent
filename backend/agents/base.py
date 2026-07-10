@@ -61,7 +61,13 @@ class Blackboard:
     meta: dict[str, dict[str, Any]] = field(default_factory=dict)
     halted: bool = False
     halt_reason: str | None = None
+    # Capability tokens issued by the scope gate agent: None = unrestricted (legacy
+    # caller); a set restricts which clinical capabilities downstream agents may use.
+    capabilities: set[str] | None = None
     _seq: int = 0
+
+    def capability_allowed(self, capability: str) -> bool:
+        return self.capabilities is None or capability in self.capabilities
 
     def put(self, key: str, value: Any, producer: str | None = None) -> None:
         owner = BLACKBOARD_KEY_OWNERS.get(key)
