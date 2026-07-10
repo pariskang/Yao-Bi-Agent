@@ -191,10 +191,19 @@ class YaoBiCaseState:
     uncertainty_score: float = 1.0
     # Physician confirmation/revision/override of the safety referral.
     physician_review: dict[str, Any] = field(default_factory=dict)
-    # Set to True by the override action so _detect_red_flags is bypassed for this session.
-    red_flags_overridden: bool = False
+    # SCOPED overrides (v0.12): each entry suppresses only the SPECIFIC flags the
+    # physician reviewed, at the state they reviewed them. New red flags appearing
+    # later (new urinary retention, fever, trauma…) MUST alarm again — the old
+    # session-wide `red_flags_overridden: bool` was a permanent global bypass.
+    red_flag_overrides: list[dict[str, Any]] = field(default_factory=list)
     # Two-phase override approval in flight (see backend/runtime/approvals.py).
     pending_approval: dict[str, Any] = field(default_factory=dict)
+
+    def overridden_flags(self) -> set[str]:
+        out: set[str] = set()
+        for override in self.red_flag_overrides:
+            out |= set(override.get("overridden_flags") or [])
+        return out
     # EIG ranking of the latest follow-up targets (BED-style question selection audit).
     last_question_selection: list[dict[str, Any]] = field(default_factory=list)
 
@@ -363,13 +372,10 @@ class YaoBiInterviewEngine:
         return "。".join(d["content"] for d in case.dialogue_history if d.get("role") == "user")
 
     def _detect_red_flags(self, case: YaoBiCaseState) -> None:
-        if case.red_flags_overridden:
-            case.red_flags = []
-            case.safety_level = "low"
-            return
         o, p, h = case.ortho_neuro_slots, case.pain_slots, case.history_slots
-        flags: list[str] = []
-        emergency = False
+        # (flag_text, is_emergency): keeping the level per-flag lets scoped overrides
+        # recompute the emergency status over the REMAINING flags only.
+        found: list[tuple[str, bool]] = []
 
         # SHARED SAFETY KERNEL (v0.11): the interview must grade red flags with the
         # same category-tiered, temporality- and experiencer-aware kernel as every
@@ -386,35 +392,55 @@ class YaoBiInterviewEngine:
                 case_json = case_extract_skill(narrative)
                 normalized_tags = case_normalize_skill(case_json).get("normalized_tags") or []
                 kernel = safety_guard_skill(case_json, None, normalized_tags)
-                if emergency_halt_required(kernel):
-                    emergency = True
+                kernel_emergency = emergency_halt_required(kernel)
                 if kernel.get("safety_status") == "urgent":
-                    flags.extend(f.get("message") or str(f.get("term")) for f in kernel.get("confirmed_red_flags") or [])
+                    for f in kernel.get("confirmed_red_flags") or []:
+                        found.append((f.get("message") or str(f.get("term")), kernel_emergency))
         except Exception:
             # FAIL CLOSED: if the shared kernel crashes, the interview must not
             # silently continue as if the case were safe.
-            flags.append("安全内核解析异常，本轮按高风险处理，请线下评估（已记录待人工复核）。")
+            found.append(("安全内核解析异常，本轮按高风险处理，请线下评估（已记录待人工复核）。", False))
         # Cauda equina syndrome: hard stop, must go to ER immediately.
         # _slot_positive keeps a denial string ("否"/"正常") from firing a false emergency.
         if _slot_positive(o.get("bowel_bladder_dysfunction")):
-            flags.append("大小便功能异常，需警惕马尾神经受压 → 立即急诊")
-            emergency = True
+            found.append(("大小便功能异常，需警惕马尾神经受压 → 立即急诊", True))
         if _slot_positive(o.get("saddle_anesthesia")):
-            flags.append("会阴区麻木，需警惕马尾神经受压 → 立即急诊")
-            emergency = True
+            found.append(("会阴区麻木，需警惕马尾神经受压 → 立即急诊", True))
         # High-risk: serious but can be clarified/corrected by the user.
         if _slot_positive(o.get("progressive_weakness")):
-            flags.append("进行性下肢无力，需排查神经受压")
+            found.append(("进行性下肢无力，需排查神经受压", False))
         if _slot_positive(o.get("severe_trauma")):
-            flags.append("明显外伤后腰痛，需排查骨折")
+            found.append(("明显外伤后腰痛，需排查骨折", False))
         if _slot_positive(h.get("osteoporosis")) and (_slot_positive(p.get("pain_severity")) or _slot_positive(o.get("severe_trauma"))):
-            flags.append("骨质疏松合并急性剧痛，需排查压缩性骨折")
+            found.append(("骨质疏松合并急性剧痛，需排查压缩性骨折", False))
         if _slot_positive(o.get("fever")):
-            flags.append("发热合并腰背痛，需排查感染")
+            found.append(("发热合并腰背痛，需排查感染", False))
         if _slot_positive(o.get("tumor_history")) and _slot_positive(p.get("night_pain")):
-            flags.append("肿瘤病史合并夜间痛，需排查转移")
+            found.append(("肿瘤病史合并夜间痛，需排查转移", False))
         if _slot_positive(o.get("unexplained_weight_loss")):
-            flags.append("不明原因消瘦，需排查肿瘤")
+            found.append(("不明原因消瘦，需排查肿瘤", False))
+
+        # SCOPED override consumption (v0.12): suppress only the specific flags the
+        # physician reviewed; a flag NOT in the overridden set — i.e. newly appearing
+        # evidence — alarms again, and the emergency status is recomputed over the
+        # REMAINING flags only. An override of "会阴麻木" cannot silence a later
+        # "发热寒战" or a new trauma.
+        overridden = case.overridden_flags()
+        seen: set[str] = set()
+        remaining: list[tuple[str, bool]] = []
+        suppressed = 0
+        for text, is_emergency in found:
+            if text in seen:
+                continue
+            seen.add(text)
+            if text in overridden:
+                suppressed += 1
+            else:
+                remaining.append((text, is_emergency))
+        flags = [text for text, _ in remaining]
+        if suppressed and flags:
+            flags.append(f"（另有 {suppressed} 项红旗已由医师审批覆盖；以上为覆盖后仍在报警的线索）")
+        emergency = any(is_emergency for _, is_emergency in remaining)
         case.red_flags = flags
         case.safety_level = "emergency" if emergency else ("high" if flags else "low")
 
@@ -601,31 +627,46 @@ class YaoBiInterviewEngine:
 
         ts = int(time.time())
         reviewer = (reviewer_id or "").strip()
+        # Confirming or revising an emergency referral is a physician act with clinical
+        # accountability — anonymous confirmation is not allowed (v0.12 P0-7). The
+        # reviewer id arrives from the server's AUTHENTICATED subject, never from the
+        # request body.
+        if action in {"confirm", "revise"} and not reviewer:
+            message = "⚠️ 医师确认/修订需要已认证的医师身份（reviewer 由服务端认证派生），未执行任何更改。"
+            pack = self._pack(case, message, done=False)
+            pack["approval_error"] = "authenticated_reviewer_required"
+            return pack
+
         if action == "confirm":
             case.physician_review = {
                 "status": "confirmed",
                 "physician_notes": physician_notes or "",
-                "reviewer_id": reviewer or None,
+                "reviewer_id": reviewer,
                 "reviewed_at": ts,
             }
             note = f"（备注：{physician_notes}）" if physician_notes else ""
-            message = f"医师已确认急诊转诊建议。{note}"
+            message = f"医师（{reviewer}）已确认急诊转诊建议。{note}"
             case.dialogue_history.append({"role": "physician", "content": message})
             return self._pack(case, message, done=True)
 
         if action == "revise":
+            if not (physician_notes or "").strip():
+                message = "⚠️ 修订转诊建议必须附修订理由/备注，未执行任何更改。"
+                pack = self._pack(case, message, done=False)
+                pack["approval_error"] = "revision_notes_required"
+                return pack
             case.physician_review = {
                 "status": "revised",
                 "physician_notes": physician_notes,
-                "reviewer_id": reviewer or None,
+                "reviewer_id": reviewer,
                 "reviewed_at": ts,
             }
-            message = f"医师已修订转诊建议。\n\n**医师备注：**{physician_notes}"
+            message = f"医师（{reviewer}）已修订转诊建议。\n\n**医师备注：**{physician_notes}"
             case.dialogue_history.append({"role": "physician", "content": message})
             return self._pack(case, message, done=True)
 
         if action == "override":
-            from backend.runtime.approvals import get_approval_manager
+            from backend.runtime.approvals import AuditWriteError, get_approval_manager
 
             reason = (override_reason or "").strip()
             if not reviewer or not reason:
@@ -640,7 +681,14 @@ class YaoBiInterviewEngine:
             manager = get_approval_manager()
             pending = case.pending_approval or {}
             if confirm_override and approval_id and pending.get("approval_id") == approval_id:
-                decided = manager.decide(approval_id, decision="approve", reviewer_id=reviewer)
+                try:
+                    decided = manager.decide(approval_id, decision="approve", reviewer_id=reviewer)
+                except AuditWriteError:
+                    # Fail closed: an override that cannot be audited is not committed.
+                    message = "⚠️ 审计写入失败：高风险覆盖不予执行（fail-closed），请联系管理员检查审计存储。"
+                    pack = self._pack(case, message, done=False)
+                    pack["approval_error"] = "audit_unavailable_high_risk_denied"
+                    return pack
                 if decided is None:
                     message = "⚠️ 覆盖确认失败：审批不存在、已决或确认人与申请人不一致。未执行任何更改。"
                     pack = self._pack(case, message, done=False)
@@ -657,8 +705,18 @@ class YaoBiInterviewEngine:
                     "overridden_red_flags": overridden_flags,
                     "reviewed_at": ts,
                 }
-                # Bypass future red-flag detection for this session (physician has assessed).
-                case.red_flags_overridden = True
+                # SCOPED override (v0.12): only the flags the physician actually
+                # reviewed are suppressed, bound to this approval and the state at
+                # review time. Red-flag detection keeps running — new findings
+                # (new retention, fever, trauma) alarm again.
+                case.red_flag_overrides.append({
+                    "approval_id": approval_id,
+                    "reviewer_id": reviewer,
+                    "overridden_flags": overridden_flags,
+                    "approved_turn_count": case.turn_count,
+                    "scope": "existing_evidence_only",
+                    "reviewed_at": ts,
+                })
                 case.red_flags = []
                 case.safety_level = "low"
                 override_msg = (
@@ -669,13 +727,19 @@ class YaoBiInterviewEngine:
                 return self.run_turn(case, "")
 
             # Phase 1: create the pending approval; clinical state is untouched.
-            request = manager.create(
-                action_type="override_emergency_referral",
-                session_id=case.session_id,
-                reviewer_id=reviewer,
-                reason=reason,
-                payload={"red_flags": list(case.red_flags), "safety_level": case.safety_level},
-            )
+            try:
+                request = manager.create(
+                    action_type="override_emergency_referral",
+                    session_id=case.session_id,
+                    reviewer_id=reviewer,
+                    reason=reason,
+                    payload={"red_flags": list(case.red_flags), "safety_level": case.safety_level},
+                )
+            except AuditWriteError:
+                message = "⚠️ 审计写入失败：无法创建高风险覆盖审批（fail-closed），请联系管理员检查审计存储。"
+                pack = self._pack(case, message, done=False)
+                pack["approval_error"] = "audit_unavailable_high_risk_denied"
+                return pack
             case.pending_approval = {
                 "approval_id": request.approval_id,
                 "action_type": request.action_type,

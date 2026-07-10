@@ -6,6 +6,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +31,31 @@ from backend.llm.prompt_templates import (
     SYSTEM_PROMPT,
 )
 
-DaoBackend = Literal["disabled", "mock", "http", "transformers"]
+DaoBackend = Literal["disabled", "mock", "http", "poe", "minimax", "azure", "transformers"]
+
+# Hosted chat-completions providers served by the shared OpenAI-compatible HTTP path.
+# "http" is the generic bring-your-own endpoint; the named providers add correct
+# default endpoints, auth-header conventions and provider-specific error surfaces:
+#   poe     — https://api.poe.com/v1/chat/completions (Bearer POE_API_KEY,
+#             model = Poe bot name, e.g. "Claude-Sonnet-4.5" / "GPT-4o")
+#   minimax — https://api.minimax.chat/v1/text/chatcompletion_v2 (Bearer
+#             MINIMAX_API_KEY, model e.g. "MiniMax-Text-01" / "abab6.5s-chat";
+#             errors arrive as HTTP 200 + base_resp.status_code != 0)
+#   azure   — {AZURE_OPENAI_ENDPOINT}/openai/deployments/{deployment}/chat/
+#             completions?api-version=... ("api-key" header, model taken from
+#             the deployment in the URL)
+OPENAI_COMPATIBLE_BACKENDS = frozenset({"http", "poe", "minimax", "azure"})
+
+_PROVIDER_DEFAULT_ENDPOINTS = {
+    "poe": "https://api.poe.com/v1/chat/completions",
+    "minimax": "https://api.minimax.chat/v1/text/chatcompletion_v2",
+}
+_PROVIDER_KEY_ENVS = {
+    "poe": ("TAO_API_KEY", "POE_API_KEY"),
+    "minimax": ("TAO_API_KEY", "MINIMAX_API_KEY"),
+    "azure": ("TAO_API_KEY", "AZURE_OPENAI_API_KEY"),
+    "http": ("TAO_API_KEY",),
+}
 
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
 
@@ -77,6 +102,11 @@ class DaoGenerationConfig:
     backend: DaoBackend = "disabled"
     endpoint_url: str | None = None
     api_key: str | None = None
+    # Azure OpenAI specifics: the deployment name replaces the model in the URL and
+    # the api-version is a required query parameter. endpoint_url may be either the
+    # resource base ("https://myres.openai.azure.com") or a full completions URL.
+    azure_deployment: str | None = None
+    azure_api_version: str = "2024-06-01"
     temperature: float = 0.3
     top_p: float = 0.85
     repetition_penalty: float = 1.1
@@ -91,12 +121,28 @@ class DaoGenerationConfig:
 
     @classmethod
     def from_env(cls) -> "DaoGenerationConfig":
+        backend = os.getenv("TAO_BACKEND", "disabled")
+        # Provider-aware credential/endpoint resolution: TAO_API_KEY always wins; the
+        # provider's conventional variable (POE_API_KEY / MINIMAX_API_KEY /
+        # AZURE_OPENAI_API_KEY) is the fallback. Endpoints: explicit TAO_ENDPOINT_URL
+        # first, then the provider default (Azure: AZURE_OPENAI_ENDPOINT resource base).
+        api_key = None
+        for env_name in _PROVIDER_KEY_ENVS.get(backend, ("TAO_API_KEY",)):
+            api_key = os.getenv(env_name)
+            if api_key:
+                break
+        endpoint_url = os.getenv("TAO_ENDPOINT_URL") or _PROVIDER_DEFAULT_ENDPOINTS.get(backend)
+        if backend == "azure" and not os.getenv("TAO_ENDPOINT_URL"):
+            endpoint_url = os.getenv("AZURE_OPENAI_ENDPOINT")
         return cls(
             model_id=os.getenv("TAO_MODEL_ID", cls.model_id),
             model_revision=os.getenv("TAO_MODEL_REVISION") or None,
-            backend=os.getenv("TAO_BACKEND", "disabled"),  # type: ignore[arg-type]
-            endpoint_url=os.getenv("TAO_ENDPOINT_URL"),
-            api_key=os.getenv("TAO_API_KEY"),
+            backend=backend,  # type: ignore[arg-type]
+            endpoint_url=endpoint_url,
+            api_key=api_key,
+            azure_deployment=os.getenv("TAO_AZURE_DEPLOYMENT") or os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            azure_api_version=os.getenv("TAO_AZURE_API_VERSION")
+            or os.getenv("AZURE_OPENAI_API_VERSION") or cls.azure_api_version,
             temperature=float(os.getenv("TAO_TEMPERATURE", "0.3")),
             top_p=float(os.getenv("TAO_TOP_P", "0.85")),
             repetition_penalty=float(os.getenv("TAO_REPETITION_PENALTY", "1.1")),
@@ -176,7 +222,7 @@ class DaoClient:
         backend = self.config.backend
         if backend == "disabled":
             state = "disabled"
-        elif backend in {"mock", "http"}:
+        elif backend == "mock" or backend in OPENAI_COMPATIBLE_BACKENDS:
             state = "ready"
         else:
             state = self.__class__._load_state
@@ -198,8 +244,8 @@ class DaoClient:
 
         backend = self.config.backend
         if backend == "disabled":
-            return {"ok": False, "state": "disabled", "backend": backend, "reason": "Tao backend disabled (set TAO_BACKEND=transformers/http/mock)."}
-        if backend in {"mock", "http"}:
+            return {"ok": False, "state": "disabled", "backend": backend, "reason": "Tao backend disabled (set TAO_BACKEND=transformers/http/poe/minimax/azure/mock)."}
+        if backend == "mock" or backend in OPENAI_COMPATIBLE_BACKENDS:
             self.__class__._load_state = "ready"
             return {"ok": True, "state": "ready", "backend": backend, "model_id": self.config.model_id}
         if backend == "transformers":
@@ -255,15 +301,27 @@ class DaoClient:
         """
 
         if self.config.backend == "disabled":
-            raise DaoRuntimeError(f"Tao {task} runtime is disabled. Set TAO_BACKEND=http or transformers to enable.")
+            raise DaoRuntimeError(f"Tao {task} runtime is disabled. Set TAO_BACKEND=http/poe/minimax/azure or transformers to enable.")
+        # Model-call budget is charged HERE — the single funnel every generation task
+        # passes through — so nested skill calls can never under-count model usage
+        # the way planner-side guessing did (harness review v0.12).
+        from backend.runtime.execution_context import charge_active_run
+
+        exhausted = charge_active_run("model_call")
+        if exhausted is not None:
+            raise DaoRuntimeError(f"model-call budget exhausted before Tao {task} call ({exhausted.value}).")
         if self.config.backend == "mock":
+            charge_active_run("model_output_chars", len(mock_value))
             return mock_value
         params = self._profile_params(profile)
-        if self.config.backend == "http":
-            return self._generate_http(body, history=history, params=params)
-        if self.config.backend == "transformers":
-            return self._generate_transformers(self.build_prompt(body, history), params=params)
-        raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
+        if self.config.backend in OPENAI_COMPATIBLE_BACKENDS:
+            text = self._generate_http(body, history=history, params=params)
+        elif self.config.backend == "transformers":
+            text = self._generate_transformers(self.build_prompt(body, history), params=params)
+        else:
+            raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
+        charge_active_run("model_output_chars", len(text or ""))
+        return text
 
     def generate_followup_probes(self, probe_context: dict[str, Any]) -> str:
         max_probes = int(probe_context.get("max_probes", 2))
@@ -421,14 +479,22 @@ class DaoClient:
 
         if self.config.backend == "disabled":
             raise DaoRuntimeError("Tao direct chat is disabled. Set TAO_BACKEND=transformers for local model inference.")
+        from backend.runtime.execution_context import charge_active_run
+
+        exhausted = charge_active_run("model_call")
+        if exhausted is not None:
+            raise DaoRuntimeError(f"model-call budget exhausted before Tao chat call ({exhausted.value}).")
         if self.config.backend == "mock":
             return "Tao mock direct reply: 已收到问题；当前项目中模型输出仍需规则与安全 guard 复核。"
         params = self._profile_params("teaching_explanation")
-        if self.config.backend == "http":
-            return self._generate_http(user_input, history=history, params=params)
-        if self.config.backend == "transformers":
-            return self._generate_transformers(self.build_prompt(user_input, history), stream_callback=stream_callback, params=params)
-        raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
+        if self.config.backend in OPENAI_COMPATIBLE_BACKENDS:
+            text = self._generate_http(user_input, history=history, params=params)
+        elif self.config.backend == "transformers":
+            text = self._generate_transformers(self.build_prompt(user_input, history), stream_callback=stream_callback, params=params)
+        else:
+            raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
+        charge_active_run("model_output_chars", len(text or ""))
+        return text
 
     def _generate_mock(self, structured_rule_outputs: dict[str, Any]) -> str:
         tags = "、".join(structured_rule_outputs.get("normalized_tags", [])[:8]) or "未提供"
@@ -782,13 +848,56 @@ class DaoClient:
     _HTTP_MAX_ATTEMPTS = 3
     _HTTP_BACKOFF_SECONDS = 1.0
 
+    def _resolve_http_provider(self) -> tuple[str, dict[str, str], bool]:
+        """Resolve (request_url, auth_headers, include_model_in_payload) per provider.
+
+        The named providers share the OpenAI-compatible wire shape but differ in
+        exactly the three things this returns:
+        - azure: URL is ``{resource}/openai/deployments/{deployment}/chat/completions
+          ?api-version=...`` (built here when endpoint_url is a resource base), auth is
+          an ``api-key`` header, and the model is selected by the deployment in the
+          URL — an in-payload "model" field is ignored/rejected, so it is omitted.
+        - poe / minimax / http: Bearer auth, model in the payload. The hosted
+          providers must have a key (an unauthenticated call can only fail); the
+          generic ``http`` backend keeps supporting keyless self-hosted endpoints.
+        """
+
+        backend = self.config.backend
+        endpoint = self.config.endpoint_url
+        if backend == "azure":
+            if not endpoint:
+                raise DaoRuntimeError(
+                    "Azure OpenAI endpoint is required. Set AZURE_OPENAI_ENDPOINT "
+                    "(resource base) or TAO_ENDPOINT_URL (full completions URL)."
+                )
+            if not self.config.api_key:
+                raise DaoRuntimeError("Azure OpenAI API key is required. Set TAO_API_KEY or AZURE_OPENAI_API_KEY.")
+            url = endpoint
+            if "/chat/completions" not in url:
+                deployment = self.config.azure_deployment or self.config.model_id
+                url = (
+                    f"{endpoint.rstrip('/')}/openai/deployments/"
+                    f"{urllib.parse.quote(deployment, safe='')}/chat/completions"
+                )
+            if "api-version=" not in url:
+                separator = "&" if "?" in url else "?"
+                url = f"{url}{separator}api-version={urllib.parse.quote(self.config.azure_api_version, safe='')}"
+            return url, {"api-key": self.config.api_key}, False
+        if not endpoint:
+            raise DaoRuntimeError(f"TAO_ENDPOINT_URL is required when TAO_BACKEND={backend}.")
+        if backend in {"poe", "minimax"} and not self.config.api_key:
+            provider_env = _PROVIDER_KEY_ENVS[backend][-1]
+            raise DaoRuntimeError(f"{backend} API key is required. Set TAO_API_KEY or {provider_env}.")
+        headers = {"Authorization": f"Bearer {self.config.api_key}"} if self.config.api_key else {}
+        return endpoint, headers, True
+
     def _generate_http(
         self,
         user_content: str,
         history: list[dict[str, str]] | None = None,
         params: dict[str, Any] | None = None,
     ) -> str:
-        """Call an OpenAI-compatible endpoint with plain chat messages.
+        """Call an OpenAI-compatible endpoint (http/poe/minimax/azure) with chat messages.
 
         The endpoint applies its own chat template, so we must NOT send the locally
         templated ``<|im_start|>`` prompt string here — only raw message contents.
@@ -796,28 +905,27 @@ class DaoClient:
         their deterministic-fallback guarantee instead of surfacing an HTTP 500.
         """
 
-        if not self.config.endpoint_url:
-            raise DaoRuntimeError("TAO_ENDPOINT_URL is required when TAO_BACKEND=http.")
+        url, auth_headers, include_model = self._resolve_http_provider()
+        label = self.config.backend
         params = params or self._profile_params("teaching_explanation")
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         for turn in history or []:
             messages.append({"role": turn["role"], "content": turn["content"]})
         messages.append({"role": "user", "content": user_content})
         payload = {
-            "model": self.config.model_id,
             "messages": messages,
             "temperature": params["temperature"],
             "top_p": params["top_p"],
             "max_tokens": params["max_new_tokens"],
         }
+        if include_model:
+            payload["model"] = self.config.model_id
         data = json.dumps(payload).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        headers = {"Content-Type": "application/json", **auth_headers}
 
         last_error: Exception | None = None
         for attempt in range(self._HTTP_MAX_ATTEMPTS):
-            request = urllib.request.Request(self.config.endpoint_url, data=data, headers=headers, method="POST")
+            request = urllib.request.Request(url, data=data, headers=headers, method="POST")
             try:
                 with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
                     body = json.loads(response.read().decode("utf-8"))
@@ -826,16 +934,25 @@ class DaoClient:
                 last_error = exc
                 if exc.code < 500:
                     # Client errors (bad key, bad payload) will not heal on retry.
-                    raise DaoRuntimeError(f"HTTP Tao endpoint returned {exc.code}: {exc.reason}") from exc
+                    raise DaoRuntimeError(f"Tao {label} endpoint returned {exc.code}: {exc.reason}") from exc
             except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
                 last_error = exc
             if attempt < self._HTTP_MAX_ATTEMPTS - 1:
                 time.sleep(self._HTTP_BACKOFF_SECONDS * (2**attempt))
         else:
             raise DaoRuntimeError(
-                f"HTTP Tao endpoint failed after {self._HTTP_MAX_ATTEMPTS} attempts: "
+                f"Tao {label} endpoint failed after {self._HTTP_MAX_ATTEMPTS} attempts: "
                 f"{type(last_error).__name__}: {last_error}"
             ) from last_error
+
+        # MiniMax reports failures as HTTP 200 + base_resp.status_code != 0 (e.g. 1004
+        # auth failed, 1008 insufficient balance) — surface those as runtime errors
+        # instead of returning an empty/garbage completion downstream.
+        base_resp = body.get("base_resp") if isinstance(body, dict) else None
+        if isinstance(base_resp, dict) and base_resp.get("status_code") not in (None, 0):
+            raise DaoRuntimeError(
+                f"Tao {label} endpoint error {base_resp.get('status_code')}: {base_resp.get('status_msg')}"
+            )
 
         if "choices" in body:
             choice = body["choices"][0]
@@ -844,7 +961,7 @@ class DaoClient:
             return body["text"]
         if "generated_text" in body:
             return body["generated_text"]
-        raise DaoRuntimeError("HTTP Tao endpoint response did not contain choices/text/generated_text.")
+        raise DaoRuntimeError(f"Tao {label} endpoint response did not contain choices/text/generated_text.")
 
     def _load_transformers_runtime(self) -> tuple[Any, Any, Any]:
         if importlib.util.find_spec("transformers") is None:

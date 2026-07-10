@@ -176,3 +176,110 @@ def test_provenance_carries_runtime_fingerprints():
     for key in ("prompt_bundle_hash", "guard_version", "policy_bundle_hash", "tool_registry_hash", "case_schema_hash"):
         assert block.get(key), f"missing {key}"
     assert "git_commit" in block
+
+
+# -- v0.12 harness governance additions ------------------------------------------------------
+
+def test_budget_charged_at_execution_point_not_planner():
+    from backend.runtime.execution_context import use_run
+
+    run = AgentRun(goal="budget-probe")
+    run.start()
+    with use_run(run):
+        get_registry().invoke("syndrome_router_skill", {"normalized_tags": ["dark_tongue", "chronic_yabi"]}, role="clinician")
+        get_registry().invoke("case_extract_skill", {"raw_text": "腰痛"}, role="patient")
+    assert run.budget.tool_calls == 2  # every real tool call counted, none guessed
+
+
+def test_budget_exhaustion_blocks_tool_execution():
+    from backend.runtime.execution_context import use_run
+    from backend.runtime.run_context import RunBudget
+
+    run = AgentRun(goal="exhaust", budget=RunBudget(max_tool_calls=1))
+    run.start()
+    with use_run(run):
+        first = get_registry().invoke("case_extract_skill", {"raw_text": "腰痛"}, role="patient")
+        second = get_registry().invoke("case_extract_skill", {"raw_text": "腰痛"}, role="patient")
+    assert first["status"] == "success"
+    assert second["status"] == "error" and second["error_type"] == "tool_policy_denied"
+
+
+def test_model_call_budget_charged_in_dao_client():
+    from backend.llm.dao_client import DaoClient, DaoGenerationConfig
+    from backend.runtime.execution_context import use_run
+
+    run = AgentRun(goal="model-budget")
+    run.start()
+    client = DaoClient(DaoGenerationConfig(backend="mock"))
+    with use_run(run):
+        client.generate_consultation({"question": "q", "scope": "s", "evidence": {}})
+    assert run.budget.model_calls == 1
+    assert run.budget.model_output_chars > 0
+
+
+def test_schema_rejects_unknown_and_out_of_enum_arguments():
+    res = get_registry().invoke("case_extract_skill", {"raw_text": "腰痛", "ignore_safety": True}, role="patient")
+    assert res["error_type"] == "tool_input_error" and "unknown properties" in res["error"]
+    res = get_registry().invoke("patient_request_guard_skill", {"user_request": "开方", "user_role": "admin"}, role="system")
+    assert res["error_type"] == "tool_input_error" and "enum" in res["error"]
+
+
+def test_output_schema_blocks_malformed_tool_results():
+    from backend.tools.registry import ToolRegistry, ToolSpec
+
+    registry = ToolRegistry()
+    registry.register(ToolSpec(
+        name="bad_safety", description="returns malformed safety output",
+        handler=lambda: {"safety_status": "totally_fine"},
+        parameters={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        allowed_roles=frozenset({"system"}),
+        output_schema={"type": "object", "required": ["safety_status"],
+                       "properties": {"safety_status": {"type": "string", "enum": ["safe", "caution", "urgent"]}}},
+    ))
+    res = registry.invoke("bad_safety", {}, role="system")
+    assert res["status"] == "error" and res["error_type"] == "tool_output_validation_error"
+
+
+def test_blackboard_owned_key_requires_producer():
+    bb = Blackboard(case_state={})
+    with pytest.raises(BlackboardOwnershipError):
+        bb.put("routed", {"x": 1})  # anonymous write to an owned key
+
+
+def test_audit_chain_resumes_across_restart(tmp_path):
+    log1 = AuditLog(directory=tmp_path, enabled=True)
+    r1 = log1.record("e1", {"a": 1})
+    log2 = AuditLog(directory=tmp_path, enabled=True)  # "restart"
+    r2 = log2.record("e2", {"b": 2})
+    assert r2["prev_event_hash"] == r1["event_hash"]  # chain continues, no new genesis
+    assert len(r2["event_hash"]) == 64                # full SHA-256
+    assert verify_chain([r1, r2])["valid"] is True
+
+
+def test_approval_persists_across_manager_restart(tmp_path, monkeypatch):
+    monkeypatch.setenv("YAOBI_STATE_DB", str(tmp_path / "state.db"))
+    import backend.runtime.event_store as es
+    monkeypatch.setattr(es, "_STORE_CACHE", None)
+
+    manager1 = ApprovalManager()
+    req = manager1.create(action_type="override_emergency_referral", session_id="s-persist",
+                          reviewer_id="dr-9", reason="持久化测试", payload={})
+    manager2 = ApprovalManager()  # fresh process simulation: empty memory
+    decided = manager2.decide(req.approval_id, decision="approve", reviewer_id="dr-9")
+    assert decided is not None and decided.status == "approved"
+
+
+def test_high_risk_approval_fails_closed_when_audit_write_fails(monkeypatch):
+    import backend.runtime.approvals as approvals_module
+    from backend.runtime.approvals import AuditWriteError
+
+    class BrokenAudit:
+        enabled = True
+        def record(self, *_a, **_k):
+            return None  # simulated disk failure
+
+    monkeypatch.setattr(approvals_module, "get_audit_log", lambda: BrokenAudit())
+    manager = ApprovalManager()
+    with pytest.raises(AuditWriteError):
+        manager.create(action_type="override_emergency_referral", session_id="s-fc",
+                       reviewer_id="dr-1", reason="审计失败演练", payload={})

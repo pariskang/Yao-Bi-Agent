@@ -56,18 +56,82 @@ def _build() -> ToolRegistry:
 
     registry = ToolRegistry()
 
+    ROLE_ENUM = ["patient", "clinician", "researcher", "system"]
+
+    # Output contracts for the highest-value tools: a result that fails these is
+    # discarded (classified ToolOutputValidationError → audit → deterministic
+    # fallback/raise), never passed downstream (harness review v0.12 P1-10).
+    OUTPUT_SCHEMAS: dict[str, dict] = {
+        "safety_guard_skill": {
+            "type": "object",
+            "required": ["safety_status", "action_level", "confirmed_red_flags", "need_further_inquiry"],
+            "properties": {
+                "safety_status": {"type": "string", "enum": ["safe", "caution", "urgent"]},
+                "action_level": {"type": "string", "enum": ["A0", "A1", "A2", "A3"]},
+                "confirmed_red_flags": {"type": "array", "items": {"type": "object"}},
+                "denied_red_flags": {"type": "array", "items": {"type": "object"}},
+                "uncertain_red_flags": {"type": "array", "items": {"type": "object"}},
+                "historical_red_flags": {"type": "array", "items": {"type": "object"}},
+                "policy_flags": {"type": "array", "items": {"type": "object"}},
+                "need_further_inquiry": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "syndrome_router_skill": {
+            "type": "object",
+            "required": ["syndrome_candidates", "rule_hits"],
+            "properties": {
+                "syndrome_candidates": {
+                    "type": "array",
+                    "items": {"type": "object", "required": ["name", "score", "confidence"],
+                              "properties": {"name": {"type": "string"}, "score": {"type": "integer"},
+                                             "confidence": {"type": "string", "enum": ["low", "medium", "high"]}}},
+                },
+                "rule_hits": {"type": "array", "items": {"type": "object"}},
+            },
+        },
+        "formula_base_selector_skill": {
+            "type": "object",
+            "required": ["formula_routes", "formula_rule_hits", "route_gate"],
+            "properties": {
+                "formula_routes": {"type": "array", "items": {"type": "object"}},
+                "primary_route": {"type": ["object", "null"]},
+                "formula_rule_hits": {"type": "array", "items": {"type": "object"}},
+                "route_gate": {"type": "object", "required": ["allowed"]},
+            },
+        },
+        "clinical_scope_router_skill": {
+            "type": "object",
+            "required": ["domain", "in_scope", "allowed_capabilities", "reason_codes"],
+            "properties": {
+                "domain": {"type": "string",
+                           "enum": ["spine", "emergency", "trauma", "fracture_followup",
+                                    "spine_fracture_followup", "joint", "unknown"]},
+                "in_scope": {"type": "boolean"},
+                "allowed_capabilities": {"type": "array", "items": {"type": "string"}},
+                "blocked_capabilities": {"type": "array", "items": {"type": "string"}},
+                "reason_codes": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    }
+    ROLE_ENUM_TOOLS = {
+        "patient_request_guard_skill", "cdss_recommendation_skill", "consent_privacy_skill",
+        "tao_report_generation_skill",
+    }
+
     def add(fn, description: str, roles: frozenset[str], risk: str, *,
             execution: str = "registry", idempotent: bool = True, timeout: float = 5.0) -> None:
+        enums = {"user_role": ROLE_ENUM} if fn.__name__ in ROLE_ENUM_TOOLS else None
         registry.register(ToolSpec(
             name=fn.__name__,
             description=description,
             handler=fn,
-            parameters=schema_from_callable(fn),
+            parameters=schema_from_callable(fn, param_enums=enums),
             allowed_roles=roles,
             risk_level=risk,
             idempotent=idempotent,
             timeout_seconds=timeout,
             execution=execution,
+            output_schema=OUTPUT_SCHEMAS.get(fn.__name__, {"type": "object"}),
         ))
 
     # --- deterministic clinical chain -------------------------------------------------

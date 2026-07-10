@@ -79,15 +79,26 @@ class IllegalRunTransition(RuntimeError):
 
 @dataclass
 class RunBudget:
-    """Central spend meter for one run. ``charge`` returns a StopReason when exhausted."""
+    """Central spend meter for one run. ``charge`` returns a StopReason when exhausted.
+
+    tool_calls and model_calls are charged at the REAL execution points
+    (``ToolRegistry.invoke`` / ``DaoClient._dispatch``) via the ambient execution
+    context — never guessed by planners (one intent may execute 5–8 real tools).
+    ``model_output_chars`` is the zero-dependency stand-in for token budgets:
+    character counts are tokenizer-free, monotone with tokens, and enforce the
+    same runaway-generation bound (true token/cost accounting is a production
+    concern once a tokenizer/pricing model is pinned).
+    """
 
     max_iterations: int = 8
-    max_tool_calls: int = 32
-    max_model_calls: int = 8
+    max_tool_calls: int = 64
+    max_model_calls: int = 12
+    max_model_output_chars: int = 120_000
     max_wall_time_seconds: float = 120.0
     iterations: int = 0
     tool_calls: int = 0
     model_calls: int = 0
+    model_output_chars: int = 0
     started_at: float = field(default_factory=time.time)
 
     def charge(self, kind: str, amount: int = 1) -> StopReason | None:
@@ -103,6 +114,10 @@ class RunBudget:
             self.model_calls += amount
             if self.model_calls > self.max_model_calls:
                 return StopReason.BUDGET_EXHAUSTED
+        elif kind == "model_output_chars":
+            self.model_output_chars += amount
+            if self.model_output_chars > self.max_model_output_chars:
+                return StopReason.BUDGET_EXHAUSTED
         if time.time() - self.started_at > self.max_wall_time_seconds:
             return StopReason.BUDGET_EXHAUSTED
         return None
@@ -112,6 +127,7 @@ class RunBudget:
             "iterations": f"{self.iterations}/{self.max_iterations}",
             "tool_calls": f"{self.tool_calls}/{self.max_tool_calls}",
             "model_calls": f"{self.model_calls}/{self.max_model_calls}",
+            "model_output_chars": f"{self.model_output_chars}/{self.max_model_output_chars}",
             "elapsed_seconds": round(time.time() - self.started_at, 2),
             "max_wall_time_seconds": self.max_wall_time_seconds,
         }

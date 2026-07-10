@@ -14,18 +14,20 @@ from backend.agents.orchestrator import AgentOrchestrator
 from backend.agents.skill_router import INTENT_BY_ID, INTENTS, route_intent, suggested_questions
 from backend.llm.dao_client import DaoClient
 from backend.skills.case_experience_summary_skill import case_experience_summary_skill
-from backend.skills.case_extract_skill import case_extract_skill
-from backend.skills.case_normalize_skill import case_normalize_skill
 from backend.skills.clinical_scope_router_skill import question_scope_gate
-from backend.skills.conflict_checker_skill import conflict_checker_skill
-from backend.skills.formula_base_selector_skill import formula_base_selector_skill
-from backend.skills.herb_module_composer_skill import herb_module_composer_skill
-from backend.skills.mined_evidence_skill import load_mined_rules, mined_evidence_skill
+from backend.skills.mined_evidence_skill import load_mined_rules
 from backend.skills.physician_reasoning_skill import physician_reasoning_skill
-from backend.skills.safety_guard_skill import safety_guard_skill
-from backend.skills.syndrome_router_skill import syndrome_router_skill
 from backend.skills.tao_consultation_skill import tao_consultation_skill
-from backend.skills.uncertainty_skill import uncertainty_skill
+from backend.tools import get_registry
+
+# All deterministic clinical skills are invoked through the tool registry (role
+# authorization, schema validation, budget charging at the execution point, audit
+# spans). Only runtime-bound LLM-overlay skills (consultation / reasoning /
+# experience — they own the DaoClient) remain direct, by design.
+
+
+def _tool(name, **kwargs):
+    return get_registry().call(name, role="system", **kwargs)
 
 # Clinical intents whose answer should be a Tao-primary grounded consultation (the model is
 # the main reasoner) rather than a bare rule snippet. Scope guides the prompt per intent.
@@ -145,8 +147,8 @@ class ConversationSession:
         """
 
         try:
-            case_json = case_extract_skill(question)
-            normalized = case_normalize_skill(case_json)
+            case_json = _tool("case_extract_skill", raw_text=question)
+            normalized = _tool("case_normalize_skill", case_json=case_json)
         except Exception:
             # Fail closed: a crashed safety extraction must not silently pass the turn
             # through to clinical reasoning with stale facts (entry review, §6).
@@ -166,7 +168,7 @@ class ConversationSession:
         self.case_state["normalized_tags"] = merged_tags
 
         red = dict(self.case_state.get("red_flags") or {})
-        graded = safety_guard_skill(case_json, None, merged_tags)
+        graded = _tool("safety_guard_skill", case_json=case_json, matched_modules=None, normalized_tags=merged_tags)
         confirmed_terms = [f.get("term") or f.get("id") for f in graded.get("confirmed_red_flags") or []]
         items = set(red.get("positive_items") or []) | {t for t in confirmed_terms if t}
         old_status = red.get("status")
@@ -242,7 +244,7 @@ class ConversationSession:
         return self.case_state.get("normalized_tags", []) or []
 
     def _h_syndrome(self) -> dict[str, Any]:
-        routed = syndrome_router_skill(self._tags())
+        routed = _tool("syndrome_router_skill", normalized_tags=self._tags())
         cands = routed.get("syndrome_candidates") or []
         if not cands:
             return {"answer": "当前病例信息不足以形成稳定证候倾向，建议补充舌脉与四诊。", "evidence": [], "skills": ["syndrome_router_skill"]}
@@ -250,8 +252,8 @@ class ConversationSession:
         return {"answer": "\n".join(lines), "evidence": cands[0].get("evidence_tags", []), "skills": ["syndrome_router_skill"]}
 
     def _h_formula(self) -> dict[str, Any]:
-        routed = syndrome_router_skill(self._tags())
-        formula = formula_base_selector_skill(self._tags(), routed.get("syndrome_candidates", []))
+        routed = _tool("syndrome_router_skill", normalized_tags=self._tags())
+        _f = _tool; formula = _f("formula_base_selector_skill", normalized_tags=self._tags(), syndrome_candidates=routed.get("syndrome_candidates", []))
         routes = formula.get("formula_routes") or []
         if not routes:
             return {"answer": "暂无稳定方剂路线信号，建议补充关键证候变量。", "evidence": [], "skills": ["formula_base_selector_skill"]}
@@ -259,9 +261,9 @@ class ConversationSession:
         return {"answer": "\n".join(lines), "evidence": [r["name"] for r in routes[:4]], "skills": ["formula_base_selector_skill"]}
 
     def _h_herb(self) -> dict[str, Any]:
-        routed = syndrome_router_skill(self._tags())
-        formula = formula_base_selector_skill(self._tags(), routed.get("syndrome_candidates", []))
-        modules = herb_module_composer_skill(self._tags(), formula.get("primary_route"))
+        routed = _tool("syndrome_router_skill", normalized_tags=self._tags())
+        _f = _tool; formula = _f("formula_base_selector_skill", normalized_tags=self._tags(), syndrome_candidates=routed.get("syndrome_candidates", []))
+        modules = _tool("herb_module_composer_skill", normalized_tags=self._tags(), formula_route=formula.get("primary_route"))
         matched = modules.get("matched_modules") or []
         if not matched:
             return {"answer": "暂无匹配的用药功效模块，需补充信息。", "evidence": [], "skills": ["herb_module_composer_skill"]}
@@ -269,10 +271,10 @@ class ConversationSession:
         return {"answer": "\n".join(lines), "evidence": [m["name"] for m in matched[:6]], "skills": ["herb_module_composer_skill"]}
 
     def _h_safety(self) -> dict[str, Any]:
-        routed = syndrome_router_skill(self._tags())
-        formula = formula_base_selector_skill(self._tags(), routed.get("syndrome_candidates", []))
-        modules = herb_module_composer_skill(self._tags(), formula.get("primary_route"))
-        safety = safety_guard_skill({"evidence": {"raw_text": ""}, "red_flags": self.case_state.get("red_flags", {}).get("positive_items", [])}, modules.get("matched_modules"), self._tags())
+        routed = _tool("syndrome_router_skill", normalized_tags=self._tags())
+        _f = _tool; formula = _f("formula_base_selector_skill", normalized_tags=self._tags(), syndrome_candidates=routed.get("syndrome_candidates", []))
+        modules = _tool("herb_module_composer_skill", normalized_tags=self._tags(), formula_route=formula.get("primary_route"))
+        safety = _tool("safety_guard_skill", case_json={"evidence": {"raw_text": ""}, "red_flags": self.case_state.get("red_flags", {}).get("positive_items", [])}, matched_modules=modules.get("matched_modules"), normalized_tags=self._tags())
         risks = safety.get("medication_risks") or []
         lines = [f"安全状态：**{safety.get('safety_status')}**。"]
         if risks:
@@ -305,8 +307,8 @@ class ConversationSession:
         return {"answer": res["answer"], "evidence": res.get("evidence", []), "skills": ["xlsx_case_miner"]}
 
     def _h_evidence(self) -> dict[str, Any]:
-        routed = syndrome_router_skill(self._tags())
-        ev = mined_evidence_skill(self._tags(), routed.get("syndrome_candidates", []))
+        routed = _tool("syndrome_router_skill", normalized_tags=self._tags())
+        ev = _tool("mined_evidence_skill", normalized_tags=self._tags(), syndrome_candidates=routed.get("syndrome_candidates", []))
         rules = ev.get("mined_evidence") or []
         if not rules:
             return {"answer": "当前病例标签未匹配到挖掘候选规则。", "evidence": [], "skills": ["mined_evidence_skill"]}
@@ -314,18 +316,18 @@ class ConversationSession:
         return {"answer": "\n".join(lines), "evidence": [r["rule_id"] for r in rules[:6]], "skills": ["mined_evidence_skill"]}
 
     def _h_reasoning(self) -> dict[str, Any]:
-        routed = syndrome_router_skill(self._tags())
-        formula = formula_base_selector_skill(self._tags(), routed.get("syndrome_candidates", []))
-        modules = herb_module_composer_skill(self._tags(), formula.get("primary_route"))
+        routed = _tool("syndrome_router_skill", normalized_tags=self._tags())
+        _f = _tool; formula = _f("formula_base_selector_skill", normalized_tags=self._tags(), syndrome_candidates=routed.get("syndrome_candidates", []))
+        modules = _tool("herb_module_composer_skill", normalized_tags=self._tags(), formula_route=formula.get("primary_route"))
         pr = physician_reasoning_skill(self.case_state, routed.get("syndrome_candidates", []), formula.get("formula_routes"), modules.get("matched_modules"), dao_client=self.dao_client, use_llm=False)["physician_reasoning"]
         chain = pr.get("reasoning_chain") or []
         lines = ["辨证推理链（倾向性，非最终诊断）："] + [f"{s['step']}. {s['title']}：{s['content']}" for s in chain]
         return {"answer": "\n".join(lines), "evidence": [s["title"] for s in chain], "skills": ["physician_reasoning_skill"], "used_llm": False}
 
     def _h_experience(self) -> dict[str, Any]:
-        routed = syndrome_router_skill(self._tags())
-        formula = formula_base_selector_skill(self._tags(), routed.get("syndrome_candidates", []))
-        modules = herb_module_composer_skill(self._tags(), formula.get("primary_route"))
+        routed = _tool("syndrome_router_skill", normalized_tags=self._tags())
+        _f = _tool; formula = _f("formula_base_selector_skill", normalized_tags=self._tags(), syndrome_candidates=routed.get("syndrome_candidates", []))
+        modules = _tool("herb_module_composer_skill", normalized_tags=self._tags(), formula_route=formula.get("primary_route"))
         ce = case_experience_summary_skill(self.case_state, routed.get("syndrome_candidates", []), formula.get("formula_routes"), modules.get("matched_modules"), mode="case", dao_client=self.dao_client, use_llm=False)["case_experience_summary"]
         return {"answer": ce.get("summary_markdown", ""), "evidence": ce.get("key_points", []), "skills": ["case_experience_summary_skill"], "used_llm": False}
 
@@ -347,21 +349,23 @@ class ConversationSession:
         """Gather the deterministic rule/mined evidence that grounds the Tao consultation."""
 
         tags = self._tags()
-        routed = syndrome_router_skill(tags)
+        routed = _tool("syndrome_router_skill", normalized_tags=tags)
         cands = routed.get("syndrome_candidates") or []
-        formula = formula_base_selector_skill(tags, cands)
+        formula = _tool("formula_base_selector_skill", normalized_tags=tags, syndrome_candidates=cands)
         routes = formula.get("formula_routes") or []
-        modules = herb_module_composer_skill(tags, formula.get("primary_route"))
+        modules = _tool("herb_module_composer_skill", normalized_tags=tags, formula_route=formula.get("primary_route"))
         matched = modules.get("matched_modules") or []
-        safety = safety_guard_skill(
-            {"evidence": {"raw_text": ""}, "red_flags": (self.case_state.get("red_flags") or {}).get("positive_items", [])},
-            matched, tags,
+        safety = _tool(
+            "safety_guard_skill",
+            case_json={"evidence": {"raw_text": ""}, "red_flags": (self.case_state.get("red_flags") or {}).get("positive_items", [])},
+            matched_modules=matched, normalized_tags=tags,
         )
-        mined = mined_evidence_skill(tags, cands).get("mined_evidence") or []
-        uncertainty = uncertainty_skill(cands, tags)["uncertainty"]
+        mined = _tool("mined_evidence_skill", normalized_tags=tags, syndrome_candidates=cands).get("mined_evidence") or []
+        uncertainty = _tool("uncertainty_skill", syndrome_candidates=cands, normalized_tags=tags)["uncertainty"]
         comorbidity = self.case_state.get("comorbidity") or {}
-        interactions = conflict_checker_skill(
-            matched, formula.get("primary_route"),
+        interactions = _tool(
+            "conflict_checker_skill",
+            matched_modules=matched, formula_route=formula.get("primary_route"),
             medications=comorbidity.get("medications") or [],
             conditions=comorbidity.get("diseases") or [],
         )

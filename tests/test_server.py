@@ -277,41 +277,49 @@ def test_interview_review_requires_clinician_role(monkeypatch):
 
 
 def test_interview_physician_override_is_two_phase_approval(monkeypatch):
-    """Override = pending approval (no state change) → same-reviewer confirmation → execute."""
+    """Override = pending approval (no state change) → SAME authenticated reviewer
+    confirms → execute. Reviewer identity derives from the auth token (v0.12) —
+    request-body reviewer_id can never decide who the reviewer is."""
     server = _server(monkeypatch)
+    monkeypatch.setenv("YAOBI_CLINICIAN_TOKENS", "dr-001:tok1,dr-999:tok2")
     server.handle_interview({"session_id": "ph_o", "reset": True})
     _interview(server, "ph_o", "大小便失禁，会阴麻木")      # triggers emergency
 
-    # Missing reviewer_id → refused, nothing changes.
+    # Missing reason → refused, nothing changes.
     res = server.handle_interview({
         "session_id": "ph_o", "review_action": "override", "doctor_mode": True,
-        "override_reason": "患者描述有误，实际无膀胱症状",
+        "clinician_token": "tok1",
     })
     assert res.get("approval_error") == "reviewer_id_and_reason_required"
     assert res["state"] == "SAFETY_REFERRAL"
 
-    # Phase 1: pending approval created; red flags still standing.
+    # Phase 1: pending approval created under the AUTHENTICATED subject dr-001;
+    # a fabricated body reviewer_id is ignored for identity.
     res = server.handle_interview({
         "session_id": "ph_o", "review_action": "override", "doctor_mode": True,
-        "override_reason": "患者描述有误，实际无膀胱症状", "reviewer_id": "dr-001",
+        "clinician_token": "tok1", "reviewer_id": "主任医师A（伪造）",
+        "override_reason": "患者描述有误，实际无膀胱症状",
     })
     approval = res.get("pending_approval") or {}
     assert approval.get("status") == "pending"
+    assert approval.get("reviewer_id") == "dr-001"          # auth-derived, not the body claim
     assert res["state"] == "SAFETY_REFERRAL"
     assert res["safety_level"] != "low"
 
-    # A different reviewer cannot confirm someone else's override.
+    # A DIFFERENT authenticated physician cannot confirm someone else's override.
     res_wrong = server.handle_interview({
         "session_id": "ph_o", "review_action": "override", "doctor_mode": True,
-        "override_reason": "患者描述有误，实际无膀胱症状", "reviewer_id": "dr-999",
+        "clinician_token": "tok2",
+        "override_reason": "患者描述有误，实际无膀胱症状",
         "confirm_override": True, "approval_id": approval["approval_id"],
     })
     assert res_wrong.get("approval_error") == "approval_confirmation_failed"
 
-    # Phase 2: same reviewer confirms → override executes, FSM resumes.
+    # Phase 2: the same authenticated reviewer confirms → override executes.
     res = server.handle_interview({
         "session_id": "ph_o", "review_action": "override", "doctor_mode": True,
-        "override_reason": "患者描述有误，实际无膀胱症状", "reviewer_id": "dr-001",
+        "clinician_token": "tok1",
+        "override_reason": "患者描述有误，实际无膀胱症状",
         "confirm_override": True, "approval_id": approval["approval_id"],
     })
     assert res["safety_level"] == "low"
@@ -319,5 +327,10 @@ def test_interview_physician_override_is_two_phase_approval(monkeypatch):
     assert res["physician_review"]["status"] == "overridden"
     assert res["physician_review"]["reviewer_id"] == "dr-001"
     assert res["physician_review"]["approval_id"] == approval["approval_id"]
-    assert "无膀胱症状" in res["physician_review"]["override_reason"]
     assert res["done"] is False                              # interview continues
+
+    # SCOPED override (v0.12): a NEW red flag after the override must alarm again —
+    # the old session-wide bypass is gone.
+    res_new = server.handle_interview({"session_id": "ph_o", "message": "今天开始发热寒战，体温39度"})
+    assert res_new["safety_level"] in {"high", "emergency"}
+    assert any("发热" in f or "感染" in f for f in res_new["red_flags"])

@@ -40,7 +40,7 @@ from backend.agents.skill_router import suggested_questions
 from backend.agents.yaobi_interview import YaoBiCaseState, YaoBiInterviewEngine
 from backend.audit import get_audit_log, get_counters
 from backend.audit.audit_log import text_digest
-from backend.llm.dao_client import DaoClient, DaoRuntimeError
+from backend.llm.dao_client import OPENAI_COMPATIBLE_BACKENDS, DaoClient, DaoRuntimeError
 from backend.llm.output_guard import filter_patient_payload
 from backend.provenance import get_provenance
 from backend.skills.case_extract_skill import case_extract_skill
@@ -55,7 +55,7 @@ FRONTEND_DIR = ROOT / "frontend"
 
 # Shared, process-wide client (the heavy transformers model is cached on the class).
 CLIENT = DaoClient()
-TAO_ENABLED = CLIENT.config.backend in {"mock", "http", "transformers"}
+TAO_ENABLED = CLIENT.config.backend in ({"mock", "transformers"} | OPENAI_COMPATIBLE_BACKENDS)
 
 # Map frontend intake stages to FSM states and the fields Tao may hint at (must mirror the
 # allowed fields so a generated probe cannot drive a state jump or invent a new field).
@@ -139,21 +139,57 @@ def _resolve_role(data: dict[str, Any]) -> tuple[str, str]:
     / ``local_demo`` / ``public_no_token_denied``.
     """
 
+    return _resolve_auth(data)[:2]
+
+
+def _clinician_token_map() -> dict[str, str]:
+    """Per-identity tokens: YAOBI_CLINICIAN_TOKENS="dr-001:tokenA,dr-002:tokenB".
+
+    Binds an authenticated *subject* to each token so review actions can be
+    attributed to a specific clinician instead of a request-body string.
+    """
+
+    raw = os.getenv("YAOBI_CLINICIAN_TOKENS") or ""
+    mapping: dict[str, str] = {}
+    for pair in raw.split(","):
+        if ":" in pair:
+            subject, token = pair.split(":", 1)
+            if subject.strip() and token.strip():
+                mapping[subject.strip()] = token.strip()
+    return mapping
+
+
+def _resolve_auth(data: dict[str, Any]) -> tuple[str, str, str | None]:
+    """(role, source, subject_id) — the subject is the AUTHENTICATED identity.
+
+    reviewer identity for approvals is derived from this subject, never from a
+    request-body field: a caller holding a clinician token cannot claim to be a
+    different physician (harness review v0.12 P0).
+    """
+
     if not data.get("doctor_mode"):
-        return "patient", "default_patient"
+        return "patient", "default_patient", None
+    supplied = str(data.get("clinician_token") or "")
+    token_map = _clinician_token_map()
+    if token_map:
+        for subject, token in token_map.items():
+            if hmac.compare_digest(supplied, token):
+                return "clinician", "token_verified", subject
+        # fall through to the single shared token, if additionally configured
     expected = os.getenv("YAOBI_CLINICIAN_TOKEN") or ""
     if expected:
-        supplied = str(data.get("clinician_token") or "")
         if hmac.compare_digest(supplied, expected):
-            return "clinician", "token_verified"
-        return "patient", "token_mismatch"
+            return "clinician", "token_verified", os.getenv("YAOBI_CLINICIAN_ID") or "clinician-token-holder"
+        return "patient", "token_mismatch", None
+    if token_map:
+        return "patient", "token_mismatch", None
     if _publicly_bound():
-        return "patient", "public_no_token_denied"
-    return "clinician", "local_demo"
+        return "patient", "public_no_token_denied", None
+    return "clinician", "local_demo", "local-demo-clinician"
 
 
 def _role(data: dict[str, Any]) -> str:
-    return _resolve_role(data)[0]
+    return _resolve_auth(data)[0]
 
 
 def _clinician_only(data: dict[str, Any]) -> dict[str, Any] | None:
@@ -439,12 +475,21 @@ def handle_interview(data: dict[str, Any]) -> dict[str, Any]:
             denied = _clinician_only(data)
             if denied:
                 return {**denied, "session_id": session_id, "tao": tao_info()}
+            # Reviewer identity comes from the AUTHENTICATED subject, never from the
+            # request body — a body reviewer_id is recorded as a claim in the audit
+            # trail but cannot decide who the reviewer is (v0.12 P0).
+            _, _, auth_subject = _resolve_auth(data)
+            claimed = str(data.get("reviewer_id") or "")
+            if claimed and auth_subject and claimed != auth_subject:
+                AUDIT.record("reviewer_identity_claim_mismatch", {
+                    "session_id": session_id, "auth_subject": auth_subject, "claimed": claimed[:64],
+                })
             result = engine.run_review(
                 case,
                 action=review_action,
                 physician_notes=str(data.get("physician_notes") or ""),
                 override_reason=str(data.get("override_reason") or ""),
-                reviewer_id=str(data.get("reviewer_id") or ""),
+                reviewer_id=auth_subject or "",
                 confirm_override=bool(data.get("confirm_override")),
                 approval_id=str(data.get("approval_id") or ""),
             )
