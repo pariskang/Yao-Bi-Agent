@@ -413,6 +413,44 @@ collaboration 三入口都输出了当归四逆汤——本轮统一：
   重启后医生仍可确认此前的 pending 覆盖审批；`YAOBI_STATE_DB` 可配置/禁用。
   黑板受控键强制 producer 声明（匿名写即异常）。
 
+## 多提供商模型后端（v0.13：Poe / MiniMax / Azure OpenAI）
+
+`TAO_BACKEND` 在原有 `disabled / mock / http / transformers` 之外新增三个托管提供商
+后端：`poe`、`minimax`、`azure`。它们复用同一条 OpenAI 兼容 HTTP 通路（零第三方
+依赖，仍是 stdlib `urllib`），差异被收敛为三件事：默认端点、鉴权头约定、错误面。
+所有既有治理不变：模型调用仍走 `DaoClient` 单一漏斗（执行点预算扣减、输出守卫、
+失败回退确定性规则）。
+
+```bash
+# Poe（model 为 bot 名，如 Claude-Sonnet-4.5 / GPT-4o / Gemini-2.5-Pro）
+TAO_BACKEND=poe POE_API_KEY=... TAO_MODEL_ID=Claude-Sonnet-4.5 python -m backend.server
+
+# MiniMax（HTTP 200 + base_resp.status_code != 0 的错误面已识别为运行时错误）
+TAO_BACKEND=minimax MINIMAX_API_KEY=... TAO_MODEL_ID=MiniMax-Text-01 python -m backend.server
+
+# Azure OpenAI（资源端点 + 部署名；URL 与 api-version 自动构造，api-key 头鉴权）
+TAO_BACKEND=azure AZURE_OPENAI_API_KEY=... \
+  AZURE_OPENAI_ENDPOINT=https://myres.openai.azure.com \
+  AZURE_OPENAI_DEPLOYMENT=gpt-4o-prod python -m backend.server
+```
+
+| 变量 | 适用后端 | 说明 |
+|---|---|---|
+| `TAO_API_KEY` | 全部 | 统一密钥入口，优先于各提供商变量 |
+| `POE_API_KEY` / `MINIMAX_API_KEY` / `AZURE_OPENAI_API_KEY` | 对应提供商 | 提供商惯用密钥变量（`TAO_API_KEY` 未设时生效） |
+| `TAO_ENDPOINT_URL` | 全部 | 显式端点，覆盖提供商默认（Poe/MiniMax 有内置默认） |
+| `AZURE_OPENAI_ENDPOINT` | azure | 资源基址（如 `https://myres.openai.azure.com`）；也可用 `TAO_ENDPOINT_URL` 直接给完整 completions URL |
+| `TAO_AZURE_DEPLOYMENT` / `AZURE_OPENAI_DEPLOYMENT` | azure | 部署名（缺省回退 `TAO_MODEL_ID`），进入 URL 路径 |
+| `TAO_AZURE_API_VERSION` / `AZURE_OPENAI_API_VERSION` | azure | api-version 查询参数（默认 `2024-06-01`） |
+
+约定：Poe/MiniMax 用 `Authorization: Bearer` 且 payload 携带 `model`；Azure 用
+`api-key` 头，模型由 URL 中的 deployment 决定（payload 不带 `model`）。托管提供商
+缺密钥即刻 fail-fast 并在错误信息中给出应设置的环境变量；泛用 `http` 后端继续支持
+无密钥的自建端点（vLLM/Ollama 等）。请求构造逐提供商有 CI 测试
+（`tests/test_model_backends.py`，mock `urlopen` 断言 URL/头/payload），后端清单
+与 `config/hermes_agent.yaml`、`config/model_config.yaml` 的 `supported_backends`
+由测试锁定同步。
+
 ## CDSS 草案模块
 
 项目新增 `cdss_recommendation_skill`，用于医生端 CDSS 自动生成候选诊断、候选证型、方剂路线和药物模块草案。该草案状态固定为 `draft_for_clinician_review`，不是最终诊断、不是签名处方、不是患者可见医嘱，也不会生成患者可执行剂量；最终医嘱仍需 `physician_review_skill` 医师手工录入并签名。

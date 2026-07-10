@@ -40,7 +40,7 @@ from backend.agents.skill_router import suggested_questions
 from backend.agents.yaobi_interview import YaoBiCaseState, YaoBiInterviewEngine
 from backend.audit import get_audit_log, get_counters
 from backend.audit.audit_log import text_digest
-from backend.llm.dao_client import DaoClient, DaoRuntimeError
+from backend.llm.dao_client import OPENAI_COMPATIBLE_BACKENDS, DaoClient, DaoRuntimeError
 from backend.llm.output_guard import filter_patient_payload
 from backend.provenance import get_provenance
 from backend.skills.case_extract_skill import case_extract_skill
@@ -55,7 +55,7 @@ FRONTEND_DIR = ROOT / "frontend"
 
 # Shared, process-wide client (the heavy transformers model is cached on the class).
 CLIENT = DaoClient()
-TAO_ENABLED = CLIENT.config.backend in {"mock", "http", "transformers"}
+TAO_ENABLED = CLIENT.config.backend in ({"mock", "transformers"} | OPENAI_COMPATIBLE_BACKENDS)
 
 # Map frontend intake stages to FSM states and the fields Tao may hint at (must mirror the
 # allowed fields so a generated probe cannot drive a state jump or invent a new field).

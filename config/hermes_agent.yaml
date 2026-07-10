@@ -2,7 +2,7 @@ agent_name: ShenQinrong_YaoBi_Hermes_Agent
 case_guide_agent_name: YaoBi_CaseGuide_Hermes_Agent
 # Single version fact: must equal pyproject.toml [project].version and
 # backend/provenance.py APP_VERSION (enforced by tests/test_version_consistency.py).
-version: 0.12.0
+version: 0.13.0
 mode: research_education_clinician_review_only
 base_model: CMLM/Dao1-30b-a3b
 purpose: 名老中医腰痹诊疗经验研究助手 / 临床处方辅助系统的非处方化规则解释内核
@@ -35,7 +35,9 @@ default_sequence:
   - tao_report_generation_skill
 tao_runtime:
   default_enabled: false
-  supported_backends: [disabled, mock, http, transformers]
+  # http = generic OpenAI-compatible endpoint; poe/minimax/azure are hosted providers
+  # served by the same wire path with provider-correct endpoints/auth (v0.13).
+  supported_backends: [disabled, mock, http, poe, minimax, azure, transformers]
   output_format: json_object
   json_repair: true
   guardrail: no_final_diagnosis_no_patient_executable_prescription_no_dose
@@ -82,7 +84,7 @@ dynamic_logic:
 
 case_guide_agent:
   agent_name: YaoBi_CaseGuide_Hermes_Agent
-  version: 0.12.0
+  version: 0.13.0
   purpose: 自动导引患者形成标准化腰痹医案
   mode: research_education_clinician_review_only
   system_prompt: |
