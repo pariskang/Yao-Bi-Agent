@@ -383,6 +383,36 @@ collaboration 三入口都输出了当归四逆汤——本轮统一：
   `/api/metrics`、`/api/warmup` 公网绑定需令牌；前端输入框与协作时间轴动态字段
   XSS 修复。
 
+## Harness 治理深化层（v0.12：执行点预算、认证身份审批与持久化首步）
+
+针对第六轮外部评审的整改（`app_version` 同步为 0.12.0；逐条处置见
+[`docs/harness_governance_review_response_2026-07.md`](docs/harness_governance_review_response_2026-07.md)）：
+
+- **预算在真实执行点扣减（P0，含确凿 bug 修复）**：修复 Orchestrator 忽略
+  `charge()` 返回值的缺陷（预算耗尽即中断并记录）；新增环境执行上下文
+  （stdlib contextvars），`ToolRegistry.invoke` 与 `DaoClient` 生成漏斗在执行点
+  扣减 tool_call/model_call——"planner 记 1 次、实际执行 5–8 个工具"的口径错误
+  消除；RunBudget 新增模型输出字符维度（零依赖 token 预算替身）。
+- **全入口统一走注册表 + import 棘轮（P0）**：chat/collaboration/autonomous 的
+  全部确定性技能调用改经 `registry.call`（角色/schema/预算/span 全覆盖）；
+  新增 import 棘轮 CI——agents/server 对 skills 的直接 import 只允许白名单
+  （运行时绑定 overlay、纯 helper、interview 引擎，逐条注明），新增即失败。
+- **审批身份来自认证（P0）**：`YAOBI_CLINICIAN_TOKENS`（id:token 映射）派生
+  reviewer 主体，请求体 reviewer_id 不再决定身份（伪造值入审计）；另一位真实
+  医生无法确认他人的覆盖申请；confirm/revise 同样要求认证身份，revise 必须附理由。
+- **红旗覆盖范围化（P0）**：`red_flags_overridden: bool` 全局永久绕过已删除——
+  override 只抑制医师审阅过的具体 flag（绑定 approval/reviewer/状态），检测持续
+  运行，覆盖后新发红旗（新尿潴留/发热/外伤）重新报警（有测试）。
+- **Registry 强类型化（P1）**：additionalProperties:false 默认拒绝未知参数；
+  user_role 等枚举收敛；safety_guard/syndrome/formula/scope 四个核心工具定义
+  输出契约——不合法输出 discard+audit+fallback，永不进入下游。
+- **审计链强化 + fail-closed（P0/P1）**：event_hash 全长 SHA-256；链头持久化
+  （重启续链而非新 genesis，删尾即断裂）；高风险审批在审计写失败时拒绝提交
+  （audit_unavailable_high_risk_denied）。
+- **持久化首步（P1）**：stdlib SQLite 事件存储（approvals + run_events）——
+  重启后医生仍可确认此前的 pending 覆盖审批；`YAOBI_STATE_DB` 可配置/禁用。
+  黑板受控键强制 producer 声明（匿名写即异常）。
+
 ## CDSS 草案模块
 
 项目新增 `cdss_recommendation_skill`，用于医生端 CDSS 自动生成候选诊断、候选证型、方剂路线和药物模块草案。该草案状态固定为 `draft_for_clinician_review`，不是最终诊断、不是签名处方、不是患者可见医嘱，也不会生成患者可执行剂量；最终医嘱仍需 `physician_review_skill` 医师手工录入并签名。

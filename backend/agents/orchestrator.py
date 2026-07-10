@@ -21,6 +21,7 @@ from typing import Any
 
 from backend.agents.base import AgentResult, Blackboard
 from backend.agents.clinical_agents import DEFAULT_AGENTS, EMERGENCY_AGENT
+from backend.runtime.execution_context import use_run
 from backend.runtime.run_context import AgentRun, StopReason
 
 
@@ -37,7 +38,12 @@ class AgentOrchestrator:
         return roster
 
     def run(self, case_state: dict[str, Any], use_llm: bool = False, dao_client: Any | None = None) -> dict[str, Any]:
-        run = AgentRun(goal="multi_agent_collaboration", user_role="clinician")
+        from backend.runtime.run_context import RunBudget
+
+        # Iteration budget sized to the roster (fixed agent chain, not an open loop);
+        # tool/model spend inside each agent is charged at the real execution points.
+        run = AgentRun(goal="multi_agent_collaboration", user_role="clinician",
+                       budget=RunBudget(max_iterations=len(self.agents) + 4))
         run.start()
         bb = Blackboard(case_state=case_state, use_llm=use_llm, dao_client=dao_client)
         trace: list[dict[str, Any]] = []
@@ -54,8 +60,22 @@ class AgentOrchestrator:
                     "handoff_to": list(getattr(agent, "handoff_to", [])), "llm_runtime": None,
                 })
                 continue
-            run.budget.charge("tool_call")
-            result = agent.run(bb)
+            # Budget check BEFORE running the agent — a charge() whose return value is
+            # ignored is not a budget (harness review v0.12 P0). Real tool/model calls
+            # inside the agent are charged at the execution points via the ambient run.
+            exhausted = run.budget.charge("iteration")
+            if exhausted is not None:
+                step += 1
+                trace.append({
+                    "step": step, "agent": "BudgetManager", "role": "预算管理", "kind": "rule",
+                    "status": "halt", "summary": f"运行预算耗尽（{exhausted.value}），停止剩余智能体。",
+                    "confidence": None, "used_llm": False, "evidence": [],
+                    "handoff_to": [], "llm_runtime": None,
+                })
+                run.finish(StopReason.BUDGET_EXHAUSTED, note="agent loop truncated")
+                break
+            with use_run(run):
+                result = agent.run(bb)
             step += 1
             trace.append(result.to_message(step))
             results.append(result)

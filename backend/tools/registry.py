@@ -92,18 +92,30 @@ def _annotation_to_schema(annotation: str) -> dict[str, Any]:
     return schema
 
 
-def schema_from_callable(fn: Callable[..., Any], exclude: tuple[str, ...] = ("dao_client",)) -> dict[str, Any]:
-    """JSON schema for a tool derived from its real signature — the anti-drift source."""
+def schema_from_callable(
+    fn: Callable[..., Any],
+    exclude: tuple[str, ...] = ("dao_client",),
+    param_enums: dict[str, list[Any]] | None = None,
+) -> dict[str, Any]:
+    """JSON schema for a tool derived from its real signature — the anti-drift source.
+
+    ``additionalProperties: false`` by default: unknown arguments ("ignore_safety": true)
+    are a schema violation, not a Python TypeError deep inside the handler.
+    ``param_enums`` narrows string parameters to closed vocabularies (e.g. user_role).
+    """
 
     properties: dict[str, Any] = {}
     required: list[str] = []
     for name, param in inspect.signature(fn).parameters.items():
         if name in exclude or param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
             continue
-        properties[name] = _annotation_to_schema(param.annotation)
+        prop = _annotation_to_schema(param.annotation)
+        if param_enums and name in param_enums:
+            prop["enum"] = list(param_enums[name])
+        properties[name] = prop
         if param.default is param.empty:
             required.append(name)
-    return {"type": "object", "properties": properties, "required": required}
+    return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
 
 
 # --------------------------------------------------------------- schema validation
@@ -127,12 +139,17 @@ def _validate(value: Any, schema: dict[str, Any], path: str) -> list[str]:
     if "enum" in schema and value not in schema["enum"]:
         problems.append(f"{path}: {value!r} not in enum {schema['enum']}")
     if isinstance(value, dict):
-        for key, sub in (schema.get("properties") or {}).items():
+        properties = schema.get("properties") or {}
+        for key, sub in properties.items():
             if key in value:
                 problems.extend(_validate(value[key], sub, f"{path}.{key}"))
         for key in schema.get("required") or []:
             if key not in value:
                 problems.append(f"{path}: missing required property '{key}'")
+        if schema.get("additionalProperties") is False:
+            unknown = sorted(set(value) - set(properties))
+            if unknown:
+                problems.append(f"{path}: unknown properties {unknown} (additionalProperties: false)")
     if isinstance(value, list) and schema.get("items"):
         for i, item in enumerate(value):
             problems.extend(_validate(item, schema["items"], f"{path}[{i}]"))
@@ -231,6 +248,16 @@ class ToolRegistry:
         if role not in spec.allowed_roles:
             return envelope("error", error=ToolPolicyDenied(
                 f"role '{role}' is not authorized for tool '{name}' (allowed: {sorted(spec.allowed_roles)})"
+            ))
+        # Budget is charged HERE — the real execution point — via the ambient run
+        # context, so nested tools inside one intent are all counted (never guessed
+        # at the planner layer). No ambient run ⇒ no charge (library use).
+        from backend.runtime.execution_context import charge_active_run
+
+        exhausted = charge_active_run("tool_call")
+        if exhausted is not None:
+            return envelope("error", error=ToolPolicyDenied(
+                f"run budget exhausted before tool '{name}' ({exhausted.value})"
             ))
         if spec.handler is None or spec.execution != "registry":
             return envelope("error", error=ToolPolicyDenied(

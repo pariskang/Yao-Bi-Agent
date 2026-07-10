@@ -71,10 +71,17 @@ class Blackboard:
 
     def put(self, key: str, value: Any, producer: str | None = None) -> None:
         owner = BLACKBOARD_KEY_OWNERS.get(key)
-        if owner is not None and producer is not None and producer != owner:
-            raise BlackboardOwnershipError(
-                f"agent '{producer}' may not write blackboard key '{key}' (owner: {owner})"
-            )
+        if owner is not None:
+            # Owned keys REQUIRE an explicit producer: an anonymous write would
+            # silently bypass ownership (harness review v0.12 P0-5).
+            if producer is None:
+                raise BlackboardOwnershipError(
+                    f"blackboard key '{key}' is owned by {owner}: writes must declare producer="
+                )
+            if producer != owner:
+                raise BlackboardOwnershipError(
+                    f"agent '{producer}' may not write blackboard key '{key}' (owner: {owner})"
+                )
         self._seq += 1
         self.outputs[key] = value
         self.meta[key] = {

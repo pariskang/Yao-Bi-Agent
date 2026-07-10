@@ -51,10 +51,31 @@ class ApprovalRequest:
         return asdict(self)
 
 
+class AuditWriteError(RuntimeError):
+    """High-risk commit refused: the audit record could not be written (fail closed)."""
+
+
+def _audit_or_fail(event_type: str, payload: dict[str, Any]) -> None:
+    """Audit is a PRECONDITION for high-risk approval actions: when audit is enabled
+    but the write fails, the action is denied instead of committed unaccountably.
+    (A deployment that explicitly disabled audit has made that decision itself.)"""
+
+    log = get_audit_log()
+    record = log.record(event_type, payload)
+    if log.enabled and record is None:
+        raise AuditWriteError(f"audit write failed for {event_type}; high-risk action denied")
+
+
 class ApprovalManager:
     def __init__(self) -> None:
         self._lock = Lock()
         self._requests: dict[str, ApprovalRequest] = {}
+
+    @staticmethod
+    def _store():
+        from backend.runtime.event_store import get_event_store
+
+        return get_event_store()
 
     def create(self, *, action_type: str, session_id: str, reviewer_id: str, reason: str,
                payload: dict[str, Any] | None = None) -> ApprovalRequest:
@@ -66,37 +87,64 @@ class ApprovalManager:
             risk_level=RISK_LEVELS.get(action_type, "critical"),
             payload=payload or {},
         )
-        with self._lock:
-            self._requests[request.approval_id] = request
-        get_audit_log().record("approval_requested", {
+        # Fail closed BEFORE registering: no unaudited pending approval may exist.
+        _audit_or_fail("approval_requested", {
             "approval_id": request.approval_id, "action_type": action_type,
             "session_id": session_id, "reviewer_id": reviewer_id,
             "risk_level": request.risk_level, "reason": reason[:300],
             "payload": payload or {},
         })
+        with self._lock:
+            self._requests[request.approval_id] = request
+        store = self._store()
+        if store is not None:
+            store.save_approval(request.to_dict())
+            store.append_event("APPROVAL_REQUESTED", {"approval_id": request.approval_id,
+                                                      "action_type": action_type, "reviewer_id": reviewer_id})
         return request
 
     def get(self, approval_id: str) -> ApprovalRequest | None:
         with self._lock:
-            return self._requests.get(approval_id)
+            request = self._requests.get(approval_id)
+        if request is not None:
+            return request
+        # Restart recovery: rehydrate a persisted approval (e.g. the physician
+        # confirms the next day after a redeploy).
+        store = self._store()
+        if store is not None:
+            record = store.load_approval(approval_id)
+            if record is not None:
+                request = ApprovalRequest(**{k: v for k, v in record.items() if k in ApprovalRequest.__dataclass_fields__})
+                with self._lock:
+                    self._requests[approval_id] = request
+                return request
+        return None
 
     def decide(self, approval_id: str, *, decision: str, reviewer_id: str) -> ApprovalRequest | None:
         """Approve/reject a pending request. The confirming reviewer must match the requester."""
 
+        request = self.get(approval_id)
         with self._lock:
-            request = self._requests.get(approval_id)
             if request is None or request.status != "pending":
                 return None
             if reviewer_id != request.reviewer_id:
                 # A different human cannot silently complete someone else's override.
                 return None
-            request.status = "approved" if decision == "approve" else "rejected"
-            request.decided_at = time.time()
-        get_audit_log().record("approval_decided", {
+            new_status = "approved" if decision == "approve" else "rejected"
+        # Fail closed: the decision is only committed if it can be audited.
+        _audit_or_fail("approval_decided", {
             "approval_id": approval_id, "action_type": request.action_type,
             "session_id": request.session_id, "reviewer_id": reviewer_id,
-            "decision": request.status,
+            "decision": new_status,
         })
+        with self._lock:
+            request.status = new_status
+            request.decided_at = time.time()
+        store = self._store()
+        if store is not None:
+            store.save_approval(request.to_dict())
+            store.append_event("APPROVAL_DECIDED", {"approval_id": approval_id, "decision": new_status,
+                                                    "reviewer_id": reviewer_id})
         return request
 
 

@@ -31,11 +31,13 @@ from backend.agents.critics import contradiction_critic, evidence_critic, policy
 from backend.agents.skill_router import ALLOWED_INTENTS, INTENT_BY_ID, INTENTS, keyword_route
 from backend.llm.dao_client import DaoClient, DaoRuntimeError
 from backend.llm.json_repair import JsonRepairError, loads_with_repair
+from backend.runtime.execution_context import use_run
 from backend.runtime.run_context import AgentRun, StopReason
-from backend.skills.patient_request_guard_skill import patient_request_guard_skill
-from backend.skills.safety_guard_skill import safety_guard_skill
-from backend.skills.syndrome_router_skill import syndrome_router_skill
-from backend.skills.uncertainty_skill import uncertainty_skill
+from backend.tools import get_registry
+
+
+def _tool(name, **kwargs):
+    return get_registry().call(name, role="system", **kwargs)
 
 
 def plan_question(
@@ -114,7 +116,7 @@ class AutonomousQAAgent:
         run = AgentRun(goal=question, user_role=self.user_role)
         run.start()
 
-        guard = patient_request_guard_skill(question, user_role=self.user_role)
+        guard = _tool("patient_request_guard_skill", user_request=question, user_role=self.user_role)
         if guard["blocked"] and self.user_role == "patient":
             run.finish(StopReason.POLICY_DENIED, note="patient_request_guard blocked the request")
             turn = {
@@ -177,29 +179,32 @@ class AutonomousQAAgent:
             self.history.append(turn)
             return turn
 
-        if self.use_llm:
-            run.budget.charge("model_call")  # LLM planner call
-        planned = plan_question(question, max_steps=self.max_steps, use_llm=self.use_llm, dao_client=self.dao_client)
-        plan = planned["plan"]
-        steps: list[dict[str, Any]] = []
-        trace: list[dict[str, Any]] = []
-        subagents: list[str] = []
-        used_llm = False
-        budget_stop: StopReason | None = None
-        for i, step in enumerate(plan, start=1):
-            budget_stop = run.budget.charge("iteration") or run.budget.charge("tool_call")
-            if budget_stop:
-                trace.append({"step": i, "thought": "预算管理器：运行预算耗尽，停止剩余计划步骤。",
-                              "action": "budget_stop", "observation": run.budget.snapshot()})
-                break
-            intent = step["intent"]
-            observation = self.session.invoke(intent, question)
-            subagents.append(intent)
-            used_llm = used_llm or observation["used_llm"]
-            steps.append({"step": i, "intent": intent, "label": observation["label"], "reason": step.get("reason", ""), "answer": observation["answer"], "skills": observation["skills"], "evidence": observation["evidence"], "used_llm": observation["used_llm"]})
-            trace.append({"step": i, "thought": step.get("reason", ""), "action": f"delegate→{observation['label']}({intent})", "observation": observation["answer"], "skills": observation["skills"]})
+        # The ambient run context makes real tool/model calls charge THIS run's budget
+        # at the execution points (ToolRegistry.invoke / DaoClient._dispatch) — the
+        # planner no longer guesses "1 tool call per intent" while a handler executes
+        # 5–8 underlying tools.
+        with use_run(run):
+            planned = plan_question(question, max_steps=self.max_steps, use_llm=self.use_llm, dao_client=self.dao_client)
+            plan = planned["plan"]
+            steps: list[dict[str, Any]] = []
+            trace: list[dict[str, Any]] = []
+            subagents: list[str] = []
+            used_llm = False
+            budget_stop: StopReason | None = None
+            for i, step in enumerate(plan, start=1):
+                budget_stop = run.budget.charge("iteration")
+                if budget_stop:
+                    trace.append({"step": i, "thought": "预算管理器：运行预算耗尽，停止剩余计划步骤。",
+                                  "action": "budget_stop", "observation": run.budget.snapshot()})
+                    break
+                intent = step["intent"]
+                observation = self.session.invoke(intent, question)
+                subagents.append(intent)
+                used_llm = used_llm or observation["used_llm"]
+                steps.append({"step": i, "intent": intent, "label": observation["label"], "reason": step.get("reason", ""), "answer": observation["answer"], "skills": observation["skills"], "evidence": observation["evidence"], "used_llm": observation["used_llm"]})
+                trace.append({"step": i, "thought": step.get("reason", ""), "action": f"delegate→{observation['label']}({intent})", "observation": observation["answer"], "skills": observation["skills"]})
 
-        critique = self._critique_and_replan(question, steps, trace, subagents)
+            critique = self._critique_and_replan(question, steps, trace, subagents)
         answer = self._synthesize(question, planned, steps, critique)
         loop = ["understand", "plan", "execute", "observe", "critique"] + (["replan"] if critique["replanned"] else [])
         if budget_stop:
@@ -238,9 +243,10 @@ class AutonomousQAAgent:
 
         tags = self.session.case_state.get("normalized_tags") or []
         red = self.session.case_state.get("red_flags") or {}
-        safety = safety_guard_skill(
-            {"evidence": {"raw_text": question}, "red_flags": red.get("positive_items") or []},
-            None, tags,
+        safety = _tool(
+            "safety_guard_skill",
+            case_json={"evidence": {"raw_text": question}, "red_flags": red.get("positive_items") or []},
+            matched_modules=None, normalized_tags=tags,
         )
         replanned = False
         if safety["safety_status"] != "safe" and not {"safety_inquiry", "red_flag_inquiry"} & set(subagents):
@@ -265,8 +271,8 @@ class AutonomousQAAgent:
         evidence_view = evidence_critic(steps)
         contradictions = contradiction_critic(tags)
         policy_view = policy_critic(self.user_role, steps)
-        candidates = syndrome_router_skill(tags).get("syndrome_candidates") or []
-        uncertainty = uncertainty_skill(candidates, tags)["uncertainty"]
+        candidates = _tool("syndrome_router_skill", normalized_tags=tags).get("syndrome_candidates") or []
+        uncertainty = _tool("uncertainty_skill", syndrome_candidates=candidates, normalized_tags=tags)["uncertainty"]
         critique = {
             "safety_status": safety["safety_status"],
             "confirmed_red_flags": [f.get("term") or f.get("id") for f in safety.get("confirmed_red_flags") or []],

@@ -256,14 +256,26 @@ class DaoClient:
 
         if self.config.backend == "disabled":
             raise DaoRuntimeError(f"Tao {task} runtime is disabled. Set TAO_BACKEND=http or transformers to enable.")
+        # Model-call budget is charged HERE — the single funnel every generation task
+        # passes through — so nested skill calls can never under-count model usage
+        # the way planner-side guessing did (harness review v0.12).
+        from backend.runtime.execution_context import charge_active_run
+
+        exhausted = charge_active_run("model_call")
+        if exhausted is not None:
+            raise DaoRuntimeError(f"model-call budget exhausted before Tao {task} call ({exhausted.value}).")
         if self.config.backend == "mock":
+            charge_active_run("model_output_chars", len(mock_value))
             return mock_value
         params = self._profile_params(profile)
         if self.config.backend == "http":
-            return self._generate_http(body, history=history, params=params)
-        if self.config.backend == "transformers":
-            return self._generate_transformers(self.build_prompt(body, history), params=params)
-        raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
+            text = self._generate_http(body, history=history, params=params)
+        elif self.config.backend == "transformers":
+            text = self._generate_transformers(self.build_prompt(body, history), params=params)
+        else:
+            raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
+        charge_active_run("model_output_chars", len(text or ""))
+        return text
 
     def generate_followup_probes(self, probe_context: dict[str, Any]) -> str:
         max_probes = int(probe_context.get("max_probes", 2))
@@ -421,14 +433,22 @@ class DaoClient:
 
         if self.config.backend == "disabled":
             raise DaoRuntimeError("Tao direct chat is disabled. Set TAO_BACKEND=transformers for local model inference.")
+        from backend.runtime.execution_context import charge_active_run
+
+        exhausted = charge_active_run("model_call")
+        if exhausted is not None:
+            raise DaoRuntimeError(f"model-call budget exhausted before Tao chat call ({exhausted.value}).")
         if self.config.backend == "mock":
             return "Tao mock direct reply: 已收到问题；当前项目中模型输出仍需规则与安全 guard 复核。"
         params = self._profile_params("teaching_explanation")
         if self.config.backend == "http":
-            return self._generate_http(user_input, history=history, params=params)
-        if self.config.backend == "transformers":
-            return self._generate_transformers(self.build_prompt(user_input, history), stream_callback=stream_callback, params=params)
-        raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
+            text = self._generate_http(user_input, history=history, params=params)
+        elif self.config.backend == "transformers":
+            text = self._generate_transformers(self.build_prompt(user_input, history), stream_callback=stream_callback, params=params)
+        else:
+            raise DaoRuntimeError(f"Unsupported Tao backend: {self.config.backend}")
+        charge_active_run("model_output_chars", len(text or ""))
+        return text
 
     def _generate_mock(self, structured_rule_outputs: dict[str, Any]) -> str:
         tags = "、".join(structured_rule_outputs.get("normalized_tags", [])[:8]) or "未提供"

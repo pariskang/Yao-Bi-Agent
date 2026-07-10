@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import time
+import uuid
 from collections import Counter
 from pathlib import Path
 from threading import Lock
@@ -55,15 +56,20 @@ class Counters:
             return dict(self._counts)
 
 
-_GENESIS_HASH = "0" * 16
+_GENESIS_HASH = "0" * 64
 
 
 class AuditLog:
-    """Hash-chained append-only audit: each record carries ``prev_event_hash`` and its
-    own ``event_hash`` over the canonical record content, so post-hoc edits or
-    deletions inside a process's chain are detectable with :func:`verify_chain`.
-    (Per-process chain — a restart starts a new chain from the genesis hash; a
-    durable cross-restart chain is a production deployment concern.)"""
+    """Hash-chained append-only audit with a persisted chain head.
+
+    Each record carries ``prev_event_hash`` and its own full-SHA-256 ``event_hash``
+    over the canonical record content, so post-hoc edits or deletions inside the
+    chain are detectable with :func:`verify_chain`. The chain head (last hash + seq
+    + boot id) is persisted to ``<dir>/.chain-head.json`` after every write, so a
+    process RESTART CONTINUES the chain instead of starting a fresh genesis —
+    truncating the tail of the previous process's log breaks linkage against the
+    persisted head. (External anchoring / WORM storage remain deployment concerns.)
+    """
 
     def __init__(self, directory: str | os.PathLike[str] | None = None, enabled: bool | None = None) -> None:
         if enabled is None:
@@ -73,14 +79,40 @@ class AuditLog:
         self._lock = Lock()
         self._seq = 0
         self._prev_hash = _GENESIS_HASH
+        self.boot_id = uuid.uuid4().hex[:12]
         self.write_errors = 0
+        self._load_chain_head()
+
+    def _head_path(self) -> Path:
+        return self.directory / ".chain-head.json"
+
+    def _load_chain_head(self) -> None:
+        try:
+            head = json.loads(self._head_path().read_text(encoding="utf-8"))
+            self._prev_hash = str(head.get("last_hash") or _GENESIS_HASH)
+            self._seq = int(head.get("seq") or 0)
+        except (OSError, ValueError):
+            pass  # fresh chain from genesis
+
+    def _persist_chain_head(self) -> None:
+        try:
+            self._head_path().write_text(json.dumps({
+                "last_hash": self._prev_hash, "seq": self._seq, "boot_id": self.boot_id,
+                "updated_at": round(time.time(), 3),
+            }), encoding="utf-8")
+        except OSError:
+            self.write_errors += 1
 
     def _path(self) -> Path:
         day = time.strftime("%Y%m%d", time.gmtime())
         return self.directory / f"audit-{day}.jsonl"
 
     def record(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        """Append one audit event; returns the record, or None when disabled/failed."""
+        """Append one audit event; returns the record, or None when disabled/failed.
+
+        Callers performing HIGH-RISK actions (approvals, overrides) must treat a
+        ``None`` return as a deny signal (fail closed) — see backend/runtime/approvals.
+        """
 
         if not self.enabled:
             return None
@@ -89,21 +121,24 @@ class AuditLog:
             record = {
                 "ts": round(time.time(), 3),
                 "seq": self._seq,
+                "boot_id": self.boot_id,
                 "event": event_type,
                 **payload,
             }
             record["prev_event_hash"] = self._prev_hash
             canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
-            record["event_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+            record["event_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
             self._prev_hash = record["event_hash"]
             try:
                 self.directory.mkdir(parents=True, exist_ok=True)
                 with self._path().open("a", encoding="utf-8") as f:
                     f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
             except OSError:
-                # Audit must never break a clinical-facing request.
+                # Audit must never break an ordinary clinical-facing request; high-risk
+                # actions check the None return and refuse to commit.
                 self.write_errors += 1
                 return None
+            self._persist_chain_head()
         return record
 
 
@@ -121,7 +156,7 @@ def verify_chain(records: list[dict[str, Any]]) -> dict[str, Any]:
         if record.get("prev_event_hash") != prev:
             return {"valid": False, "checked": i, "first_break_seq": record.get("seq")}
         canonical = json.dumps(body, ensure_ascii=False, sort_keys=True, default=str)
-        expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+        expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         if record.get("event_hash") != expected:
             return {"valid": False, "checked": i, "first_break_seq": record.get("seq")}
         prev = record["event_hash"]
