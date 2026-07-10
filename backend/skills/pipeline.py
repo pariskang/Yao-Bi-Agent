@@ -29,6 +29,17 @@ def run_case_pipeline(raw_text: str, use_llm: bool = False, dao_client: DaoClien
     if emergency_halt_required(gate_safety):
         return _halted_result(case_json, normalized, gate_safety, use_llm=use_llm, dao_client=dao_client)
 
+    # Scope router AFTER the emergency kernel: a non-emergency case must still belong
+    # to the approved lumbar-Bi task domain before any syndrome/formula reasoning —
+    # a knee complaint or an unrecognized narrative gets safety triage + referral only.
+    scope = tools.call(
+        "clinical_scope_router_skill", raw_text=raw_text,
+        red_flag_categories=[f.get("category") for f in gate_safety.get("confirmed_red_flags") or []],
+    )
+    if not scope["in_scope"]:
+        return _out_of_scope_result(case_json, normalized, gate_safety, scope,
+                                    use_llm=use_llm, dao_client=dao_client)
+
     routed = tools.call("syndrome_router_skill", normalized_tags=normalized["normalized_tags"])
     formula = tools.call("formula_base_selector_skill", normalized_tags=normalized["normalized_tags"],
                          syndrome_candidates=routed["syndrome_candidates"])
@@ -81,14 +92,63 @@ def run_case_pipeline(raw_text: str, use_llm: bool = False, dao_client: DaoClien
         **modules,
         **conflicts,
         "safety": safety,
+        "scope": scope,
         "red_flag_gate": {
             "halted": False,
             "status": gate_safety.get("safety_status"),
             "confirmed_red_flags": [f.get("term") or f.get("id") for f in gate_safety.get("confirmed_red_flags") or []],
         },
         **uncertainty,
+        "action_card": _action_card(safety, scope, formula=formula, uncertainty=uncertainty["uncertainty"]),
         "provenance": provenance,
         **report,
+    }
+
+
+def _action_card(
+    safety: dict[str, Any],
+    scope: dict[str, Any] | None,
+    *,
+    formula: dict[str, Any] | None = None,
+    uncertainty: dict[str, Any] | None = None,
+    halted: bool = False,
+) -> dict[str, Any]:
+    """Action-card-first output: the clinician sees level → why → next step → what is
+    blocked, before any long report (the report stays available below it)."""
+
+    confirmed = safety.get("confirmed_red_flags") or []
+    why = [f.get("message") or f.get("term") or f.get("id") for f in confirmed[:5]]
+    if scope and not scope.get("in_scope") and scope.get("out_of_scope_reason"):
+        why.append(scope["out_of_scope_reason"])
+    level = safety.get("action_level") or ("A0" if halted else "A3")
+    blocked: list[str] = []
+    next_steps: list[str] = []
+    if halted:
+        blocked = ["中医辨证", "方药路线", "药物模块组合", "LLM 扩写", "常规追问流程"]
+        next_steps = ["保持制动/脊柱保护，避免自行行走或负重", "立即急诊/线下评估（创伤、神经血管、影像由临床人员判断）"]
+    elif scope and not scope.get("in_scope"):
+        blocked = ["腰痹辨证", "方药路线"]
+        next_steps = ["至相应专科面诊评估", "如出现危险信号请急诊就诊"]
+    else:
+        if level == "A1":
+            next_steps = ["当日紧急专科评估", "患者端不提供方药内容；医师复盘分析仅供回顾研究"]
+        elif level == "A2":
+            next_steps = ["尽快线下面诊与必要检查", "补充缺失的鉴别信息"]
+        else:
+            next_steps = ["常规门诊决策支持流程", "由执业医师审核候选证型与方路信号"]
+        if formula is not None and not (formula.get("route_gate") or {}).get("allowed", True):
+            blocked.append("方药路线（" + str((formula.get("route_gate") or {}).get("note") or "证据不足弃权") + "）")
+    gaps = list(safety.get("need_further_inquiry") or [])
+    if uncertainty and uncertainty.get("abstain"):
+        gaps.append(str(uncertainty.get("assessment_note") or "证据不足，建议补充关键信息"))
+    return {
+        "action_level": level,
+        "action_meaning": safety.get("action_meaning"),
+        "why": [w for w in why if w][:6],
+        "next_steps": next_steps,
+        "blocked": blocked,
+        "evidence_gaps": gaps[:6],
+        "drivers": safety.get("drivers"),
     }
 
 
@@ -135,10 +195,15 @@ def _halted_result(
         "interaction_alerts": [],
         "alert_summary": {"interruptive": 0, "advisory": 0, "requires_dual_signoff": False},
         "safety": safety,
+        "scope": {
+            "domain": "emergency", "task": "triage", "in_scope": False, "scope_confidence": 0.95,
+            "out_of_scope_reason": "急症安全内核已接管。",
+            "allowed_capabilities": ["safety_triage"],
+        },
         "red_flag_gate": {
             "halted": True,
             "status": safety.get("safety_status"),
-            "reason": "确认急诊级红旗（马尾/进行性无力/感染类），中止辨证与方药推理，仅输出急诊转诊提示。",
+            "reason": "确认急诊级红旗（骨伤科急症本体），中止辨证与方药推理，仅输出急诊转诊提示。",
             "confirmed_red_flags": [f.get("term") or f.get("id") for f in safety.get("confirmed_red_flags") or []],
         },
         "uncertainty": {
@@ -146,6 +211,64 @@ def _halted_result(
             "assessment_note": "急诊红旗未排除，本例不进行证候与方药评估。",
             "conformal": None,
         },
+        "action_card": _action_card(safety, None, halted=True),
+        "provenance": provenance,
+        **report,
+    }
+
+
+def _out_of_scope_result(
+    case_json: dict[str, Any],
+    normalized: dict[str, Any],
+    gate_safety: dict[str, Any],
+    scope: dict[str, Any],
+    *,
+    use_llm: bool,
+    dao_client: DaoClient | None,
+) -> dict[str, Any]:
+    """Out-of-domain case: safety triage output only, no lumbar-Bi clinical chain."""
+
+    provenance = get_provenance(getattr(dao_client, "config", None) if use_llm else None)
+    report = tao_report_generation_skill(
+        case_json=case_json,
+        normalized_tags=normalized["normalized_tags"],
+        syndrome_candidates=[],
+        formula_route=None,
+        matched_modules=[],
+        conflicts=[],
+        safety=gate_safety,
+        rule_hits=[],
+        dao_client=None,
+        use_llm=False,
+        uncertainty=None,
+        interaction_alerts=[],
+        provenance=provenance,
+    )
+    return {
+        "case_json": case_json,
+        **normalized,
+        "syndrome_candidates": [],
+        "rule_hits": [],
+        "formula_routes": [],
+        "primary_route": None,
+        "formula_rule_hits": [],
+        "matched_modules": [],
+        "conflicts": [],
+        "interaction_alerts": [],
+        "alert_summary": {"interruptive": 0, "advisory": 0, "requires_dual_signoff": False},
+        "safety": gate_safety,
+        "scope": scope,
+        "red_flag_gate": {
+            "halted": False,
+            "status": gate_safety.get("safety_status"),
+            "confirmed_red_flags": [f.get("term") or f.get("id") for f in gate_safety.get("confirmed_red_flags") or []],
+        },
+        "uncertainty": {
+            "abstain": True,
+            "assessment_note": "主诉不属于本系统获准的腰痹任务域，不进行证候与方药评估。",
+            "conformal": None,
+        },
+        "action_card": _action_card(gate_safety, scope),
         "provenance": provenance,
         **report,
     }

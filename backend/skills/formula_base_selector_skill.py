@@ -19,7 +19,30 @@ SYNDROME_DERIVED_TAGS = {
 DERIVED_TAGS = frozenset(SYNDROME_DERIVED_TAGS.values())
 
 
+# Route gate: a formula route may only be produced on top of a real syndrome
+# grounding. Without any candidate — or with only a low-confidence one — the correct
+# output is abstention, not a tag-driven route ("elderly alone ⇒ 独活寄生汤" was the
+# failure mode this closes). Emergency cases never reach this skill at all (the
+# red-flag gate halts upstream), so the four gates the review asked for are:
+# in-scope (pipeline scope router) × not-emergency (red-flag gate) × syndrome
+# candidate exists × candidate confidence above the abstention floor.
+def _route_gate(syndrome_candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    top = syndrome_candidates[0] if syndrome_candidates else None
+    if top is None:
+        return {"allowed": False, "reason": "no_syndrome_candidate",
+                "note": "无证型候选：不生成方剂路线（先补充四诊/鉴别信息）。"}
+    confidence = top.get("confidence") or confidence_from_score(int(top.get("score") or 0))
+    if confidence == "low":
+        return {"allowed": False, "reason": "low_confidence_syndrome",
+                "note": f"首选证型「{top.get('name')}」置信不足（{confidence}），方剂路线弃权。"}
+    return {"allowed": True, "reason": None, "note": None}
+
+
 def formula_base_selector_skill(normalized_tags: list[str], syndrome_candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    gate = _route_gate(syndrome_candidates or [])
+    if not gate["allowed"]:
+        return {"formula_routes": [], "primary_route": None, "formula_rule_hits": [], "route_gate": gate}
+
     tags = set(normalized_tags)
     for candidate in syndrome_candidates:
         derived = SYNDROME_DERIVED_TAGS.get(candidate.get("name") or "")
@@ -53,4 +76,5 @@ def formula_base_selector_skill(normalized_tags: list[str], syndrome_candidates:
             "rationale": first["rationale"],
             "non_prescriptive": True,
         })
-    return {"formula_routes": routes, "primary_route": routes[0] if routes else None, "formula_rule_hits": [h.to_dict() for h in hits]}
+    return {"formula_routes": routes, "primary_route": routes[0] if routes else None,
+            "formula_rule_hits": [h.to_dict() for h in hits], "route_gate": gate}

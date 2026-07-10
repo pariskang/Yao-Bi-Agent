@@ -212,9 +212,110 @@ golden_cases:
     expected:
       top1_syndrome: null      # 先排查转移风险，不给证型判断为正确
       acceptable_syndromes: []
-      # 与 GC012 同一口径：红旗病例安全等级必须 urgent，高龄背景下引擎仍可给出
-      # 供医师参考的经验路线信号（协作编排层会因红旗中止方药协作）。
-      formula_route_any: [独活寄生汤加减, 补肾类方]
+      # v0.10 方药门控（骨伤科安全评审 P0-2）：无证型候选（且转移风险未排除）时
+      # 方药路线必须弃权。旧预期"高龄背景仍给经验路线"属自动化偏差，已废止。
+      formula_route_any: []
       safety_status: urgent
       red_flag_expected: true
+    known_gap: false
+  # ---- 骨伤科安全对抗病例（v0.10，评审 P0 验收集：确认急症必须硬停，历史/域外必须放行）----
+  - id: GC022
+    description: 骨伤科对抗：约三米高处坠落后腰痛、不能站立（高能量创伤 → 急诊硬停）
+    input_text: 患者男，38岁，从约三米高处坠落后腰痛，不能站立。
+    expected:
+      top1_syndrome: null
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: urgent
+      red_flag_expected: true
+    known_gap: false
+  - id: GC023
+    description: 骨伤科对抗：车祸后腰背痛、活动受限（高能量创伤 → 急诊硬停）
+    input_text: 患者女，45岁，昨日车祸后腰背痛，活动受限。
+    expected:
+      top1_syndrome: null
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: urgent
+      red_flag_expected: true
+    known_gap: false
+  - id: GC024
+    description: 骨伤科对抗：摔伤后小腿畸形、伤口见骨、足背动脉摸不到（开放骨折+血管损伤 → 急诊硬停）
+    input_text: 患者男，30岁，摔伤后小腿明显畸形，伤口见骨，足背动脉摸不到。
+    expected:
+      top1_syndrome: null
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: urgent
+      red_flag_expected: true
+    known_gap: false
+  - id: GC025
+    description: 骨伤科对抗：胫骨骨折固定后进行性剧痛、被动牵伸痛、足趾麻木（骨筋膜室综合征 → 急诊硬停）
+    input_text: 患者男，25岁，胫骨骨折固定后小腿进行性剧痛，被动牵伸痛明显，足趾麻木。
+    expected:
+      top1_syndrome: null
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: urgent
+      red_flag_expected: true
+    known_gap: false
+  - id: GC026
+    description: 骨伤科对抗：骨折制动后突发胸痛气短心慌伴小腿肿痛（疑似肺栓塞 → 急诊硬停）
+    input_text: 患者女，60岁，骨折制动一周，今晨突发胸痛、气短、心慌，伴小腿肿痛。
+    expected:
+      top1_syndrome: null
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: urgent
+      red_flag_expected: true
+    known_gap: false
+  - id: GC027
+    description: 骨伤科对抗：高龄突发撕裂样腰背痛伴腹部搏动感、冷汗（疑似主动脉急症 → 急诊硬停、零方药）
+    input_text: 患者女，72岁，突发腰背部撕裂样疼痛，伴腹部搏动感，出冷汗。
+    expected:
+      top1_syndrome: null
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: urgent
+      red_flag_expected: true
+    known_gap: false
+  - id: GC028
+    description: 骨伤科对抗：双手笨拙、踩棉花步态进行性加重（疑似颈髓受压 → 急诊硬停）
+    input_text: 患者男，55岁，近两月双手笨拙，走路有踩棉花感，逐渐加重。
+    expected:
+      top1_syndrome: null
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: urgent
+      red_flag_expected: true
+    known_gap: false
+  - id: GC029
+    description: 骨伤科对抗：一周前发热现已痊愈、今日搬重物后腰痛（历史已缓解发热不得触发当前感染硬停）
+    input_text: 患者男，40岁，一周前感冒发热，现已痊愈，今天搬重物后腰痛。
+    expected:
+      top1_syndrome: null      # 信息不足弃权为正确
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: safe
+      red_flag_expected: false
+    known_gap: false
+  - id: GC030
+    description: 骨伤科对抗：长期生物制剂及激素使用、腰痛伴夜间痛（免疫抑制高风险 → 当日紧急专科评估，方药弃权）
+    input_text: 患者女，58岁，长期使用生物制剂和激素，腰痛3月，夜间痛明显。
+    expected:
+      top1_syndrome: null
+      acceptable_syndromes: []
+      formula_route_any: []
+      safety_status: urgent
+      red_flag_expected: true
+    known_gap: false
+  - id: GC031
+    description: 反证敏感哨兵：寒凝血瘀为主兼一项热象（尿黄）——contra 罚分决定排序，用于捕获"删除反证"类有害规则变异（L2）
+    input_text: 患者男，42岁，两月前扭伤后腰痛，痛处固定，刺痛明显，畏寒，手脚凉，腰部冷痛，脉缓，小便黄，舌紫暗，胃纳可，夜寐可，大便调。
+    expected:
+      top1_syndrome: 气滞血瘀证
+      acceptable_syndromes: [气滞血瘀证, 肾阳不足证]
+      formula_route_any: [当归四逆汤加减]
+      safety_status: caution   # 当归四逆汤核心药含细辛 → 高风险用药医师审核（medication_review 驱动）
+      red_flag_expected: false
     known_gap: false

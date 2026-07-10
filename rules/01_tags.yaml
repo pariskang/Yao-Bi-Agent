@@ -127,3 +127,5 @@ tags:
     aliases: [烦躁, 易怒, 心烦]
   restlessness:
     aliases: [烦躁不安, 坐卧不安, 夜卧不安]
+  immunosuppressant_use:
+    aliases: [生物制剂, 免疫抑制剂, 长期激素, 长期使用激素, 长期服用激素]

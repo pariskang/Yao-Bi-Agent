@@ -26,8 +26,12 @@ KEYWORDS = {
 # candidate→confirmed grading happens in safety_guard_skill — a raw keyword hit alone
 # must never drive the safety status.
 RED_FLAG_CATEGORY = {
-    "外伤": "trauma_fracture_risk", "跌倒": "trauma_fracture_risk", "车祸": "trauma_fracture_risk",
-    "高处坠落": "trauma_fracture_risk",
+    # 低能量外伤（跌倒/一般外伤）：仅在脆性背景（骨质疏松/高龄/剧痛）下升级 urgent，
+    # 且保留医师复盘分析（金标准 GC012 语义）。
+    "外伤": "trauma_fracture_risk", "跌倒": "trauma_fracture_risk", "摔伤": "trauma_fracture_risk",
+    # 高能量创伤：确认即急诊硬停（骨伤科安全本体 v0.10）。
+    "车祸": "major_trauma", "高处坠落": "major_trauma", "高坠": "major_trauma",
+    "挤压伤": "major_trauma", "多发伤": "major_trauma", "重物砸伤": "major_trauma",
     "大小便失禁": "cauda_equina_symptoms", "大小便异常": "cauda_equina_symptoms",
     "大小便": "cauda_equina_symptoms", "会阴麻木": "cauda_equina_symptoms",
     "鞍区麻木": "cauda_equina_symptoms", "尿不出来": "cauda_equina_symptoms",
@@ -36,6 +40,29 @@ RED_FLAG_CATEGORY = {
     "肿瘤": "cancer_history", "癌症": "cancer_history",
     "体重下降": "unexplained_weight_loss", "不明原因消瘦": "unexplained_weight_loss",
     "走路拖脚": "progressive_weakness", "进行性无力": "progressive_weakness",
+    # 骨折脱位急症：开放骨折 / 明显畸形 / 脱位 / 骨端顶压。
+    "开放性骨折": "open_fracture_dislocation", "伤口见骨": "open_fracture_dislocation",
+    "骨外露": "open_fracture_dislocation", "骨头外露": "open_fracture_dislocation",
+    "明显畸形": "open_fracture_dislocation", "肢体畸形": "open_fracture_dislocation",
+    "小腿畸形": "open_fracture_dislocation", "关节脱位": "open_fracture_dislocation",
+    "脱位": "open_fracture_dislocation", "张力性水疱": "open_fracture_dislocation",
+    # 神经血管损伤：远端血供/神经缺失体征。
+    "动脉搏动消失": "neurovascular_deficit", "摸不到脉搏": "neurovascular_deficit",
+    "足背动脉摸不到": "neurovascular_deficit", "无脉": "neurovascular_deficit",
+    "肢体苍白": "neurovascular_deficit", "苍白发凉": "neurovascular_deficit",
+    "患肢发凉": "neurovascular_deficit",
+    # 骨筋膜室综合征：与损伤不相称的进行性痛 + 被动牵伸痛 + 张力性肿胀。
+    "被动牵伸痛": "compartment_syndrome", "骨筋膜室": "compartment_syndrome",
+    "张力性肿胀": "compartment_syndrome", "肿胀发硬": "compartment_syndrome",
+    # 血管急症：主动脉夹层 / 腹主动脉瘤样表现。
+    "撕裂样": "vascular_emergency", "腹部搏动感": "vascular_emergency",
+    "搏动性包块": "vascular_emergency",
+    # 心肺急症：胸痛 / 呼吸困难 / 咯血（PE 组合升级见 safety_guard_skill）。
+    "胸痛": "cardiopulmonary_emergency", "呼吸困难": "cardiopulmonary_emergency",
+    "咯血": "cardiopulmonary_emergency",
+    # 颈髓病：手部精细动作障碍 + 步态踩棉花感。
+    "踩棉花": "cervical_myelopathy", "双手笨拙": "cervical_myelopathy",
+    "持物不稳": "cervical_myelopathy",
 }
 RED_FLAG_TERMS = list(RED_FLAG_CATEGORY)
 REQUIRED_FIELDS = ["疼痛性质", "是否放射痛", "夜寐", "胃纳", "二便", "舌象", "脉象"]

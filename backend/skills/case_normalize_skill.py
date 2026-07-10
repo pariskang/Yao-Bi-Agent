@@ -31,8 +31,16 @@ TAG_MAP = {
 }
 
 # Tags whose alias hits come from red-flag screening, not case narrative normalization —
-# they are handled by safety_guard_skill on the extractor's raw red-flag terms.
-_ALIAS_SKIP_TAGS = {"elderly", "very_elderly"}
+# they are handled by safety_guard_skill on the extractor's *polarity- and
+# temporality-resolved* red-flag entities. Routing them through the narrative alias scan
+# would bypass temporal semantics ("一周前发热，现已痊愈" would become a current
+# fever_or_infection tag and hard-stop the case). Questionnaire-provided tags (client
+# intake) still reach safety grading directly via the tag path.
+_ALIAS_SKIP_TAGS = {
+    "elderly", "very_elderly",
+    "trauma_fracture_risk", "cauda_equina_symptoms", "progressive_weakness",
+    "fever_or_infection", "cancer_history", "unexplained_weight_loss",
+}
 
 _ALIAS_INDEX: list[tuple[str, str]] | None = None
 

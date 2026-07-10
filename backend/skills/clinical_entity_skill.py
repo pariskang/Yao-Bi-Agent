@@ -54,6 +54,15 @@ _NEGATION_WINDOW = 12
 # Historical-context cues: the finding belongs to the past history, not this episode.
 _HISTORICAL_MARKERS = ("既往", "曾经", "曾", "以前", "过去", "病史")
 
+# Resolution cues: the finding existed but is explicitly stated as resolved. Looked for
+# after the term in the same clause AND in the immediately following short clause, since
+# Chinese narratives split them with a comma ("一周前感冒发热，现已痊愈").
+# NOTE: recency phrases like "一周前" alone do NOT downgrade — a fever one week ago
+# without explicit resolution is still clinically relevant for infection screening.
+_RESOLVED_MARKERS = ("已痊愈", "痊愈", "已愈", "已缓解", "已消退", "已退", "已恢复", "已好转", "现已无", "已无")
+# A resolution look-ahead clause must be short and assertive ("现已痊愈"), not a new topic.
+_RESOLVED_LOOKAHEAD_MAX_LEN = 12
+
 
 def _clauses(text: str) -> list[tuple[int, str]]:
     """Split into (start_offset, clause) pairs on clause boundaries."""
@@ -75,6 +84,13 @@ def _containing_clause(clauses: list[tuple[int, str]], idx: int) -> tuple[int, s
         if start <= idx < start + len(clause):
             return start, clause
     return 0, ""
+
+
+def _containing_clause_index(clauses: list[tuple[int, str]], idx: int) -> int:
+    for i, (start, clause) in enumerate(clauses):
+        if start <= idx < start + len(clause):
+            return i
+    return 0
 
 
 def _pre_negated(clause: str, term_start: int) -> bool:
@@ -107,8 +123,19 @@ def _occurrence_polarity(clause: str, term_start: int, term_end: int) -> str:
     return POLARITY_AFFIRMED
 
 
-def _temporality(clause: str, term_start: int) -> str:
-    return "historical" if any(m in clause[:term_start] for m in _HISTORICAL_MARKERS) else "current"
+def _temporality(clauses: list[tuple[int, str]], clause_index: int, clause: str, term_start: int, term_end: int) -> str:
+    """current | historical | resolved — the temporal status safety grading consumes."""
+
+    remainder = clause[term_end:]
+    if any(m in remainder for m in _RESOLVED_MARKERS):
+        return "resolved"
+    if clause_index + 1 < len(clauses):
+        next_clause = clauses[clause_index + 1][1]
+        if len(next_clause) <= _RESOLVED_LOOKAHEAD_MAX_LEN and any(m in next_clause for m in _RESOLVED_MARKERS):
+            return "resolved"
+    if any(m in clause[:term_start] for m in _HISTORICAL_MARKERS):
+        return "historical"
+    return "current"
 
 
 _CONFIDENCE = {POLARITY_AFFIRMED: 0.9, POLARITY_NEGATED: 0.95, POLARITY_UNCERTAIN: 0.7}
@@ -135,11 +162,12 @@ def scan_term(text: str, term: str, blocked_spans: list[tuple[int, int]] | None 
         if any(bs <= idx and end <= be for bs, be in blocked_spans or []):
             continue
         clause_start, clause = _containing_clause(clauses, idx)
+        clause_index = _containing_clause_index(clauses, idx)
         polarity = _occurrence_polarity(clause, idx - clause_start, end - clause_start)
         seen.append({
             "polarity": polarity,
             "source_span": clause,
-            "temporality": _temporality(clause, idx - clause_start),
+            "temporality": _temporality(clauses, clause_index, clause, idx - clause_start, end - clause_start),
             "span": (idx, end),
         })
     if not seen:
