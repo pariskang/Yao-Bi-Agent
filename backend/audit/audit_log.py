@@ -117,10 +117,14 @@ class AuditLog:
         if not self.enabled:
             return None
         with self._lock:
-            self._seq += 1
+            # The in-memory chain head advances ONLY after the file append succeeds
+            # (v0.14): advancing first meant a failed write left the head pointing at
+            # an event that never existed — the next successful event would reference
+            # a phantom prev_hash and the chain would carry a permanent break.
+            seq = self._seq + 1
             record = {
                 "ts": round(time.time(), 3),
-                "seq": self._seq,
+                "seq": seq,
                 "boot_id": self.boot_id,
                 "event": event_type,
                 **payload,
@@ -128,16 +132,18 @@ class AuditLog:
             record["prev_event_hash"] = self._prev_hash
             canonical = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
             record["event_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-            self._prev_hash = record["event_hash"]
             try:
                 self.directory.mkdir(parents=True, exist_ok=True)
                 with self._path().open("a", encoding="utf-8") as f:
                     f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
             except OSError:
                 # Audit must never break an ordinary clinical-facing request; high-risk
-                # actions check the None return and refuse to commit.
+                # actions check the None return and refuse to commit. The chain head
+                # was not advanced, so the next event chains onto the last REAL one.
                 self.write_errors += 1
                 return None
+            self._seq = seq
+            self._prev_hash = record["event_hash"]
             self._persist_chain_head()
         return record
 

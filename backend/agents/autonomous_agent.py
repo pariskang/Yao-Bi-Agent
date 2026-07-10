@@ -165,7 +165,15 @@ class AutonomousQAAgent:
         from backend.skills.clinical_scope_router_skill import question_scope_gate
 
         scope_gate = question_scope_gate(question, self.session.case_state)
-        if not scope_gate["allowed"] or self.session.case_state.get("safety_extraction_failed"):
+        # Whole-run hard block only for DOMAIN CONFLICTS (fracture/post-op priority,
+        # out-of-domain complaint, domain shift). A merely anchorless question
+        # (NO_LUMBAR_ANCHOR) still plans — dataset/safety sub-intents are legitimate;
+        # each CLINICAL sub-intent is then blocked individually by the per-intent
+        # scope gate inside ConversationSession._dispatch (v0.14).
+        domain_conflict = bool(set(scope_gate["reason_codes"]) & {
+            "FRACTURE_POSTOPERATIVE_PRIORITY", "NON_LUMBAR_COMPLAINT_IN_QUESTION", "DOMAIN_SHIFT_DETECTED",
+        })
+        if (not scope_gate["allowed"] and domain_conflict) or self.session.case_state.get("safety_extraction_failed"):
             answer = scope_gate["message"] or "⚠️ 安全信息解析异常，本轮不进行辨证与方药分析（已记录待人工复核）。"
             run.finish(StopReason.POLICY_DENIED, note="out_of_scope_or_fail_closed")
             turn = {

@@ -99,11 +99,17 @@ def _case_state(data: dict[str, Any]) -> dict[str, Any]:
         "neuro_ortho": data.get("neuro_ortho") or {},
         "comorbidity": data.get("comorbidity") or {},
     }
-    # Scope decision computed by _enrich_with_question (narrative-derived) and the
-    # fail-closed marker both travel with the case state so every downstream entry
-    # (chat gate, autonomous gate, collaboration ScopeGateAgent) sees the same facts.
-    if data.get("scope") is not None:
+    # SERVER-AUTHORITATIVE fields (v0.14): a scope decision is authorization data,
+    # not case data — it only travels when computed server-side by
+    # _enrich_with_question (marked _scope_source="server"). A client-supplied
+    # {"scope": {"in_scope": true}} is dropped and audited as a suspicious field;
+    # downstream gates recompute scope from the narrative each turn.
+    if data.get("scope") is not None and data.get("_scope_source") == "server":
         state["scope"] = data["scope"]
+    elif data.get("scope") is not None:
+        AUDIT.record("client_scope_claim_dropped", {"claimed_scope": bool((data.get("scope") or {}).get("in_scope"))})
+    # The fail-closed marker may come from the client too — that direction only
+    # DENIES more (abstention), so honoring it is safe.
     if data.get("safety_extraction_failed"):
         state["safety_extraction_failed"] = True
     return state
@@ -275,6 +281,9 @@ def _enrich_with_question(data: dict[str, Any], question: str) -> dict[str, Any]
                 "out_of_scope_reason": gate["message"],
                 "reason_codes": gate["reason_codes"],
             }
+            # Server-authoritative marker: _case_state only accepts scope decisions
+            # stamped here — never a client-declared scope (v0.14).
+            merged["_scope_source"] = "server"
     except Exception as exc:
         # FAIL CLOSED (entry review §6): a crashed safety extraction must not silently
         # fall through to clinical reasoning on stale/partial tags. The marker makes
@@ -341,11 +350,17 @@ def _decision_summary(path: str, data: dict[str, Any], result: dict[str, Any]) -
 
 # --------------------------------------------------------------------------- handlers
 def handle_health(_data: dict[str, Any]) -> dict[str, Any]:
+    from backend.runtime.event_store import persistence_status
+
     provenance = get_provenance()
+    persistence = persistence_status()
+    # Readiness is persistence-aware (v0.14): a required-but-unavailable event store
+    # must fail health checks, and a silent memory-only fallback must be VISIBLE.
     return {
-        "ok": True,
+        "ok": persistence.get("mode") != "required_but_unavailable",
         "tao": tao_info(),
         "mined_loaded": bool(load_mined_rules()),
+        "persistence": persistence,
         "service": "yaobi-skill",
         "provenance": {"app_version": provenance["app_version"], "rules_version": provenance["rules_version"]},
     }

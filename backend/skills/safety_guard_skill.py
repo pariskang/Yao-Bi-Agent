@@ -24,7 +24,7 @@ from typing import Any
 
 from backend.engine.rule_engine import RULES_DIR, load_yaml
 from backend.skills.case_extract_skill import RED_FLAG_CATEGORY
-from backend.skills.clinical_entity_skill import is_affirmed
+from backend.skills.clinical_entity_skill import is_affirmed, scan_term
 
 TAG_REDFLAG_MAP = {
     "trauma_fracture_risk": "trauma_fracture_risk",
@@ -65,6 +65,35 @@ _POLICY_TERMS = ("自服", "自己买药", "开方")
 # urgent but leave the retrospective clinician-review analysis available.
 EMERGENCY_HALT_CATEGORIES = frozenset(_EMERGENCY_CATEGORIES)
 
+# Action-level → capability policy (v0.14): a machine-readable contract every entry
+# and downstream consumer can enforce, instead of a front-end display convention.
+# A1 keeps the retrospective clinician-review ANALYSIS (golden GC012 semantics —
+# category-tiered halt was adjudicated in the v0.10 round) but the payload is
+# explicitly marked clinician-review-only and patient-facing release is denied.
+ACTION_LEVEL_POLICY: dict[str, dict[str, Any]] = {
+    "A0": {
+        "patient_facing_formula": False, "patient_facing_syndrome": False,
+        "clinical_chain": "halted", "llm_clinical_expansion": False,
+        "blocked": ["中医辨证", "方药路线", "药物模块组合", "LLM 扩写", "常规追问流程"],
+    },
+    "A1": {
+        "patient_facing_formula": False, "patient_facing_syndrome": False,
+        "clinical_chain": "clinician_review_only", "llm_clinical_expansion": False,
+        "blocked": ["患者端方药建议", "可执行治疗与常规康复内容", "LLM 临床扩写"],
+    },
+    "A2": {
+        "patient_facing_formula": False, "patient_facing_syndrome": True,
+        "clinical_chain": "information_gathering", "llm_clinical_expansion": True,
+        "blocked": ["可执行治疗内容"],
+    },
+    "A3": {
+        "patient_facing_formula": False,  # patients NEVER see executable formulas
+        "patient_facing_syndrome": True,
+        "clinical_chain": "standard_support", "llm_clinical_expansion": True,
+        "blocked": [],
+    },
+}
+
 
 def emergency_halt_required(safety: dict[str, Any]) -> bool:
     """True when confirmed red flags demand an emergency halt of the clinical chain.
@@ -97,16 +126,44 @@ def _confirmed_urgent(confirmed: list[dict[str, Any]], tags: set[str], text: str
         # escalated to an A0 emergency only by the combination logic below.
         return True
     if "trauma_fracture_risk" in categories and (
-        tags & _FRAGILITY_TAGS or is_affirmed(text, "剧痛") or "压缩性骨折" in text
+        tags & _FRAGILITY_TAGS or _patient_current(text, "剧痛") or "压缩性骨折" in text
     ):
         return True
     if "cancer_history" in categories and (
-        "unexplained_weight_loss" in categories or is_affirmed(text, "夜间痛")
+        "unexplained_weight_loss" in categories or _patient_current(text, "夜间痛")
     ):
         return True
     if "immunosuppressed_risk" in categories:
         return True
     return False
+
+
+def _patient_current(text: str, term: str) -> bool:
+    """Term affirmed for the PATIENT and CURRENT — the only facts a combination rule
+    may compose. A family member's calf swelling ("父亲小腿肿痛") or a ten-year-old
+    immobilization episode ("十年前骨折制动时小腿肿痛") must never join the patient's
+    current dyspnea into a PE suspicion (cross-person / cross-time fact pollution,
+    v0.13 review P0-4)."""
+
+    entity = scan_term(text, term)
+    return bool(
+        entity
+        and entity["polarity"] == "affirmed"
+        and entity.get("experiencer", "patient") == "patient"
+        and entity.get("temporality", "current") == "current"
+    )
+
+
+def _patient_affirmed(text: str, term: str) -> bool:
+    """Affirmed for the patient, any temporality — for chronic-context cues (long-term
+    steroid use is red-flag-relevant history, not a point event)."""
+
+    entity = scan_term(text, term)
+    return bool(
+        entity
+        and entity["polarity"] == "affirmed"
+        and entity.get("experiencer", "patient") == "patient"
+    )
 
 
 def _combination_flags(text: str, tags: set[str], confirmed_categories: set[str]) -> list[dict[str, Any]]:
@@ -119,26 +176,30 @@ def _combination_flags(text: str, tags: set[str], confirmed_categories: set[str]
     * immunosuppressed red-flag context: biologics/long-term steroids plus night pain
       or infection signs → infection/malignancy high-risk (contextual urgent referral,
       not an emergency halt — the workup is urgent, the scene is not a resuscitation).
+
+    Composition invariant (v0.14): every sign entering a combination must be the
+    patient's own, currently-active finding — combos never mix experiencers or
+    time frames.
     """
 
     combos: list[dict[str, Any]] = []
     dyspnea_like = (
-        is_affirmed(text, "气短") or is_affirmed(text, "呼吸困难") or is_affirmed(text, "心慌")
+        _patient_current(text, "气短") or _patient_current(text, "呼吸困难") or _patient_current(text, "心慌")
     )
-    if is_affirmed(text, "小腿肿") and dyspnea_like:
+    if _patient_current(text, "小腿肿") and dyspnea_like:
         combos.append({
             "id": "cardiopulmonary_emergency", "category": "cardiopulmonary_emergency",
             "term": "小腿肿痛+气短/心慌", "source": "combination", "certainty": "highly_suspected",
             "message": "制动/骨折背景下小腿肿痛伴气短、心慌需警惕肺栓塞，立即急诊评估。",
         })
-    if is_affirmed(text, "胸痛") and dyspnea_like:
+    if _patient_current(text, "胸痛") and dyspnea_like:
         combos.append({
             "id": "cardiopulmonary_emergency", "category": "cardiopulmonary_emergency",
             "term": "胸痛+气短/心慌", "source": "combination", "certainty": "highly_suspected",
             "message": "胸痛伴气短/心慌需警惕肺栓塞或急性心肺事件，立即急诊评估。",
         })
     immunosuppressed = "immunosuppressant_use" in tags or any(
-        is_affirmed(text, term) for term in ("生物制剂", "免疫抑制剂", "长期激素", "长期使用激素")
+        _patient_affirmed(text, term) for term in ("生物制剂", "免疫抑制剂", "长期激素", "长期使用激素")
     )
     if immunosuppressed and ("night_pain" in tags or "fever_or_infection" in confirmed_categories):
         combos.append({

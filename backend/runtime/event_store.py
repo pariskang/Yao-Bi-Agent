@@ -94,17 +94,55 @@ _STORE_DISABLED = object()
 _STORE_CACHE: Any = None
 
 
+class EventStoreUnavailableError(RuntimeError):
+    """Persistence is REQUIRED (YAOBI_STATE_DB_REQUIRED=1) but initialization failed."""
+
+
 def get_event_store() -> EventStore | None:
-    """Process-wide store; None when persistence is disabled (YAOBI_STATE_DB=0)."""
+    """Process-wide store; None when persistence is disabled (YAOBI_STATE_DB=0).
+
+    With ``YAOBI_STATE_DB_REQUIRED=1`` (production mode) a disabled or failed store
+    raises :class:`EventStoreUnavailableError` instead of silently degrading to
+    memory-only state — the service must fail readiness, not lose approvals quietly.
+    """
 
     global _STORE_CACHE
+    required = os.getenv("YAOBI_STATE_DB_REQUIRED", "").lower() in {"1", "true", "yes"}
     configured = os.getenv("YAOBI_STATE_DB", str(ROOT / "logs" / "state.db"))
     if configured.strip() in {"0", "off", "false", ""}:
+        if required:
+            raise EventStoreUnavailableError(
+                "YAOBI_STATE_DB_REQUIRED=1 but persistence is disabled (YAOBI_STATE_DB=0)."
+            )
         return None
     if _STORE_CACHE is not None and str(_STORE_CACHE.path) == configured:
         return _STORE_CACHE
     try:
         _STORE_CACHE = EventStore(configured)
-    except (OSError, sqlite3.Error):
+    except (OSError, sqlite3.Error) as exc:
+        if required:
+            raise EventStoreUnavailableError(
+                f"YAOBI_STATE_DB_REQUIRED=1 but the event store failed to initialize: {exc}"
+            ) from exc
         return None
     return _STORE_CACHE
+
+
+def persistence_status() -> dict[str, Any]:
+    """Operator-visible persistence state for /api/health — a silent fallback to
+    memory-only mode must never look identical to working persistence (v0.14)."""
+
+    required = os.getenv("YAOBI_STATE_DB_REQUIRED", "").lower() in {"1", "true", "yes"}
+    configured = os.getenv("YAOBI_STATE_DB", str(ROOT / "logs" / "state.db"))
+    if configured.strip() in {"0", "off", "false", ""}:
+        if required:
+            return {"enabled": False, "mode": "required_but_unavailable", "path": None,
+                    "error": "persistence disabled by config while YAOBI_STATE_DB_REQUIRED=1"}
+        return {"enabled": False, "mode": "disabled_by_config", "path": None}
+    try:
+        store = get_event_store()
+    except EventStoreUnavailableError as exc:
+        return {"enabled": False, "mode": "required_but_unavailable", "path": configured, "error": str(exc)}
+    if store is None:
+        return {"enabled": False, "mode": "init_failed_memory_only", "path": configured}
+    return {"enabled": True, "mode": "sqlite", "path": str(store.path)}

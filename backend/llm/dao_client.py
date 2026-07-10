@@ -38,17 +38,22 @@ DaoBackend = Literal["disabled", "mock", "http", "poe", "minimax", "azure", "tra
 # default endpoints, auth-header conventions and provider-specific error surfaces:
 #   poe     — https://api.poe.com/v1/chat/completions (Bearer POE_API_KEY,
 #             model = Poe bot name, e.g. "Claude-Sonnet-4.5" / "GPT-4o")
-#   minimax — https://api.minimax.chat/v1/text/chatcompletion_v2 (Bearer
-#             MINIMAX_API_KEY, model e.g. "MiniMax-Text-01" / "abab6.5s-chat";
-#             errors arrive as HTTP 200 + base_resp.status_code != 0)
+#   minimax — https://api.minimax.io/v1/chat/completions (Bearer MINIMAX_API_KEY,
+#             model e.g. "MiniMax-Text-01"). The legacy native endpoint
+#             (api.minimax.chat/v1/text/chatcompletion_v2) is deprecated upstream;
+#             mainland-China deployments use https://api.minimaxi.com via
+#             TAO_ENDPOINT_URL. Errors may still arrive as HTTP 200 +
+#             base_resp.status_code != 0 — handled either way.
 #   azure   — {AZURE_OPENAI_ENDPOINT}/openai/deployments/{deployment}/chat/
 #             completions?api-version=... ("api-key" header, model taken from
-#             the deployment in the URL)
+#             the deployment in the URL). TAO_AZURE_API_VERSION=v1 selects the
+#             newer {endpoint}/openai/v1/chat/completions surface (no dated
+#             api-version; deployment name travels as payload "model").
 OPENAI_COMPATIBLE_BACKENDS = frozenset({"http", "poe", "minimax", "azure"})
 
 _PROVIDER_DEFAULT_ENDPOINTS = {
     "poe": "https://api.poe.com/v1/chat/completions",
-    "minimax": "https://api.minimax.chat/v1/text/chatcompletion_v2",
+    "minimax": "https://api.minimax.io/v1/chat/completions",
 }
 _PROVIDER_KEY_ENVS = {
     "poe": ("TAO_API_KEY", "POE_API_KEY"),
@@ -398,42 +403,7 @@ class DaoClient:
         return self._dispatch(body, self._mock_emergency_referral(referral_context), "emergency referral", profile="teaching_explanation")
 
     def _mock_emergency_referral(self, ctx: dict[str, Any]) -> str:
-        flags = ctx.get("red_flags") or []
-        safety_level = ctx.get("safety_level", "high")
-        is_emergency = safety_level == "emergency"
-        level_label = "**Ⅰ级急诊（立即就诊）**" if is_emergency else "**Ⅱ级急诊（2小时内就诊）**"
-        flags_md = "\n".join(f"- {f}" for f in flags) or "- 高风险信号（详见问诊记录）"
-        clinical_meaning = (
-            "马尾神经位于脊髓圆锥以下，受压后若未及时手术减压，可能导致永久性大小便功能障碍及下肢感觉运动缺失。"
-            "神经功能保护的时间窗有限（通常以48小时为关键节点），尽早影像确认和手术决策是预后的关键。"
-            if is_emergency else
-            "上述危险信号提示可能存在感染性、肿瘤性或骨折性脊柱病变，需尽快影像学确认与专科评估。"
-        )
-        urgency_reason = (
-            "马尾神经受压的可能性不能排除，时间窗决定预后，需立即脊柱外科/神经外科评估。"
-            if is_emergency else
-            "危险信号提示需要专科排除严重病变，建议尽快就医而非等待普通门诊。"
-        )
-        return (
-            f"## 急诊转诊临床参考（供执业医师审核 · 非患者自用）\n\n"
-            f"### 一、危险信号临床意义\n"
-            f"{flags_md}\n\n"
-            f"{clinical_meaning}\n\n"
-            f"### 二、就诊时建议携带的信息\n"
-            f"1. 各症状出现/加重的确切时间（尤其大小便障碍、肢体无力的起始时刻）\n"
-            f"2. 近期腰椎影像资料（MRI/CT/X线报告及原始图像，如有）\n"
-            f"3. 目前用药清单（止痛药/抗凝/激素/降糖等）\n"
-            f"4. 既往脊柱手术史、肿瘤病史及药物过敏史\n\n"
-            f"### 三、转诊前注意事项\n"
-            f"- 避免剧烈弯腰、扭转或搬运重物，防止加重神经损伤\n"
-            f"- 建议平卧位等待或由120急救担架搬运，避免长时间坐位移动\n"
-            f"- 如症状骤然加重（双下肢完全无力/完全失禁），立即拨打120急救\n"
-            f"- 镇痛药物是否使用请由急诊接诊医师判断，就医前请勿擅自用药以免影响评估\n\n"
-            f"### 四、紧迫度评级\n"
-            f"{level_label}\n"
-            f"理由：{urgency_reason}\n\n"
-            f"> 本内容为供执业医师参考的急诊转诊辅助信息，最终处置由接诊医师决定，患者不可据此自行用药。"
-        )
+        return deterministic_emergency_guidance(ctx.get("red_flags") or [], ctx.get("safety_level", "high"))
 
     def generate_probe_questions(self, probe_context: dict[str, Any]) -> str:
         """Tao-primary follow-up: the model freely asks the next clarifying questions."""
@@ -847,16 +817,50 @@ class DaoClient:
     # times with a short backoff before the caller falls back to deterministic rules.
     _HTTP_MAX_ATTEMPTS = 3
     _HTTP_BACKOFF_SECONDS = 1.0
+    # Bounded response read: chat completions are text; anything past this is a
+    # misbehaving/hostile endpoint, not a longer answer.
+    _HTTP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
-    def _resolve_http_provider(self) -> tuple[str, dict[str, str], bool]:
-        """Resolve (request_url, auth_headers, include_model_in_payload) per provider.
+    def _check_egress(self, url: str) -> None:
+        """Minimal outbound policy for model endpoints (v0.14).
+
+        Patient narratives and the API key travel to this URL, so two invariants are
+        enforced before any request: (1) non-local endpoints must use HTTPS unless
+        the operator explicitly sets ``YAOBI_ALLOW_INSECURE_EGRESS=1`` (self-hosted
+        lab setups); (2) when ``YAOBI_EGRESS_ALLOWED_HOSTS`` (comma-separated) is
+        configured, the endpoint host must be on it — a mistyped TAO_ENDPOINT_URL
+        then fails fast instead of shipping PHI + credentials to an arbitrary host.
+        """
+
+        parts = urllib.parse.urlsplit(url)
+        host = (parts.hostname or "").lower()
+        local = host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".local")
+        if parts.scheme != "https" and not local \
+                and os.getenv("YAOBI_ALLOW_INSECURE_EGRESS", "").lower() not in {"1", "true", "yes"}:
+            raise DaoRuntimeError(
+                f"insecure model egress blocked: {parts.scheme}://{host} is not HTTPS "
+                "(set YAOBI_ALLOW_INSECURE_EGRESS=1 only for trusted lab networks)."
+            )
+        allowed_raw = os.getenv("YAOBI_EGRESS_ALLOWED_HOSTS", "").strip()
+        if allowed_raw:
+            allowed = {h.strip().lower() for h in allowed_raw.split(",") if h.strip()}
+            if host not in allowed:
+                raise DaoRuntimeError(
+                    f"model egress host '{host}' is not in YAOBI_EGRESS_ALLOWED_HOSTS."
+                )
+
+    def _resolve_http_provider(self) -> tuple[str, dict[str, str], str | None]:
+        """Resolve (request_url, auth_headers, payload_model_or_None) per provider.
 
         The named providers share the OpenAI-compatible wire shape but differ in
         exactly the three things this returns:
-        - azure: URL is ``{resource}/openai/deployments/{deployment}/chat/completions
-          ?api-version=...`` (built here when endpoint_url is a resource base), auth is
-          an ``api-key`` header, and the model is selected by the deployment in the
-          URL — an in-payload "model" field is ignored/rejected, so it is omitted.
+        - azure (dated api-version, default): URL is ``{resource}/openai/deployments/
+          {deployment}/chat/completions?api-version=...`` (built here when
+          endpoint_url is a resource base), auth is an ``api-key`` header, and the
+          model is selected by the deployment in the URL — no in-payload "model".
+        - azure (``TAO_AZURE_API_VERSION=v1``/``preview``): the newer
+          ``{resource}/openai/v1/chat/completions`` surface — no dated api-version
+          query parameter; the deployment name travels as the payload "model".
         - poe / minimax / http: Bearer auth, model in the payload. The hosted
           providers must have a key (an unauthenticated call can only fail); the
           generic ``http`` backend keeps supporting keyless self-hosted endpoints.
@@ -872,6 +876,17 @@ class DaoClient:
                 )
             if not self.config.api_key:
                 raise DaoRuntimeError("Azure OpenAI API key is required. Set TAO_API_KEY or AZURE_OPENAI_API_KEY.")
+            api_version = (self.config.azure_api_version or "").strip().lower()
+            if api_version in {"v1", "preview"}:
+                url = endpoint
+                if "/chat/completions" not in url:
+                    url = f"{endpoint.rstrip('/')}/openai/v1/chat/completions"
+                if api_version == "preview" and "api-version=" not in url:
+                    separator = "&" if "?" in url else "?"
+                    url = f"{url}{separator}api-version=preview"
+                self._check_egress(url)
+                # v1 surface: the deployment name travels as the payload "model".
+                return url, {"api-key": self.config.api_key}, self.config.azure_deployment or self.config.model_id
             url = endpoint
             if "/chat/completions" not in url:
                 deployment = self.config.azure_deployment or self.config.model_id
@@ -882,14 +897,16 @@ class DaoClient:
             if "api-version=" not in url:
                 separator = "&" if "?" in url else "?"
                 url = f"{url}{separator}api-version={urllib.parse.quote(self.config.azure_api_version, safe='')}"
-            return url, {"api-key": self.config.api_key}, False
+            self._check_egress(url)
+            return url, {"api-key": self.config.api_key}, None
         if not endpoint:
             raise DaoRuntimeError(f"TAO_ENDPOINT_URL is required when TAO_BACKEND={backend}.")
         if backend in {"poe", "minimax"} and not self.config.api_key:
             provider_env = _PROVIDER_KEY_ENVS[backend][-1]
             raise DaoRuntimeError(f"{backend} API key is required. Set TAO_API_KEY or {provider_env}.")
+        self._check_egress(endpoint)
         headers = {"Authorization": f"Bearer {self.config.api_key}"} if self.config.api_key else {}
-        return endpoint, headers, True
+        return endpoint, headers, self.config.model_id
 
     def _generate_http(
         self,
@@ -905,7 +922,7 @@ class DaoClient:
         their deterministic-fallback guarantee instead of surfacing an HTTP 500.
         """
 
-        url, auth_headers, include_model = self._resolve_http_provider()
+        url, auth_headers, payload_model = self._resolve_http_provider()
         label = self.config.backend
         params = params or self._profile_params("teaching_explanation")
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -918,17 +935,35 @@ class DaoClient:
             "top_p": params["top_p"],
             "max_tokens": params["max_new_tokens"],
         }
-        if include_model:
-            payload["model"] = self.config.model_id
+        if payload_model:
+            payload["model"] = payload_model
         data = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json", **auth_headers}
 
         last_error: Exception | None = None
         for attempt in range(self._HTTP_MAX_ATTEMPTS):
+            if attempt:
+                # Each RETRY is a real provider request: cost, latency, quota and an
+                # additional outbound transmission of the payload — charge it against
+                # the model-call budget instead of hiding 3 requests behind 1 charge
+                # (v0.14 review; the first attempt was charged in _dispatch/chat).
+                from backend.runtime.execution_context import charge_active_run
+
+                exhausted = charge_active_run("model_call")
+                if exhausted is not None:
+                    raise DaoRuntimeError(
+                        f"model-call budget exhausted during retry {attempt + 1} ({exhausted.value})."
+                    ) from last_error
             request = urllib.request.Request(url, data=data, headers=headers, method="POST")
             try:
                 with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
-                    body = json.loads(response.read().decode("utf-8"))
+                    # Bounded read: a misbehaving endpoint must not OOM the server.
+                    raw = response.read(self._HTTP_MAX_RESPONSE_BYTES + 1)
+                    if len(raw) > self._HTTP_MAX_RESPONSE_BYTES:
+                        raise DaoRuntimeError(
+                            f"Tao {label} endpoint response exceeded {self._HTTP_MAX_RESPONSE_BYTES} bytes."
+                        )
+                    body = json.loads(raw.decode("utf-8"))
                 break
             except urllib.error.HTTPError as exc:
                 last_error = exc
@@ -954,9 +989,27 @@ class DaoClient:
                 f"Tao {label} endpoint error {base_resp.get('status_code')}: {base_resp.get('status_msg')}"
             )
 
+        # Robust completion extraction (v0.14): empty choices, null content, provider
+        # refusals and content-filter finishes are distinct, explicit failures — a
+        # filtered/empty completion must never be treated as a successful answer.
         if "choices" in body:
-            choice = body["choices"][0]
-            return choice.get("message", {}).get("content") or choice.get("text", "")
+            choices = body.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise DaoRuntimeError(f"Tao {label} endpoint returned an empty choices list.")
+            choice = choices[0] or {}
+            finish_reason = choice.get("finish_reason")
+            if finish_reason == "content_filter":
+                raise DaoRuntimeError(f"Tao {label} endpoint filtered the completion (finish_reason=content_filter).")
+            message = choice.get("message") or {}
+            refusal = message.get("refusal")
+            if refusal:
+                raise DaoRuntimeError(f"Tao {label} endpoint refused the request: {str(refusal)[:200]}")
+            content = message.get("content") or choice.get("text")
+            if content:
+                return content
+            raise DaoRuntimeError(
+                f"Tao {label} endpoint returned an empty completion (finish_reason={finish_reason})."
+            )
         if "text" in body:
             return body["text"]
         if "generated_text" in body:
@@ -1093,3 +1146,48 @@ class DaoClient:
             raise
         except Exception as exc:  # noqa: BLE001 — surface cause, never crash the request
             raise DaoRuntimeError(f"transformers backend failed: {type(exc).__name__}: {exc}") from exc
+
+
+def deterministic_emergency_guidance(flags: list[str], safety_level: str = "high") -> str:
+    """Rule-templated clinician referral guidance — NO model involved.
+
+    This is the A0/A1 emergency content source (v0.14 safety invariant: an emergency
+    response never waits on, and never leaks the narrative to, a language model).
+    ``DaoClient._mock_emergency_referral`` delegates here so mock runs and the
+    deterministic interview referral render identical content.
+    """
+
+    is_emergency = safety_level == "emergency"
+    level_label = "**Ⅰ级急诊（立即就诊）**" if is_emergency else "**Ⅱ级急诊（2小时内就诊）**"
+    flags_md = "\n".join(f"- {f}" for f in flags) or "- 高风险信号（详见问诊记录）"
+    clinical_meaning = (
+        "马尾神经位于脊髓圆锥以下，受压后若未及时手术减压，可能导致永久性大小便功能障碍及下肢感觉运动缺失。"
+        "神经功能保护的时间窗有限（通常以48小时为关键节点），尽早影像确认和手术决策是预后的关键。"
+        if is_emergency else
+        "上述危险信号提示可能存在感染性、肿瘤性或骨折性脊柱病变，需尽快影像学确认与专科评估。"
+    )
+    urgency_reason = (
+        "马尾神经受压的可能性不能排除，时间窗决定预后，需立即脊柱外科/神经外科评估。"
+        if is_emergency else
+        "危险信号提示需要专科排除严重病变，建议尽快就医而非等待普通门诊。"
+    )
+    return (
+        f"## 急诊转诊临床参考（供执业医师审核 · 非患者自用）\n\n"
+        f"### 一、危险信号临床意义\n"
+        f"{flags_md}\n\n"
+        f"{clinical_meaning}\n\n"
+        f"### 二、就诊时建议携带的信息\n"
+        f"1. 各症状出现/加重的确切时间（尤其大小便障碍、肢体无力的起始时刻）\n"
+        f"2. 近期腰椎影像资料（MRI/CT/X线报告及原始图像，如有）\n"
+        f"3. 目前用药清单（止痛药/抗凝/激素/降糖等）\n"
+        f"4. 既往脊柱手术史、肿瘤病史及药物过敏史\n\n"
+        f"### 三、转诊前注意事项\n"
+        f"- 避免剧烈弯腰、扭转或搬运重物，防止加重神经损伤\n"
+        f"- 建议平卧位等待或由120急救担架搬运，避免长时间坐位移动\n"
+        f"- 如症状骤然加重（双下肢完全无力/完全失禁），立即拨打120急救\n"
+        f"- 镇痛药物是否使用请由急诊接诊医师判断，就医前请勿擅自用药以免影响评估\n\n"
+        f"### 四、紧迫度评级\n"
+        f"{level_label}\n"
+        f"理由：{urgency_reason}\n\n"
+        f"> 本内容为供执业医师参考的急诊转诊辅助信息，最终处置由接诊医师决定，患者不可据此自行用药。"
+    )

@@ -29,8 +29,9 @@ class _FakeResponse:
     def __init__(self, payload: dict[str, Any]) -> None:
         self._payload = payload
 
-    def read(self) -> bytes:
-        return json.dumps(self._payload, ensure_ascii=False).encode("utf-8")
+    def read(self, limit: int | None = None) -> bytes:
+        raw = json.dumps(self._payload, ensure_ascii=False).encode("utf-8")
+        return raw if limit is None else raw[:limit]
 
     def __enter__(self) -> "_FakeResponse":
         return self
@@ -94,7 +95,10 @@ def test_from_env_minimax_defaults(monkeypatch):
     monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
     config = DaoGenerationConfig.from_env()
     assert config.api_key == "mm-key"
-    assert config.endpoint_url == "https://api.minimax.chat/v1/text/chatcompletion_v2"
+    # v0.14: default is the current OpenAI-compatible surface (api.minimax.io); the
+    # legacy chatcompletion_v2 endpoint is deprecated upstream but still reachable
+    # via TAO_ENDPOINT_URL (as is mainland api.minimaxi.com).
+    assert config.endpoint_url == "https://api.minimax.io/v1/chat/completions"
 
 
 def test_from_env_azure_reads_conventional_variables(monkeypatch):

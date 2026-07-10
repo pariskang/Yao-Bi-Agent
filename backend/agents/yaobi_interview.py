@@ -227,9 +227,22 @@ class YaoBiInterviewEngine:
         if user_text:
             case.dialogue_history.append({"role": "user", "content": user_text})
             case.turn_count += 1
+            # SAFETY BEFORE ANY MODEL CALL (v0.14 review P0-7): the deterministic
+            # red-flag scan + shared kernel run FIRST on the raw text. An emergency
+            # turn (a) answers immediately from local rules without waiting on a
+            # model and (b) never sends the emergency narrative to an LLM at all —
+            # slot extraction is skipped for this turn.
+            self._scan_red_flag_text(case, user_text)
+            self._detect_red_flags(case)
+            if case.safety_level == "emergency":
+                case.state = YaoBiState.SAFETY_REFERRAL
+                referral = self._build_referral(case)
+                message = referral["message"]
+                case.dialogue_history.append({"role": "assistant", "content": message})
+                return self._pack(case, message, done=True, referral=referral)
             self._merge(case, self._extract(user_text))
-            # Deterministic safety net: red flags mentioned in the raw text are captured
-            # even when the LLM extractor is offline or missed the slot.
+            # Deterministic safety net re-run: LLM extraction may have surfaced red
+            # flags the keyword scan missed (paraphrases into structured slots).
             self._scan_red_flag_text(case, user_text)
 
         self._detect_red_flags(case)
@@ -370,6 +383,24 @@ class YaoBiInterviewEngine:
 
     def _user_narrative(self, case: YaoBiCaseState) -> str:
         return "。".join(d["content"] for d in case.dialogue_history if d.get("role") == "user")
+
+    @staticmethod
+    def _safety_fact_digest(case: YaoBiCaseState) -> str:
+        """Digest of the safety-relevant facts an override approval binds to.
+
+        Any new user turn, red-flag change or safety-level change alters the digest,
+        so a confirm that arrives after the case moved on is invalidated instead of
+        applying a stale physician decision (v0.14 approval fact binding).
+        """
+
+        import hashlib as _hashlib
+
+        basis = "|".join([
+            ";".join(sorted(str(f) for f in case.red_flags)),
+            str(case.safety_level),
+            str(case.turn_count),
+        ])
+        return _hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
 
     def _detect_red_flags(self, case: YaoBiCaseState) -> None:
         o, p, h = case.ortho_neuro_slots, case.pain_slots, case.history_slots
@@ -576,7 +607,15 @@ class YaoBiInterviewEngine:
         return "\n".join(lines)
 
     def _build_referral(self, case: YaoBiCaseState) -> dict[str, Any]:
-        """Rule-based safety warning + optional Tao emergency clinical guidance."""
+        """Rule-based safety warning + optional Tao emergency clinical guidance.
+
+        EMERGENCY IS MODEL-FREE (v0.14): at ``safety_level == "emergency"`` the full
+        referral — warning AND clinician guidance — renders from local deterministic
+        templates. No model call may delay the emergency response, fail it, or
+        receive the emergency narrative. The LLM guidance overlay remains available
+        only for the advisory ("high") level, where the deterministic warning has
+        already been produced and urgency is not model-dependent.
+        """
 
         if case.safety_level == "emergency":
             action = "**请立即拨打急救电话（120）或前往最近急诊科**，本问诊终止常规辨证。"
@@ -584,6 +623,14 @@ class YaoBiInterviewEngine:
             action = "建议尽快线下骨科/脊柱外科或急诊评估，本问诊暂停常规辨证。"
         base = "检测到需要重点排查的危险信号：\n- " + "\n- ".join(case.red_flags) + f"\n\n{action}"
 
+        if case.safety_level == "emergency":
+            from backend.llm.dao_client import deterministic_emergency_guidance
+
+            guidance = deterministic_emergency_guidance(case.red_flags, "emergency")
+            return {
+                "message": base + "\n\n---\n\n" + guidance, "tao_guidance": None,
+                "used_llm": False, "source": "deterministic_rules_emergency",
+            }
         if not self.use_llm:
             return {"message": base, "tao_guidance": None, "used_llm": False, "source": "deterministic_rules"}
 
@@ -682,15 +729,25 @@ class YaoBiInterviewEngine:
             pending = case.pending_approval or {}
             if confirm_override and approval_id and pending.get("approval_id") == approval_id:
                 try:
-                    decided = manager.decide(approval_id, decision="approve", reviewer_id=reviewer)
+                    decided = manager.decide(approval_id, decision="approve", reviewer_id=reviewer,
+                                             current_case_digest=self._safety_fact_digest(case))
                 except AuditWriteError:
                     # Fail closed: an override that cannot be audited is not committed.
                     message = "⚠️ 审计写入失败：高风险覆盖不予执行（fail-closed），请联系管理员检查审计存储。"
                     pack = self._pack(case, message, done=False)
                     pack["approval_error"] = "audit_unavailable_high_risk_denied"
                     return pack
-                if decided is None:
-                    message = "⚠️ 覆盖确认失败：审批不存在、已决或确认人与申请人不一致。未执行任何更改。"
+                if decided is not None and decided.status == "invalidated_by_new_facts":
+                    case.pending_approval = {}
+                    message = (
+                        "⚠️ 覆盖审批已失效：申请后病例出现了新的临床事实（新红旗/新主诉），"
+                        "原审批不再适用。请基于当前病例重新评估并重新发起覆盖申请。"
+                    )
+                    pack = self._pack(case, message, done=False)
+                    pack["approval_error"] = "approval_invalidated_by_new_facts"
+                    return pack
+                if decided is None or decided.status != "approved":
+                    message = "⚠️ 覆盖确认失败：审批不存在、已决、确认人不符合审批人策略，未执行任何更改。"
                     pack = self._pack(case, message, done=False)
                     pack["approval_error"] = "approval_confirmation_failed"
                     return pack
@@ -734,6 +791,9 @@ class YaoBiInterviewEngine:
                     reviewer_id=reviewer,
                     reason=reason,
                     payload={"red_flags": list(case.red_flags), "safety_level": case.safety_level},
+                    # Fact binding (v0.14): the approval is only valid against the
+                    # exact safety facts the physician reviewed — new facts void it.
+                    case_digest=self._safety_fact_digest(case),
                 )
             except AuditWriteError:
                 message = "⚠️ 审计写入失败：无法创建高风险覆盖审批（fail-closed），请联系管理员检查审计存储。"
