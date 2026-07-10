@@ -102,11 +102,32 @@ def _evidence_entities(evidence: dict[str, Any]) -> dict[str, set[str]]:
     return ev
 
 
+# Assertive-certainty markers: rule evidence in this system is always draft-level
+# (candidate syndromes / route signals pending physician review), so a sentence that
+# commits to a syndrome or formula with certainty overstates what the evidence supports
+# — even when the entity itself is rule-backed. This is the claim-modality layer on top
+# of entity grounding (full claim-graph verification is roadmap; see docs).
+_ASSERTIVE = re.compile(r"必须|无疑|必然(?:是|属)?|明确属|确定[为是]|即属|只能是|断为|毫无疑问")
+_HEDGED = re.compile(r"倾向|可能|可虑|可考虑|供.{0,4}审|待医师|建议|提示|似|疑似")
+
+
+def _overstatements(text: str, mentioned: dict[str, set[str]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for sentence in re.split(r"[。！？!?\n;；]", text or ""):
+        if not _ASSERTIVE.search(sentence) or _HEDGED.search(sentence):
+            continue
+        entities = [e for kind in ("syndrome", "formula") for e in mentioned[kind] if e in sentence]
+        if entities:
+            findings.append({"entities": entities, "sentence": sentence.strip()[:80]})
+    return findings
+
+
 def check_groundedness(text: str, evidence: dict[str, Any]) -> dict[str, Any]:
     """Compare clinical entities in the model text against the evidence bundle.
 
     Returns per-type grounded/ungrounded entity lists, an overall grounding ratio,
-    and a Chinese annotation for the reviewing physician. Never blocks output.
+    assertiveness overstatement candidates, and a Chinese annotation for the
+    reviewing physician. Never blocks output.
     """
 
     mentioned = _entities_in_text(text or "")
@@ -125,6 +146,7 @@ def check_groundedness(text: str, evidence: dict[str, Any]) -> dict[str, Any]:
         hits += len(grounded[kind])
 
     ratio = round(hits / total, 3) if total else None
+    overstatements = _overstatements(text or "", mentioned)
     ungrounded_flat = [f"{name}（{ {'syndrome': '证型', 'formula': '方剂', 'herb': '药物'}[kind] }）"
                        for kind in ("syndrome", "formula", "herb") for name in ungrounded[kind]]
     if total == 0:
@@ -136,12 +158,18 @@ def check_groundedness(text: str, evidence: dict[str, Any]) -> dict[str, Any]:
             f"证据接地率 {ratio:.0%}。以下实体来自模型自身知识、未见于本案规则证据，"
             f"需医师重点复核：{'、'.join(ungrounded_flat[:10])}。"
         )
+    if overstatements:
+        annotation += (
+            f" 另检出 {len(overstatements)} 处断言强度超过证据级别的表述"
+            "（规则证据仅为待审草案，不支持确定性结论），请医师复核相应句子。"
+        )
     return {
         "grounding_ratio": ratio,
         "checked_entities": total,
         "grounded": grounded,
         "ungrounded": ungrounded,
+        "overstatements": overstatements,
         "annotation": annotation,
-        "method": "lexicon_entity_grounding",
+        "method": "lexicon_entity_grounding_plus_claim_modality",
         "blocking": False,
     }

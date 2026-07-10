@@ -38,9 +38,9 @@ class CaseStructuringAgent:
         quality = case_quality_check_skill(bb.case_state)
         bb.case_state = quality["case_state"]
         structured = case_structuring_skill(bb.case_state)
-        bb.put("shen", shen)
-        bb.put("quality", {k: v for k, v in quality.items() if k != "case_state"})
-        bb.put("structured", structured)
+        bb.put("shen", shen, producer=self.name)
+        bb.put("quality", {k: v for k, v in quality.items() if k != "case_state"}, producer=self.name)
+        bb.put("structured", structured, producer=self.name)
         score = quality.get("case_quality_score") or 0
         return AgentResult(
             self.name, self.role, self.kind, "ok",
@@ -88,7 +88,7 @@ class OrthoRiskAgent:
             "progressive_neuro": "high" if weakness == "越来越重" else "moderate" if weakness in ("明显",) else "low",
         }
         elevated = [k for k, v in strata.items() if v in ("elevated", "high")]
-        bb.put("ortho_risk", {"strata": strata, "elevated": elevated})
+        bb.put("ortho_risk", {"strata": strata, "elevated": elevated}, producer=self.name)
         status = "escalate" if elevated else "ok"
         summary = (f"风险分层提示需重点复核：{('、'.join(elevated))}。" if elevated else "四类骨伤科风险均为低风险背景。")
         return AgentResult(self.name, self.role, self.kind, status, summary, confidence=1.0, evidence=elevated, handoff_to=self.handoff_to)
@@ -101,7 +101,7 @@ class TcmSyndromeAgent:
     def run(self, bb: Blackboard) -> AgentResult:
         tags = bb.case_state.get("normalized_tags", [])
         routed = syndrome_router_skill(tags)
-        bb.put("routed", routed)
+        bb.put("routed", routed, producer=self.name)
         cands = routed.get("syndrome_candidates") or []
         top = cands[0] if cands else None
         conf = round(min(1.0, (top.get("score") or 0) / 8), 2) if top else None
@@ -117,7 +117,7 @@ class FormulaReasoningAgent:
         tags = bb.case_state.get("normalized_tags", [])
         routed = bb.get("routed", {})
         formula = formula_base_selector_skill(tags, routed.get("syndrome_candidates", []))
-        bb.put("formula", formula)
+        bb.put("formula", formula, producer=self.name)
         primary = formula.get("primary_route")
         conf = _CONF.get((primary or {}).get("confidence"), 0.4) if primary else None
         summary = (f"主方路线「{primary['name']}」（{primary.get('confidence')}信度），路线候选 {len(formula.get('formula_routes') or [])} 条。" if primary else "暂无稳定方剂路线信号。")
@@ -131,7 +131,7 @@ class HerbModuleAgent:
     def run(self, bb: Blackboard) -> AgentResult:
         tags = bb.case_state.get("normalized_tags", [])
         modules = herb_module_composer_skill(tags, (bb.get("formula", {}) or {}).get("primary_route"))
-        bb.put("modules", modules)
+        bb.put("modules", modules, producer=self.name)
         matched = modules.get("matched_modules") or []
         return AgentResult(self.name, self.role, self.kind, "ok", f"组合 {len(matched)} 个功效模块草案，待安全审查。", confidence=1.0, evidence=[m.get("name") for m in matched[:6]], handoff_to=self.handoff_to)
 
@@ -154,8 +154,8 @@ class ConflictSafetyAgent:
             {"evidence": {"raw_text": ""}, "red_flags": bb.case_state.get("red_flags", {}).get("positive_items", [])},
             modules, bb.case_state.get("normalized_tags", []),
         )
-        bb.put("conflicts", conflicts)
-        bb.put("safety", safety)
+        bb.put("conflicts", conflicts, producer=self.name)
+        bb.put("safety", safety, producer=self.name)
         risks = safety.get("medication_risks") or []
         alerts = conflicts.get("interaction_alerts") or []
         status = "escalate" if safety.get("safety_status") != "safe" or (conflicts.get("alert_summary") or {}).get("requires_dual_signoff") else "ok"
@@ -173,7 +173,7 @@ class EvidenceTraceAgent:
     def run(self, bb: Blackboard) -> AgentResult:
         routed = bb.get("routed", {}) or {}
         mined = mined_evidence_skill(bb.case_state.get("normalized_tags", []), routed.get("syndrome_candidates", []))
-        bb.put("mined", mined)
+        bb.put("mined", mined, producer=self.name)
         ev = mined.get("mined_evidence") or []
         return AgentResult(self.name, self.role, self.kind, "ok", f"匹配 {len(ev)} 条 xlsx 脱敏挖掘证据（待专家审核）。", confidence=1.0, evidence=[r.get("rule_id") for r in ev[:6]], handoff_to=self.handoff_to)
 
@@ -193,7 +193,7 @@ class ReasoningAgent:
             mined_evidence=(bb.get("mined", {}) or {}).get("mined_evidence"),
             dao_client=bb.dao_client, use_llm=bb.use_llm, user_role="clinician",
         )
-        bb.put("reasoning", reasoning)
+        bb.put("reasoning", reasoning, producer=self.name)
         pr = reasoning.get("physician_reasoning", {})
         runtime = pr.get("tao_runtime") or {}
         used = bool(runtime.get("enabled")) and not runtime.get("fallback_used", True)
@@ -216,7 +216,7 @@ class ExperienceAgent:
             modules.get("matched_modules"), mode="case",
             dao_client=bb.dao_client, use_llm=bb.use_llm, user_role="clinician",
         )
-        bb.put("experience", experience)
+        bb.put("experience", experience, producer=self.name)
         ce = experience.get("case_experience_summary", {})
         runtime = ce.get("tao_runtime") or {}
         used = bool(runtime.get("enabled")) and not runtime.get("fallback_used", True)
@@ -236,9 +236,9 @@ class PhysicianReviewAgent:
         handoff = clinician_handoff_skill(bb.case_state, formula.get("formula_routes"), modules.get("matched_modules"), safety)
         review_package = clinician_review_package_skill(bb.case_state, routed.get("syndrome_candidates", []), formula.get("formula_routes"), modules.get("matched_modules"), safety)
         cdss = cdss_recommendation_skill(bb.case_state, routed.get("syndrome_candidates", []), formula.get("formula_routes"), modules.get("matched_modules"), safety, user_role="clinician")
-        bb.put("handoff", handoff)
-        bb.put("review_package", review_package)
-        bb.put("cdss", cdss)
+        bb.put("handoff", handoff, producer=self.name)
+        bb.put("review_package", review_package, producer=self.name)
+        bb.put("cdss", cdss, producer=self.name)
         return AgentResult(self.name, self.role, self.kind, "ok", "装配医生复核包与 CDSS 草案，移交执业医师签名（人类终审）。", confidence=1.0, evidence=["draft_for_clinician_review"], handoff_to=self.handoff_to)
 
 

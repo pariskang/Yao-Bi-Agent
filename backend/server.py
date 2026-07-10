@@ -397,11 +397,20 @@ def handle_interview(data: dict[str, Any]) -> dict[str, Any]:
     review_action = str(data.get("review_action") or "").strip()
     with session_lock:
         if review_action:
+            # Physician review actions are clinician-only, server-side. Before this
+            # check, any caller could send review_action=override and clear confirmed
+            # red flags — the highest-risk write in the system with no RBAC at all.
+            denied = _clinician_only(data)
+            if denied:
+                return {**denied, "session_id": session_id, "tao": tao_info()}
             result = engine.run_review(
                 case,
                 action=review_action,
                 physician_notes=str(data.get("physician_notes") or ""),
                 override_reason=str(data.get("override_reason") or ""),
+                reviewer_id=str(data.get("reviewer_id") or ""),
+                confirm_override=bool(data.get("confirm_override")),
+                approval_id=str(data.get("approval_id") or ""),
             )
         else:
             result = engine.run_turn(case, str(data.get("message") or ""))

@@ -193,6 +193,8 @@ class YaoBiCaseState:
     physician_review: dict[str, Any] = field(default_factory=dict)
     # Set to True by the override action so _detect_red_flags is bypassed for this session.
     red_flags_overridden: bool = False
+    # Two-phase override approval in flight (see backend/runtime/approvals.py).
+    pending_approval: dict[str, Any] = field(default_factory=dict)
     # EIG ranking of the latest follow-up targets (BED-style question selection audit).
     last_question_selection: list[dict[str, Any]] = field(default_factory=list)
 
@@ -554,19 +556,29 @@ class YaoBiInterviewEngine:
         action: str,
         physician_notes: str = "",
         override_reason: str = "",
+        reviewer_id: str = "",
+        confirm_override: bool = False,
+        approval_id: str = "",
     ) -> dict[str, Any]:
         """Physician confirmation / revision / override of the safety referral.
 
         ``confirm``  — physician endorses the referral; interview remains stopped (done=True).
         ``revise``   — physician amends with notes; interview remains stopped (done=True).
-        ``override`` — physician rejects the red-flag assessment; flags cleared, FSM resumes.
+        ``override`` — the highest-risk action in the system (clears confirmed red flags,
+        resumes questioning). It is a first-class two-phase approval, not a string flag:
+        phase 1 requires ``reviewer_id`` + a non-empty reason and creates a *pending*
+        ApprovalRequest without changing clinical state; phase 2 re-submits with the
+        ``approval_id`` and ``confirm_override=True`` from the *same* reviewer, which
+        marks the approval approved (audited) and only then executes the override.
         """
 
         ts = int(time.time())
+        reviewer = (reviewer_id or "").strip()
         if action == "confirm":
             case.physician_review = {
                 "status": "confirmed",
                 "physician_notes": physician_notes or "",
+                "reviewer_id": reviewer or None,
                 "reviewed_at": ts,
             }
             note = f"（备注：{physician_notes}）" if physician_notes else ""
@@ -578,6 +590,7 @@ class YaoBiInterviewEngine:
             case.physician_review = {
                 "status": "revised",
                 "physician_notes": physician_notes,
+                "reviewer_id": reviewer or None,
                 "reviewed_at": ts,
             }
             message = f"医师已修订转诊建议。\n\n**医师备注：**{physician_notes}"
@@ -585,21 +598,69 @@ class YaoBiInterviewEngine:
             return self._pack(case, message, done=True)
 
         if action == "override":
-            reason = override_reason or "医师评估后判断无需急诊转诊"
-            case.physician_review = {
-                "status": "overridden",
-                "override_reason": reason,
-                "physician_notes": physician_notes,
-                "reviewed_at": ts,
+            from backend.runtime.approvals import get_approval_manager
+
+            reason = (override_reason or "").strip()
+            if not reviewer or not reason:
+                message = (
+                    "⚠️ 覆盖红旗评估为高风险操作，未执行任何更改。"
+                    "必须同时提供 reviewer_id（医师工号/ID，审计归责）与具体覆盖理由。"
+                )
+                pack = self._pack(case, message, done=False)
+                pack["approval_error"] = "reviewer_id_and_reason_required"
+                return pack
+
+            manager = get_approval_manager()
+            pending = case.pending_approval or {}
+            if confirm_override and approval_id and pending.get("approval_id") == approval_id:
+                decided = manager.decide(approval_id, decision="approve", reviewer_id=reviewer)
+                if decided is None:
+                    message = "⚠️ 覆盖确认失败：审批不存在、已决或确认人与申请人不一致。未执行任何更改。"
+                    pack = self._pack(case, message, done=False)
+                    pack["approval_error"] = "approval_confirmation_failed"
+                    return pack
+                overridden_flags = list(case.red_flags)
+                case.pending_approval = {}
+                case.physician_review = {
+                    "status": "overridden",
+                    "override_reason": reason,
+                    "physician_notes": physician_notes,
+                    "reviewer_id": reviewer,
+                    "approval_id": approval_id,
+                    "overridden_red_flags": overridden_flags,
+                    "reviewed_at": ts,
+                }
+                # Bypass future red-flag detection for this session (physician has assessed).
+                case.red_flags_overridden = True
+                case.red_flags = []
+                case.safety_level = "low"
+                override_msg = (
+                    f"医师（{reviewer}）已二次确认覆盖红旗评估，恢复问诊。\n**覆盖理由：**{reason}"
+                )
+                case.dialogue_history.append({"role": "physician", "content": override_msg})
+                # Resume the FSM — empty text triggers no slot extraction, just the next question.
+                return self.run_turn(case, "")
+
+            # Phase 1: create the pending approval; clinical state is untouched.
+            request = manager.create(
+                action_type="override_emergency_referral",
+                session_id=case.session_id,
+                reviewer_id=reviewer,
+                reason=reason,
+                payload={"red_flags": list(case.red_flags), "safety_level": case.safety_level},
+            )
+            case.pending_approval = {
+                "approval_id": request.approval_id,
+                "action_type": request.action_type,
+                "reviewer_id": reviewer,
             }
-            # Bypass future red-flag detection for this session (physician has assessed).
-            case.red_flags_overridden = True
-            case.red_flags = []
-            case.safety_level = "low"
-            override_msg = f"医师已覆盖红旗评估，恢复问诊。\n**覆盖理由：**{reason}"
-            case.dialogue_history.append({"role": "physician", "content": override_msg})
-            # Resume the FSM — empty text triggers no slot extraction, just the next question.
-            return self.run_turn(case, "")
+            message = (
+                "🔐 覆盖红旗评估需二次确认（高风险审批已创建，红旗状态未变更）。\n"
+                f"审批号：{request.approval_id}。请同一医师携带该审批号并附 confirm_override=true 再次提交以执行覆盖。"
+            )
+            pack = self._pack(case, message, done=False)
+            pack["pending_approval"] = request.to_dict()
+            return pack
 
         message = f"未知医师操作：{action}"
         return self._pack(case, message, done=False)

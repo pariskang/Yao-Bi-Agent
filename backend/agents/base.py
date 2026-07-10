@@ -14,23 +14,69 @@ JSON 修复 + 输出守卫；任何智能体都不得越权产出最终诊断 / 
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
+
+# Field ownership: which agent may write each blackboard key. A loose dict where any
+# agent can overwrite any key hides bugs (typo'd keys, stale downstream reads, silent
+# clobbering in future parallel execution); an explicit owner map turns those into
+# immediate errors. Keys not listed here are open (scratch space).
+BLACKBOARD_KEY_OWNERS: dict[str, str] = {
+    "shen": "CaseStructuringAgent",
+    "quality": "CaseStructuringAgent",
+    "structured": "CaseStructuringAgent",
+    "ortho_risk": "OrthoRiskAgent",
+    "routed": "TcmSyndromeAgent",
+    "formula": "FormulaReasoningAgent",
+    "modules": "HerbModuleAgent",
+    "conflicts": "ConflictSafetyAgent",
+    "safety": "ConflictSafetyAgent",
+    "mined": "EvidenceTraceAgent",
+    "reasoning": "ReasoningAgent",
+    "experience": "ExperienceAgent",
+    "handoff": "PhysicianReviewAgent",
+    "review_package": "PhysicianReviewAgent",
+    "cdss": "PhysicianReviewAgent",
+}
+
+
+class BlackboardOwnershipError(RuntimeError):
+    pass
 
 
 @dataclass
 class Blackboard:
-    """Shared working memory the agents read from and write to."""
+    """Shared working memory the agents read from and write to.
+
+    Writes carry the producing agent's name; owned keys reject writes from any other
+    producer, and every artifact records producer / sequence / timestamp metadata so a
+    reviewer can tell which agent wrote a value and in what order (draft provenance).
+    """
 
     case_state: dict[str, Any]
     use_llm: bool = False
     dao_client: Any | None = None
     outputs: dict[str, Any] = field(default_factory=dict)
+    meta: dict[str, dict[str, Any]] = field(default_factory=dict)
     halted: bool = False
     halt_reason: str | None = None
+    _seq: int = 0
 
-    def put(self, key: str, value: Any) -> None:
+    def put(self, key: str, value: Any, producer: str | None = None) -> None:
+        owner = BLACKBOARD_KEY_OWNERS.get(key)
+        if owner is not None and producer is not None and producer != owner:
+            raise BlackboardOwnershipError(
+                f"agent '{producer}' may not write blackboard key '{key}' (owner: {owner})"
+            )
+        self._seq += 1
         self.outputs[key] = value
+        self.meta[key] = {
+            "producer": producer,
+            "seq": self._seq,
+            "written_at": round(time.time(), 3),
+            "status": "draft",  # everything on the blackboard is a draft until physician review
+        }
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.outputs.get(key, default)

@@ -21,6 +21,7 @@ from typing import Any
 
 from backend.agents.base import AgentResult, Blackboard
 from backend.agents.clinical_agents import DEFAULT_AGENTS, EMERGENCY_AGENT
+from backend.runtime.run_context import AgentRun, StopReason
 
 
 class AgentOrchestrator:
@@ -36,6 +37,8 @@ class AgentOrchestrator:
         return roster
 
     def run(self, case_state: dict[str, Any], use_llm: bool = False, dao_client: Any | None = None) -> dict[str, Any]:
+        run = AgentRun(goal="multi_agent_collaboration", user_role="clinician")
+        run.start()
         bb = Blackboard(case_state=case_state, use_llm=use_llm, dao_client=dao_client)
         trace: list[dict[str, Any]] = []
         results: list[AgentResult] = []
@@ -51,10 +54,12 @@ class AgentOrchestrator:
                     "handoff_to": list(getattr(agent, "handoff_to", [])), "llm_runtime": None,
                 })
                 continue
+            run.budget.charge("tool_call")
             result = agent.run(bb)
             step += 1
             trace.append(result.to_message(step))
             results.append(result)
+            run.record("agent_step", agent=agent.name, status=result.status)
             bb.case_state = bb.case_state  # case_state may have been replaced in-place by agents
             if result.halt_pipeline:
                 bb.halted = True
@@ -65,6 +70,9 @@ class AgentOrchestrator:
             step += 1
             trace.append(emergency.to_message(step))
             results.append(emergency)
+            run.finish(StopReason.SAFETY_HALT, note=str(bb.halt_reason or "red flag halt"))
+        else:
+            run.finish(StopReason.GOAL_COMPLETED)
 
         used_llm_agents = [r.name for r in results if r.used_llm]
         return {
@@ -77,4 +85,5 @@ class AgentOrchestrator:
             "blackboard": bb.outputs,
             "case_state": bb.case_state,
             "agent_count": len(results),
+            "run": run.to_dict(),
         }

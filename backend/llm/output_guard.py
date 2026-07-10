@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 # Chinese numerals that appear in colloquial dose / frequency instructions ("三克"、"一日三次").
 _CHN_NUM = "一二三四五六七八九十两半"
+
+
+def _normalize(text: str) -> str:
+    """NFKC-fold before pattern matching: full-width digits/letters (３克、ｇ) and other
+    compatibility forms must not slip past ASCII-anchored dose patterns."""
+
+    return unicodedata.normalize("NFKC", text or "")
 
 FORBIDDEN_PATTERNS = {
     "final_diagnosis": [r"最终诊断", r"明确诊断", r"诊断为", r"可诊断为", r"确诊为"],
@@ -16,6 +24,12 @@ FORBIDDEN_PATTERNS = {
         # Frequency instructions in Arabic or Chinese numerals: 每日2次 / 一日三次 / 每天三服 / 日3次.
         rf"[每一]?[日天]\s*[{_CHN_NUM}\d]+\s*[次服]",
         rf"分[{_CHN_NUM}\d]+次",
+        # Colloquial regimen phrasings that dodge the numeral patterns:
+        # 早晚各服一回 / 每日早晚各一次 / 照此煎服 / 依上述比例配齐 / 按常规量使用.
+        rf"早晚各?服?[{_CHN_NUM}\d]*[次回]",
+        r"照此(?:执行|服用|煎服|用药)",
+        r"依(?:上述|此)比例",
+        r"按常规[量法]",
         # Numbered course of treatment ("两个疗程"), not the bare teaching word 疗程.
         rf"[{_CHN_NUM}\d]+\s*个?疗程",
     ],
@@ -29,6 +43,8 @@ FORBIDDEN_PATTERNS = {
         r"饭后服",
         # Per-dose instructions ("每次一袋/每次服6克"), not innocent phrases like "每次复诊".
         rf"每次[^，。;；\n]{{0,6}}(?:\d|[{_CHN_NUM}]|服|克|丸|片|袋)",
+        # Classical hand-measure dosing ("以三指撮为度") — a dose instruction in disguise.
+        r"[一二三]指撮",
     ],
     "replacement_for_clinician": [r"无需就医", r"不用看医生", r"可以自行", r"自行购买"],
 }
@@ -53,6 +69,7 @@ def _structured_violations(structured_output: dict[str, Any] | None) -> list[dic
 def guard_tao_output(text: str, structured_output: dict[str, Any] | None = None) -> dict[str, Any]:
     """Strict patient-floor guard: no diagnosis, prescription, or executable dose at all."""
 
+    text = _normalize(text)
     violations: list[dict[str, str]] = []
     for category, patterns in FORBIDDEN_PATTERNS.items():
         for pattern in patterns:
@@ -84,7 +101,11 @@ PATIENT_SELF_ADMIN_PATTERNS = [
 _CLINICIAN_DRAFT_FORBIDDEN = [
     (r"最终诊断[为是：:]|明确诊断为|诊断明确为|确诊为|可以?确诊", "assertive_final_diagnosis"),
     (r"处方如下|完整处方|请按.*服用|按方抓药", "complete_prescription"),
-    (rf"水煎服|[每一][日天]\s*[{_CHN_NUM}\d]+\s*[次服]|分[{_CHN_NUM}\d]+次(?:服|口服)", "executable_regimen"),
+    (
+        rf"水煎服|[每一][日天]\s*[{_CHN_NUM}\d]+\s*[次服]|分[{_CHN_NUM}\d]+次(?:服|口服)"
+        rf"|早晚各?服?[{_CHN_NUM}\d]*[次回]|照此(?:执行|服用|煎服|用药)|依(?:上述|此)比例|按常规[量法]",
+        "executable_regimen",
+    ),
 ]
 
 
@@ -97,6 +118,7 @@ def guard_clinician_draft(text: str, structured_output: dict[str, Any] | None = 
     the patient to self-medicate / skip the physician.
     """
 
+    text = _normalize(text)
     violations: list[dict[str, str]] = []
     for pattern in PATIENT_SELF_ADMIN_PATTERNS + FORBIDDEN_PATTERNS["replacement_for_clinician"]:
         if re.search(pattern, text, flags=re.IGNORECASE):
@@ -180,6 +202,7 @@ def filter_patient_payload(turn: dict[str, Any]) -> dict[str, Any]:
 def guard_probe(text: str) -> dict[str, Any]:
     """Probes are questions only: block any diagnosis verdict / prescription / dose leakage."""
 
+    text = _normalize(text)
     bad = (
         FORBIDDEN_PATTERNS["final_diagnosis"]
         + FORBIDDEN_PATTERNS["patient_executable_prescription"]

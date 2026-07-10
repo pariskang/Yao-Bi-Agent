@@ -450,18 +450,44 @@ function interviewReset() {
 async function interviewReview(action, notes) {
   const iv = ensureInterview();
   if (iv.pending) return;
-  const actionLabel = {confirm: '✓ 医师确认急诊转诊建议', revise: '✎ 医师修订转诊建议', override: '↺ 医师覆盖红旗评估，恢复问诊'}[action] || action;
+  // Override is a two-phase, attributable approval: reviewer ID is mandatory (audit),
+  // and the server executes nothing until the same reviewer re-confirms the approval id.
+  if (action === 'override') {
+    iv.reviewerId = (window.prompt('高风险操作：请填写医师工号/ID（审计归责必填）', iv.reviewerId || '') || '').trim();
+    if (!iv.reviewerId) { alert('未填写医师工号/ID，已取消覆盖操作。'); return; }
+  }
+  const actionLabel = {confirm: '✓ 医师确认急诊转诊建议', revise: '✎ 医师修订转诊建议', override: '↺ 医师申请覆盖红旗评估（需二次确认）'}[action] || action;
   iv.history.push({ role: 'physician', content: `${actionLabel}${notes ? '\n备注：' + notes : ''}` });
   iv.pending = true;
   renderConversationalInterview();
   try {
-    const body = { session_id: iv.sessionId, review_action: action };
+    const body = { session_id: iv.sessionId, review_action: action, doctor_mode: state.doctorMode, reviewer_id: iv.reviewerId || '' };
     if (action === 'override') {
       body.override_reason = notes;
     } else {
       body.physician_notes = notes;
     }
-    const res = await api.post('/api/interview', body);
+    let res = await api.post('/api/interview', body);
+    if (res.error) {
+      iv.pending = false;
+      iv.history.push({ role: 'assistant', content: `（医师审核被拒绝：${res.message || res.error}）`, error: true });
+      renderConversationalInterview();
+      return;
+    }
+    // Phase 2: server created a pending approval → explicit second confirmation, then
+    // resend with the approval id. Declining leaves the red flags fully in force.
+    if (action === 'override' && res.pending_approval) {
+      const approval = res.pending_approval;
+      const ok = window.confirm(`二次确认：确定覆盖红旗评估并恢复问诊？\n审批号：${approval.approval_id}\n覆盖理由：${notes}`);
+      if (ok) {
+        res = await api.post('/api/interview', { ...body, confirm_override: true, approval_id: approval.approval_id });
+      } else {
+        iv.pending = false;
+        iv.history.push({ role: 'assistant', content: '（已取消覆盖：审批未确认，红旗评估维持原状。）' });
+        renderConversationalInterview();
+        return;
+      }
+    }
     iv.pending = false;
     iv.info = res;
     iv.report = res.report || null;
