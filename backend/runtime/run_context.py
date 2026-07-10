@@ -166,10 +166,23 @@ class AgentRun:
         self.transition(RunStatus.RUNNING)
 
     def finish(self, stop_reason: StopReason, note: str = "", status: RunStatus | None = None) -> None:
-        """Terminal (or waiting) transition with an explicit machine-readable reason."""
+        """Terminal (or waiting) transition with an explicit machine-readable reason.
 
-        self.stop_reason = stop_reason
+        A terminal run cannot be finished again (v0.14): the first stop reason is
+        the truth — a later ``finish(GOAL_COMPLETED)`` must not relabel a
+        budget-exhausted or safety-halted run as a normal completion. The transition
+        runs BEFORE the stop_reason assignment so an illegal transition leaves the
+        recorded reason untouched.
+        """
+
+        if self.terminal:
+            raise IllegalRunTransition(
+                f"run {self.run_id} is already terminal "
+                f"({self.status.value}/{self.stop_reason.value if self.stop_reason else None}); "
+                "a finished run cannot be finished again"
+            )
         self.transition(status or _STOP_STATUS[stop_reason], note=note)
+        self.stop_reason = stop_reason
 
     @property
     def terminal(self) -> bool:

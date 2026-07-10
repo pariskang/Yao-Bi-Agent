@@ -127,32 +127,71 @@ LUMBAR_CONTEXT_TAGS = {
 }
 
 
-def question_scope_gate(question: str, case_state: dict[str, Any] | None = None) -> dict[str, Any]:
+# Case-directed intents that must NOT default into the lumbar-Bi domain without a
+# lumbar anchor: they produce syndrome/formula/herb content for THIS case. Dataset
+# statistics (dose distributions, mined evidence) stay intent-agnostic.
+ANCHOR_REQUIRED_INTENTS = {"syndrome_inquiry", "formula_inquiry", "herb_inquiry", "reasoning_inquiry", "experience_inquiry"}
+
+_OUT_OF_DOMAIN_MESSAGE = (
+    "⛔ **该主诉不属于本系统获准处理的腰痹任务域，未进行辨证与方药分析。**\n\n"
+    "本系统仅支持腰痹（腰痛/腰腿痛）的经验规则研究；膝、肩、颈等其他部位骨伤问题、"
+    "骨折/脱位及术后随访请至相应专科面诊。如出现危险信号（外伤后剧痛、肢体苍白发凉、"
+    "大小便异常等）请立即急诊。"
+)
+
+_FRACTURE_POSTOP_MESSAGE = (
+    "⛔ **骨折/脱位或术后随访任务优先于腰痹辨证，未进行方药分析。**\n\n"
+    "腰椎骨折、术后复查、内固定/椎体成形等属于创伤/术后随访任务域：正确路径是影像复查、"
+    "愈合评估与并发症随访，由医师面诊决策，而不是腰痹方药推理。如出现危险信号请立即急诊。"
+)
+
+_NO_ANCHOR_MESSAGE = (
+    "⚠️ **未识别到腰痹相关主诉，本轮不进行辨证与方药分析。**\n\n"
+    "本系统仅支持腰痹（腰痛/腰腿痛）任务域的经验规则研究。请先补充腰部主诉与相关病史"
+    "（或通过问诊问卷录入），再进行证型/方药层面的分析。"
+)
+
+
+def question_scope_gate(question: str, case_state: dict[str, Any] | None = None, intent: str | None = None) -> dict[str, Any]:
     """Scope decision for conversational entries (chat / autonomous agent).
 
-    Blocks case-directed clinical reasoning when the question introduces an
-    out-of-domain complaint (knee/shoulder/... or fracture/post-op context) and
-    neither the question nor the accumulated case state carries lumbar evidence.
-    Neutral questions without any body-region anchor pass through — the surrounding
-    intake context is lumbar by construction.
+    Mirrors the full router's priority order at the conversational surface
+    (v0.14 — the previous "any lumbar anchor passes" logic was the cross-entry
+    inconsistency P0 of the v0.13 review):
+
+    1. fracture / post-op / trauma context in the CURRENT question outranks a bare
+       lumbar anchor ("腰椎压缩性骨折术后…独活寄生汤是否合适" is a fracture-followup
+       task at every entry, exactly as the pipeline routes it);
+    2. an out-of-domain body region in the CURRENT question blocks regardless of
+       sticky lumbar state (domain shift: "现在主要是右膝关节肿痛" must not ride on
+       last turn's lumbar scope);
+    3. for case-directed clinical intents (``ANCHOR_REQUIRED_INTENTS``), a question
+       with NO lumbar anchor anywhere (question or accumulated case facts) is not
+       assumed to be lumbar — the old default let any "可以考虑哪些方剂" enter the
+       formula chain. ``intent=None`` applies the same rule (conservative default).
     """
 
     text = question or ""
     state = case_state or {}
     lumbar_in_question = any(_active(text, anchor) for anchor in _LUMBAR_ANCHORS)
-    lumbar_in_state = bool(set(state.get("normalized_tags") or []) & LUMBAR_CONTEXT_TAGS) \
-        or bool((state.get("scope") or {}).get("in_scope"))
-    out_domain = any(_active(text, anchor) for anchor in _JOINT_ANCHORS + _FRACTURE_POSTOP_ANCHORS + _TRAUMA_ANCHORS)
+    # Lumbar evidence in accumulated state: intake tags, the questionnaire chief
+    # complaint (case FACTS), or a scope decision. The scope field is safe to trust
+    # here because the server strips client-supplied scope from case state (v0.14,
+    # server._case_state) — what remains was computed server-side this session.
+    chief = state.get("chief_complaint") or {}
+    chief_text = f"{chief.get('standard_text') or ''}{chief.get('main_symptom') or ''}"
+    lumbar_in_state = (
+        bool(set(state.get("normalized_tags") or []) & LUMBAR_CONTEXT_TAGS)
+        or "腰" in chief_text
+        or (state.get("scope") or {}).get("in_scope") is True
+    )
+    fracture_postop = any(_active(text, anchor) for anchor in _FRACTURE_POSTOP_ANCHORS + _TRAUMA_ANCHORS)
+    joint = any(_active(text, anchor) for anchor in _JOINT_ANCHORS)
 
-    if out_domain and not lumbar_in_question and not lumbar_in_state:
-        return {
-            "allowed": False,
-            "reason_codes": ["NON_LUMBAR_COMPLAINT_IN_QUESTION"],
-            "message": (
-                "⛔ **该主诉不属于本系统获准处理的腰痹任务域，未进行辨证与方药分析。**\n\n"
-                "本系统仅支持腰痹（腰痛/腰腿痛）的经验规则研究；膝、肩、颈等其他部位骨伤问题、"
-                "骨折/脱位及术后随访请至相应专科面诊。如出现危险信号（外伤后剧痛、肢体苍白发凉、"
-                "大小便异常等）请立即急诊。"
-            ),
-        }
+    if fracture_postop:
+        return {"allowed": False, "reason_codes": ["FRACTURE_POSTOPERATIVE_PRIORITY"], "message": _FRACTURE_POSTOP_MESSAGE}
+    if joint and not lumbar_in_question:
+        return {"allowed": False, "reason_codes": ["NON_LUMBAR_COMPLAINT_IN_QUESTION", "DOMAIN_SHIFT_DETECTED"], "message": _OUT_OF_DOMAIN_MESSAGE}
+    if (intent is None or intent in ANCHOR_REQUIRED_INTENTS) and not lumbar_in_question and not lumbar_in_state:
+        return {"allowed": False, "reason_codes": ["NO_LUMBAR_ANCHOR"], "message": _NO_ANCHOR_MESSAGE}
     return {"allowed": True, "reason_codes": [], "message": None}

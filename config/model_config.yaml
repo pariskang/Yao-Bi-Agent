@@ -9,7 +9,8 @@ runtime:
     api_key: TAO_API_KEY  # provider fallbacks: POE_API_KEY / MINIMAX_API_KEY / AZURE_OPENAI_API_KEY
     azure_endpoint: AZURE_OPENAI_ENDPOINT
     azure_deployment: TAO_AZURE_DEPLOYMENT  # fallback AZURE_OPENAI_DEPLOYMENT, else TAO_MODEL_ID
-    azure_api_version: TAO_AZURE_API_VERSION  # fallback AZURE_OPENAI_API_VERSION, default 2024-06-01
+    azure_api_version: TAO_AZURE_API_VERSION  # fallback AZURE_OPENAI_API_VERSION, default 2024-06-01; "v1" selects the /openai/v1 surface
+    egress_allowed_hosts: YAOBI_EGRESS_ALLOWED_HOSTS  # optional comma-separated host allowlist; HTTPS enforced for non-local endpoints
     torch_dtype: TAO_TORCH_DTYPE
     device_map: TAO_DEVICE_MAP
     attn_implementation: TAO_ATTN_IMPLEMENTATION

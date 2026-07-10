@@ -53,9 +53,10 @@ def test_http_payload_uses_plain_messages_not_templated_prompt(monkeypatch):
     captured: dict = {}
 
     class _FakeResponse:
-        def read(self):
+        def read(self, limit=None):
             import json
-            return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+            raw = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+            return raw if limit is None else raw[:limit]
 
         def __enter__(self):
             return self

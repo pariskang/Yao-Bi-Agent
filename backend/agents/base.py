@@ -45,6 +45,11 @@ class BlackboardOwnershipError(RuntimeError):
     pass
 
 
+# The only agents that may issue capability tokens. Everything else can merely
+# CHECK capabilities — an agent adding its own permissions would defeat the token.
+CAPABILITY_ISSUERS = {"ScopeGateAgent"}
+
+
 @dataclass
 class Blackboard:
     """Shared working memory the agents read from and write to.
@@ -61,13 +66,28 @@ class Blackboard:
     meta: dict[str, dict[str, Any]] = field(default_factory=dict)
     halted: bool = False
     halt_reason: str | None = None
-    # Capability tokens issued by the scope gate agent: None = unrestricted (legacy
-    # caller); a set restricts which clinical capabilities downstream agents may use.
-    capabilities: set[str] | None = None
+    # Capability tokens. DEFAULT-DENY (v0.14): a Blackboard that never passed the
+    # scope gate carries NO clinical capabilities — a new entry point that forgets
+    # to run ScopeGateAgent gets blocked agents, not silently unrestricted ones
+    # (`None` = "all allowed" was the default-permit P0 of the v0.13 review).
+    # frozenset (immutable): an agent holding the blackboard cannot .add() itself
+    # a capability; grants go through grant_capabilities() with an authorized issuer.
+    capabilities: frozenset[str] = frozenset()
+    capability_issuer: str | None = None
     _seq: int = 0
 
     def capability_allowed(self, capability: str) -> bool:
-        return self.capabilities is None or capability in self.capabilities
+        return capability in self.capabilities
+
+    def grant_capabilities(self, capabilities: set[str] | frozenset[str], issuer: str) -> None:
+        """Issue (replace) the capability set — only the scope gate may do this."""
+
+        if issuer not in CAPABILITY_ISSUERS:
+            raise BlackboardOwnershipError(
+                f"agent '{issuer}' may not issue capabilities (issuers: {sorted(CAPABILITY_ISSUERS)})"
+            )
+        self.capabilities = frozenset(capabilities)
+        self.capability_issuer = issuer
 
     def put(self, key: str, value: Any, producer: str | None = None) -> None:
         owner = BLACKBOARD_KEY_OWNERS.get(key)

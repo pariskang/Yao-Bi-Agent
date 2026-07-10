@@ -93,7 +93,7 @@ class ScopeGateAgent:
         scope = bb.case_state.get("scope") or {}
         tags = set(bb.case_state.get("normalized_tags") or [])
         if scope.get("in_scope") is False:
-            bb.capabilities = set(self.TRIAGE_ONLY)
+            bb.grant_capabilities(self.TRIAGE_ONLY, issuer=self.name)
             return AgentResult(
                 self.name, self.role, self.kind, "halt",
                 f"主诉不属于腰痹任务域（{scope.get('out_of_scope_reason') or '域外主诉'}），中止辨证与方药协作。",
@@ -101,7 +101,7 @@ class ScopeGateAgent:
                 handoff_to=["EmergencyNoticeAgent"], halt_pipeline=True,
             )
         lumbar_evidence = bool(tags & LUMBAR_CONTEXT_TAGS) or scope.get("in_scope") is True
-        bb.capabilities = set(self.FULL_CAPABILITIES)
+        bb.grant_capabilities(self.FULL_CAPABILITIES, issuer=self.name)
         summary = "腰痹任务域确认，授予证型/方药/药物模块能力。" if lumbar_evidence \
             else "未见明确腰痹锚点（问卷式病例按腰痹域放行），能力授予并标注低置信。"
         return AgentResult(self.name, self.role, self.kind, "ok", summary,
@@ -137,6 +137,12 @@ class TcmSyndromeAgent:
     handoff_to = ["FormulaReasoningAgent"]
 
     def run(self, bb: Blackboard) -> AgentResult:
+        # v0.14: syndrome reasoning is also capability-gated — an out-of-scope case
+        # must not receive TCM pattern conclusions either, not just formulas.
+        if not bb.capability_allowed("syndrome_reasoning"):
+            return AgentResult(self.name, self.role, self.kind, "blocked",
+                               "能力未授权（syndrome_reasoning）：任务域门控禁止证候推理。",
+                               confidence=1.0, evidence=["capability_denied"], handoff_to=self.handoff_to)
         tags = bb.case_state.get("normalized_tags", [])
         routed = _tool("syndrome_router_skill", normalized_tags=tags)
         bb.put("routed", routed, producer=self.name)
@@ -233,6 +239,12 @@ class ReasoningAgent:
     handoff_to = ["ExperienceAgent"]
 
     def run(self, bb: Blackboard) -> AgentResult:
+        # LLM narrative reasoning is clinical content: same capability as syndrome
+        # routing — an unauthorized case gets no experience-based clinical narrative.
+        if not bb.capability_allowed("syndrome_reasoning"):
+            return AgentResult(self.name, self.role, self.kind, "blocked",
+                               "能力未授权（syndrome_reasoning）：任务域门控禁止经验推理叙述。",
+                               confidence=1.0, evidence=["capability_denied"], handoff_to=self.handoff_to)
         routed = bb.get("routed", {}) or {}
         formula = bb.get("formula", {}) or {}
         modules = bb.get("modules", {}) or {}
@@ -258,6 +270,10 @@ class ExperienceAgent:
     handoff_to = ["PhysicianReviewAgent"]
 
     def run(self, bb: Blackboard) -> AgentResult:
+        if not bb.capability_allowed("syndrome_reasoning"):
+            return AgentResult(self.name, self.role, self.kind, "blocked",
+                               "能力未授权（syndrome_reasoning）：任务域门控禁止经验总结叙述。",
+                               confidence=1.0, evidence=["capability_denied"], handoff_to=self.handoff_to)
         routed = bb.get("routed", {}) or {}
         formula = bb.get("formula", {}) or {}
         modules = bb.get("modules", {}) or {}
@@ -279,6 +295,10 @@ class PhysicianReviewAgent:
     handoff_to: list[str] = ["licensed_physician(human)"]
 
     def run(self, bb: Blackboard) -> AgentResult:
+        if not bb.capability_allowed("review_packaging"):
+            return AgentResult(self.name, self.role, self.kind, "blocked",
+                               "能力未授权（review_packaging）：任务域门控禁止医师审核包装配。",
+                               confidence=1.0, evidence=["capability_denied"], handoff_to=self.handoff_to)
         routed = bb.get("routed", {}) or {}
         formula = bb.get("formula", {}) or {}
         modules = bb.get("modules", {}) or {}

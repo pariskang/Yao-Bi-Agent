@@ -5,7 +5,7 @@ from typing import Any
 from backend.engine.conformal import conformal_prediction_set
 from backend.llm.dao_client import DaoClient
 from backend.provenance import get_provenance
-from backend.skills.safety_guard_skill import emergency_halt_required
+from backend.skills.safety_guard_skill import ACTION_LEVEL_POLICY, emergency_halt_required
 from backend.skills.tao_report_generation_skill import tao_report_generation_skill
 from backend.tools import get_registry
 
@@ -101,6 +101,18 @@ def run_case_pipeline(raw_text: str, use_llm: bool = False, dao_client: DaoClien
         **uncertainty,
         "clinical_mode": "urgent_workup_priority" if safety.get("safety_status") == "urgent" else "standard_support",
         "action_card": _action_card(safety, scope, formula=formula, uncertainty=uncertainty["uncertainty"]),
+        # Machine-readable release contract (v0.14): downstream consumers enforce
+        # this instead of relying on UI conventions. At A1 the formula/herb objects
+        # in this payload are clinician-review-only and must never reach a patient
+        # surface; the patient-role API filters key off this block.
+        "capability_policy": {
+            "action_level": safety.get("action_level"),
+            **ACTION_LEVEL_POLICY.get(safety.get("action_level") or "A3", ACTION_LEVEL_POLICY["A3"]),
+            "clinician_review_only_keys": (
+                ["formula_routes", "primary_route", "matched_modules", "syndrome_candidates"]
+                if safety.get("action_level") == "A1" else []
+            ),
+        },
         "provenance": provenance,
         **report,
     }
@@ -137,6 +149,10 @@ def _action_card(
             next_steps = ["尽快线下面诊与必要检查", "补充缺失的鉴别信息"]
         else:
             next_steps = ["常规门诊决策支持流程", "由执业医师审核候选证型与方路信号"]
+        # v0.14: blocked reflects the ACTION_LEVEL_POLICY contract, not an empty
+        # display default — at A1 the payload says explicitly that patient-facing
+        # formula release and executable care content are denied.
+        blocked.extend(ACTION_LEVEL_POLICY.get(level, {}).get("blocked") or [])
         if formula is not None and not (formula.get("route_gate") or {}).get("allowed", True):
             blocked.append("方药路线（" + str((formula.get("route_gate") or {}).get("note") or "证据不足弃权") + "）")
     gaps = list(safety.get("need_further_inquiry") or [])
@@ -214,6 +230,11 @@ def _halted_result(
         },
         "clinical_mode": "emergency_halt",
         "action_card": _action_card(safety, None, halted=True),
+        "capability_policy": {
+            "action_level": safety.get("action_level") or "A0",
+            **ACTION_LEVEL_POLICY.get(safety.get("action_level") or "A0", ACTION_LEVEL_POLICY["A0"]),
+            "clinician_review_only_keys": [],
+        },
         "provenance": provenance,
         **report,
     }
@@ -272,6 +293,11 @@ def _out_of_scope_result(
         },
         "clinical_mode": "out_of_scope_triage",
         "action_card": _action_card(gate_safety, scope),
+        "capability_policy": {
+            "action_level": gate_safety.get("action_level"),
+            **ACTION_LEVEL_POLICY.get(gate_safety.get("action_level") or "A3", ACTION_LEVEL_POLICY["A3"]),
+            "clinician_review_only_keys": [],
+        },
         "provenance": provenance,
         **report,
     }

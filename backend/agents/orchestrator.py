@@ -90,9 +90,14 @@ class AgentOrchestrator:
             step += 1
             trace.append(emergency.to_message(step))
             results.append(emergency)
-            run.finish(StopReason.SAFETY_HALT, note=str(bb.halt_reason or "red flag halt"))
-        else:
-            run.finish(StopReason.GOAL_COMPLETED)
+        # A terminal run keeps its FIRST stop reason (v0.14): a budget-exhausted run
+        # must never be relabeled goal_completed by this tail — finish() now raises
+        # on terminal runs, so both tail finishes are guarded.
+        if not run.terminal:
+            if bb.halted:
+                run.finish(StopReason.SAFETY_HALT, note=str(bb.halt_reason or "red flag halt"))
+            else:
+                run.finish(StopReason.GOAL_COMPLETED)
 
         used_llm_agents = [r.name for r in results if r.used_llm]
         return {

@@ -204,10 +204,21 @@ def scan_term(text: str, term: str, blocked_spans: list[tuple[int, int]] | None 
         })
     if not seen:
         return None
-    # Safety-first aggregation: a patient-experienced affirmation outranks a family
-    # member's ("父亲车祸后腰痛，我也腰痛" — the patient's own finding wins the record).
+    # Safety-first aggregation across MULTIPLE events of the same term:
+    # 1) a patient-experienced affirmation outranks a family member's
+    #    ("父亲车祸后腰痛，我也腰痛" — the patient's own finding wins the record);
+    # 2) among affirmed patient events, a CURRENT event outranks a historical or
+    #    resolved one ("十年前车祸后腰痛，今天再次车祸后不能站立" — today's crash is
+    #    the safety-relevant fact; collapsing to the first occurrence was the
+    #    history-masks-current-emergency false negative of the v0.13 review).
+    # All events stay visible in ``events`` for the physician record.
     ranked = {POLARITY_AFFIRMED: 2, POLARITY_UNCERTAIN: 1, POLARITY_NEGATED: 0}
-    best = max(seen, key=lambda o: (ranked[o["polarity"]], o["experiencer"] == "patient"))
+    temporal_rank = {"current": 2, "historical": 1, "resolved": 0}
+    best = max(seen, key=lambda o: (
+        ranked[o["polarity"]],
+        o["experiencer"] == "patient",
+        temporal_rank.get(o["temporality"], 2),
+    ))
     return {
         "entity": term,
         "polarity": best["polarity"],
@@ -216,6 +227,13 @@ def scan_term(text: str, term: str, blocked_spans: list[tuple[int, int]] | None 
         "source_span": best["source_span"],
         "confidence": _CONFIDENCE[best["polarity"]],
         "occurrences": len(seen),
+        # Event-level record (v0.14): every occurrence with its own polarity /
+        # temporality / experiencer, so downstream consumers can audit which event
+        # the aggregated verdict came from instead of trusting a collapsed fact.
+        "events": [
+            {k: o[k] for k in ("polarity", "temporality", "experiencer", "source_span")}
+            for o in seen
+        ],
         "spans": [o["span"] for o in seen],
     }
 

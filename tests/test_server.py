@@ -167,14 +167,18 @@ def test_interview_negation_does_not_trigger_red_flag(monkeypatch):
 
 
 def test_interview_emergency_referral_includes_tao_guidance(monkeypatch):
-    """With mock backend, emergency referral should include Tao clinical guidance."""
+    """v0.14: EMERGENCY referral content is fully DETERMINISTIC — the clinical
+    guidance renders from local templates with zero model calls (an emergency must
+    neither wait on nor leak the narrative to an LLM). ``referral_tao_guidance`` is
+    None by design; the guidance sections are embedded in the referral message."""
     server = _server(monkeypatch)
     server.handle_interview({"session_id": "tao_rf", "reset": True})
     res = _interview(server, "tao_rf", "大小便失禁，会阴麻木")
     assert res["safety_level"] == "emergency"
-    assert res["referral_tao_guidance"] is not None          # Tao added ER guidance
-    assert "急诊转诊" in res["referral_tao_guidance"]         # expected section header
-    assert "紧迫度" in res["referral_tao_guidance"]           # urgency classification present
+    assert res["referral_tao_guidance"] is None              # no LLM in the emergency path
+    assert res["referral"]["source"] == "deterministic_rules_emergency"
+    assert "急诊转诊" in res["message"]                       # guidance embedded deterministically
+    assert "紧迫度" in res["message"]                         # urgency classification present
     assert "physician_review_required" in res
     assert res["physician_review_required"] is True          # physician must review
 
@@ -188,7 +192,9 @@ def test_interview_high_risk_referral_tao_guidance(monkeypatch):
     res = _interview(server, "high_rf", "腰背痛伴发热寒战，肿瘤病史，夜间痛加重")
     assert res["safety_level"] == "emergency"                # unified with pipeline GC014
     assert res["done"] is True                               # hard stop, physician review
-    assert res["referral_tao_guidance"] is not None          # Tao still provides guidance
+    # v0.14: emergency guidance is deterministic (no LLM) but still embedded in full.
+    assert res["referral"]["source"] == "deterministic_rules_emergency"
+    assert "急诊转诊" in res["message"]
 
     # Contextual-urgent (fragility fall, no emergency category) remains advisory "high".
     server.handle_interview({"session_id": "high_rf2", "reset": True})

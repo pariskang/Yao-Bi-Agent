@@ -413,6 +413,46 @@ collaboration 三入口都输出了当归四逆汤——本轮统一：
   重启后医生仍可确认此前的 pending 覆盖审批；`YAOBI_STATE_DB` 可配置/禁用。
   黑板受控键强制 producer 声明（匿名写即异常）。
 
+## 临床安全不变量层（v0.14：事件级时态、统一入口门控与默认拒绝）
+
+针对第七轮外部评审（v0.13 增量审计，7 个 P0 全部实证复现后修复；逐条处置见
+[`docs/clinical_invariant_review_response_2026-07.md`](docs/clinical_invariant_review_response_2026-07.md)）：
+
+- **历史事件不再掩盖当前急症（P0）**：同名术语多次出现按"当前 > 历史 > 已缓解"
+  聚合并输出事件级明细——"十年前车祸后腰痛，今天再次车祸后不能站立"正确 A0 硬停，
+  "一周前发热已退，今天再次发热"重新报警；单次已缓解发热仍不误报。
+- **组合红旗事实级隔离（P0）**：PE 等组合规则只组合"患者本人 + 当前时态"的体征——
+  父亲的小腿肿痛、十年前制动期的小腿肿痛都不再与患者今天的气短组成肺栓塞证据；
+  真实当前 PE 组合仍 A0（灵敏度哨兵）。
+- **入口范围统一（P0）**：会话门控与完整路由器同优先级——骨折/术后/创伤问题在
+  chat/autonomous 一样阻断方药（不再"有腰字就放行"）；无腰痹证据的方剂问题不再默认
+  入腰痹域；当前问题的域外锚点使旧腰痹 scope 失效（域切换检测）。
+- **安全抢占意图路由（P0）**：`你能做什么？另外我现在胸痛气短` —— urgent 状态下所有
+  非临床意图答案强制前置确定性急诊横幅；临床意图维持整体替换。
+- **急症零 LLM（P0）**：interview 确定性安全扫描先于一切模型调用；急症轮跳过槽位
+  抽取（原文不出本机），转诊警告+医师端临床指引全部来自本地确定性模板（有测试断言
+  急症轮模型调用数=0）。
+- **行动等级发布契约（P0，改进后采纳）**：`ACTION_LEVEL_POLICY` 能力矩阵 +
+  结果级 `capability_policy` 块——A1 时 `action_card.blocked` 明确列出患者端方药/可执行
+  内容/LLM 扩写，方药对象标记 clinician_review_only（保留 GC012 金标准的医师复盘语义，
+  但下游按契约执行而非前端约定）。
+- **能力默认拒绝（P0）**：`Blackboard.capabilities` 默认空 frozenset，未过 ScopeGate 的
+  入口所有临床能力被拒；授予仅限授权签发者，智能体自授权/直接 `.add()` 均异常；
+  证型/推理/经验/审核包装配全部纳入能力检查；客户端传入的 `scope` 被服务端剥离并审计。
+- **运行时语义修复**：终态 run 不可二次 finish（budget_exhausted 不再被改写成
+  goal_completed，含 orchestrator 双 finish 现场修复）；HTTP 重试逐次计费；审计链
+  改为"写成功后推进链头"（写失败不再产生永久断链）。
+- **审批闭环补强**：审批绑定病例事实摘要（新事实 → `invalidated_by_new_facts`，覆盖
+  不执行）；`YAOBI_OVERRIDE_DISTINCT_REVIEWER=1` 启用双人复核（four-eyes）；
+  `YAOBI_STATE_DB_REQUIRED=1` 持久化必需模式（初始化失败即 health 不 ready，杜绝
+  静默内存降级，`/api/health` 暴露 `persistence` 块）。
+- **模型后端与出站加固**：MiniMax 默认端点更新为 api.minimax.io OpenAI 兼容面（旧端点
+  已弃用，大陆端点经 `TAO_ENDPOINT_URL`）；Azure 支持 v1 API（`TAO_AZURE_API_VERSION=v1`）；
+  空 choices/null content/refusal/content_filter/超大响应体显式失败；非本地端点强制
+  HTTPS + `YAOBI_EGRESS_ALLOWED_HOSTS` 主机白名单。
+- **CI 落库**：`.github/workflows/ci.yml` —— push/PR 全量测试（含金标准、变异哨兵、
+  入口一致性矩阵、23 项新临床不变量测试）成为合并门槛。
+
 ## 多提供商模型后端（v0.13：Poe / MiniMax / Azure OpenAI）
 
 `TAO_BACKEND` 在原有 `disabled / mock / http / transformers` 之外新增三个托管提供商

@@ -205,7 +205,7 @@ class ConversationSession:
                 "answer": "⚠️ 安全信息解析异常，本轮不进行辨证与方药分析（已记录待人工复核）。请重试或线下就诊。",
                 "evidence": [], "skills": ["safety_fail_closed"], "used_llm": False, "scope_gated": True,
             }
-        gate = question_scope_gate(question, self.case_state)
+        gate = question_scope_gate(question, self.case_state, intent=intent)
         if gate["allowed"]:
             return None
         return {
@@ -214,6 +214,39 @@ class ConversationSession:
         }
 
     # -- red-flag gate -------------------------------------------------------
+
+    # Intents that ARE the safety answer — never banner-wrapped or replaced.
+    _SAFETY_ANSWER_INTENTS = {"safety_inquiry", "red_flag_inquiry"}
+
+    def _urgent_banner(self) -> str | None:
+        """Safety preemption for NON-clinical intents (v0.14 review P0-5).
+
+        The red-flag gate fully replaces clinical answers, but a user who asks
+        "你能做什么？另外我现在胸痛气短" routes to ``capabilities`` — previously the
+        menu answered with no emergency notice at all. Safety must precede intent
+        semantics on every path: while the case is urgent, every non-safety answer
+        is prefixed with the deterministic emergency notice.
+        """
+
+        red = self.case_state.get("red_flags") or {}
+        if red.get("status") != "urgent":
+            return None
+        positives = [str(p) for p in (red.get("positive_items") or [])[:4]]
+        hint = f"（命中线索：{'、'.join(positives)}）" if positives else ""
+        return (
+            f"🚨 **优先提示：当前病例存在未排除的红旗危险信号{hint}，请立即线下/急诊评估，"
+            "勿等待线上回答。**"
+        )
+
+    def _with_urgent_banner(self, intent: str, result: dict[str, Any]) -> dict[str, Any]:
+        if intent in RED_FLAG_GATED_INTENTS or intent in self._SAFETY_ANSWER_INTENTS:
+            return result  # gated intents are replaced outright; safety intents answer directly
+        banner = self._urgent_banner()
+        if banner:
+            result = dict(result)
+            result["answer"] = f"{banner}\n\n---\n\n{result.get('answer') or ''}"
+            result["urgent_notice_prepended"] = True
+        return result
 
     def _red_flag_gate(self, intent: str) -> dict[str, Any] | None:
         """Global invariant: while red-flag status is urgent, case-directed clinical
@@ -431,14 +464,14 @@ class ConversationSession:
             "agent_inquiry": self._h_agent, "capabilities": self._h_capabilities,
         }
         if intent in ("mining_inquiry",):
-            return self._h_mining(question)
+            return self._with_urgent_banner(intent, self._h_mining(question))
         if intent == "dose_inquiry":
-            return self._h_dose(question)
+            return self._with_urgent_banner(intent, self._h_dose(question))
         det = handlers.get(intent, self._h_capabilities)()
         # Clinical intents: the model becomes the primary reasoner, grounded in rule evidence.
         if self.use_llm and intent in CONSULT_SCOPES:
             return self._consult(intent, question, det, full)
-        return det
+        return self._with_urgent_banner(intent, det)
 
     def invoke(self, intent: str, question: str = "") -> dict[str, Any]:
         """Public subagent entry: run one skill handler for a given intent.
