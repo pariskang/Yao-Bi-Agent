@@ -45,6 +45,7 @@ from backend.llm.output_guard import filter_patient_payload
 from backend.provenance import get_provenance
 from backend.skills.case_extract_skill import case_extract_skill
 from backend.skills.case_normalize_skill import case_normalize_skill
+from backend.skills.clinical_scope_router_skill import question_scope_gate
 from backend.skills.mined_evidence_skill import load_mined_rules
 from backend.skills.safety_guard_skill import safety_guard_skill
 from backend.skills.tao_followup_probe_skill import tao_followup_probe_skill
@@ -92,12 +93,20 @@ def _case_state(data: dict[str, Any]) -> dict[str, Any]:
     """Bridge the frontend's computed tags into the backend case_state shape."""
 
     red = data.get("red_flags") or {}
-    return {
+    state = {
         "normalized_tags": list(data.get("tags") or []),
         "red_flags": {"status": red.get("status"), "positive_items": list(red.get("positive_items") or [])},
         "neuro_ortho": data.get("neuro_ortho") or {},
         "comorbidity": data.get("comorbidity") or {},
     }
+    # Scope decision computed by _enrich_with_question (narrative-derived) and the
+    # fail-closed marker both travel with the case state so every downstream entry
+    # (chat gate, autonomous gate, collaboration ScopeGateAgent) sees the same facts.
+    if data.get("scope") is not None:
+        state["scope"] = data["scope"]
+    if data.get("safety_extraction_failed"):
+        state["safety_extraction_failed"] = True
+    return state
 
 
 # Host the HTTP server is actually bound to (set by make_server). None means the
@@ -177,6 +186,22 @@ def _escalate_status(current: str | None, graded: str | None) -> str | None:
     return current
 
 
+def _ops_guard(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Operational endpoints (/api/metrics, /api/warmup) are not patient surfaces:
+    loopback / library use passes; a publicly bound server requires the clinician
+    token; a public bind without a configured token locks them (they expose audit
+    paths, runtime info, and warmup can burn GPU time anonymously)."""
+
+    if not _publicly_bound():
+        return None
+    expected = os.getenv("YAOBI_CLINICIAN_TOKEN") or ""
+    supplied = str(data.get("clinician_token") or "")
+    if expected and hmac.compare_digest(supplied, expected):
+        return None
+    return {"error": "ops_endpoint_locked",
+            "message": "运维端点在公网绑定下需要有效的 X-Clinician-Token（未配置令牌时锁定）。"}
+
+
 def _enrich_with_question(data: dict[str, Any], question: str) -> dict[str, Any]:
     """Extract structured tags from the free-text question and merge with intake tags.
 
@@ -207,8 +232,19 @@ def _enrich_with_question(data: dict[str, Any], question: str) -> dict[str, Any]
             set(red.get("need_further_inquiry") or []) | set(graded.get("need_further_inquiry") or [])
         )
         merged["red_flags"] = red
-    except Exception:
-        pass  # never let extraction break the request; fall back to provided tags
+        gate = question_scope_gate(question, {"normalized_tags": merged["tags"]})
+        if not gate["allowed"]:
+            merged["scope"] = {
+                "in_scope": False,
+                "out_of_scope_reason": gate["message"],
+                "reason_codes": gate["reason_codes"],
+            }
+    except Exception as exc:
+        # FAIL CLOSED (entry review §6): a crashed safety extraction must not silently
+        # fall through to clinical reasoning on stale/partial tags. The marker makes
+        # every downstream gate abstain, and the failure is audited.
+        merged["safety_extraction_failed"] = True
+        AUDIT.record("safety_extraction_error", {"error": f"{type(exc).__name__}: {exc}"})
     return merged
 
 
@@ -459,9 +495,12 @@ def handle_feedback(data: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "recorded": record, "tao": tao_info()}
 
 
-def handle_metrics(_data: dict[str, Any]) -> dict[str, Any]:
+def handle_metrics(data: dict[str, Any]) -> dict[str, Any]:
     """Operational + governance metrics: request counts, guard trips, fallbacks, feedback."""
 
+    denied = _ops_guard(data)
+    if denied:
+        return denied
     counters = COUNTERS.snapshot()
     feedback = {k: v for k, v in counters.items() if k.startswith("feedback_")}
     confirmed = feedback.get("feedback_confirmed", 0)
@@ -480,7 +519,10 @@ def handle_metrics(_data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def handle_warmup(_data: dict[str, Any]) -> dict[str, Any]:
+def handle_warmup(data: dict[str, Any]) -> dict[str, Any]:
+    denied = _ops_guard(data)
+    if denied:
+        return denied
     if not TAO_ENABLED or CLIENT.config.backend == "disabled":
         return {"ok": False, "reason": "Tao backend disabled (set TAO_BACKEND).", "tao": tao_info()}
     started = time.time()
@@ -598,7 +640,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if _rate_limited(self.client_address[0]):
                 self._send_json({"error": "rate_limited", "message": "请求过于频繁，请稍后再试。"}, status=429)
                 return
-            self._dispatch(handler, {})
+            data: dict[str, Any] = {}
+            header_token = self.headers.get("X-Clinician-Token")
+            if header_token:
+                data["clinician_token"] = header_token
+            self._dispatch(handler, data)
             return
         super().do_GET()
 

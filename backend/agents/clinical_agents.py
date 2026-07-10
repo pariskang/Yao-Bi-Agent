@@ -53,7 +53,7 @@ class CaseStructuringAgent:
 
 class RedFlagAgent:
     name, role, kind = "RedFlagAgent", "红旗硬门控", "rule"
-    handoff_to = ["OrthoRiskAgent"]
+    handoff_to = ["ScopeGateAgent"]
     runs_after_halt = False
 
     def run(self, bb: Blackboard) -> AgentResult:
@@ -69,6 +69,47 @@ class RedFlagAgent:
             )
         summary = "未见急诊级红旗，放行下游协作。" if status else "红旗信息不完整，按谨慎放行。"
         return AgentResult(self.name, self.role, self.kind, "ok", summary, confidence=1.0, evidence=positives, handoff_to=self.handoff_to)
+
+
+class ScopeGateAgent:
+    """Capability issuer: verifies the case belongs to the lumbar-Bi task domain and
+    grants/blocks downstream clinical capabilities (the collaboration entry previously
+    had no scope check at all — the cross-entry inconsistency P0 of the entry review).
+
+    Scope evidence, in order: an explicit server-computed scope decision on the case
+    state (from the free-text narrative), else lumbar-context tags from the intake.
+    Questionnaire cases with neither lumbar evidence nor any out-of-domain marker keep
+    the legacy behaviour (the clinician intake UI is lumbar-domain by construction)
+    with a reduced-confidence note.
+    """
+
+    name, role, kind = "ScopeGateAgent", "任务域与能力授权", "rule"
+    handoff_to = ["OrthoRiskAgent"]
+    runs_after_halt = False
+
+    FULL_CAPABILITIES = {"syndrome_reasoning", "formula_draft", "herb_module", "review_packaging"}
+    TRIAGE_ONLY = {"review_packaging"}
+
+    def run(self, bb: Blackboard) -> AgentResult:
+        from backend.skills.clinical_scope_router_skill import LUMBAR_CONTEXT_TAGS
+
+        scope = bb.case_state.get("scope") or {}
+        tags = set(bb.case_state.get("normalized_tags") or [])
+        if scope.get("in_scope") is False:
+            bb.capabilities = set(self.TRIAGE_ONLY)
+            return AgentResult(
+                self.name, self.role, self.kind, "halt",
+                f"主诉不属于腰痹任务域（{scope.get('out_of_scope_reason') or '域外主诉'}），中止辨证与方药协作。",
+                confidence=1.0, evidence=list(scope.get("reason_codes") or []),
+                handoff_to=["EmergencyNoticeAgent"], halt_pipeline=True,
+            )
+        lumbar_evidence = bool(tags & LUMBAR_CONTEXT_TAGS) or scope.get("in_scope") is True
+        bb.capabilities = set(self.FULL_CAPABILITIES)
+        summary = "腰痹任务域确认，授予证型/方药/药物模块能力。" if lumbar_evidence \
+            else "未见明确腰痹锚点（问卷式病例按腰痹域放行），能力授予并标注低置信。"
+        return AgentResult(self.name, self.role, self.kind, "ok", summary,
+                           confidence=1.0 if lumbar_evidence else 0.6,
+                           evidence=sorted(tags & LUMBAR_CONTEXT_TAGS), handoff_to=self.handoff_to)
 
 
 class OrthoRiskAgent:
@@ -114,6 +155,12 @@ class FormulaReasoningAgent:
     handoff_to = ["HerbModuleAgent"]
 
     def run(self, bb: Blackboard) -> AgentResult:
+        # Capability token check inside the agent (not only in the orchestrator):
+        # a formula draft may only be produced when the scope gate granted it.
+        if not bb.capability_allowed("formula_draft"):
+            return AgentResult(self.name, self.role, self.kind, "blocked",
+                               "能力未授权（formula_draft）：任务域门控禁止方剂推理。",
+                               confidence=1.0, evidence=["capability_denied"], handoff_to=self.handoff_to)
         tags = bb.case_state.get("normalized_tags", [])
         routed = bb.get("routed", {})
         formula = formula_base_selector_skill(tags, routed.get("syndrome_candidates", []))
@@ -129,6 +176,10 @@ class HerbModuleAgent:
     handoff_to = ["ConflictSafetyAgent"]
 
     def run(self, bb: Blackboard) -> AgentResult:
+        if not bb.capability_allowed("herb_module"):
+            return AgentResult(self.name, self.role, self.kind, "blocked",
+                               "能力未授权（herb_module）：任务域门控禁止药物模块组合。",
+                               confidence=1.0, evidence=["capability_denied"], handoff_to=self.handoff_to)
         tags = bb.case_state.get("normalized_tags", [])
         modules = herb_module_composer_skill(tags, (bb.get("formula", {}) or {}).get("primary_route"))
         bb.put("modules", modules, producer=self.name)
@@ -253,7 +304,7 @@ class EmergencyNoticeAgent:
 
 
 DEFAULT_AGENTS = [
-    CaseStructuringAgent(), RedFlagAgent(), OrthoRiskAgent(), TcmSyndromeAgent(),
+    CaseStructuringAgent(), RedFlagAgent(), ScopeGateAgent(), OrthoRiskAgent(), TcmSyndromeAgent(),
     FormulaReasoningAgent(), HerbModuleAgent(), ConflictSafetyAgent(), EvidenceTraceAgent(),
     ReasoningAgent(), ExperienceAgent(), PhysicianReviewAgent(),
 ]

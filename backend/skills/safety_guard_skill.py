@@ -36,16 +36,17 @@ TAG_REDFLAG_MAP = {
     "anticoagulant_use": "anticoagulant_use",
 }
 
-# Confirmed findings in these categories are urgent regardless of context.
-# v0.10 orthopedic safety ontology: beyond the original spine triad, high-energy
-# trauma, open fracture/dislocation, neurovascular deficit, compartment syndrome,
-# vascular and cardiopulmonary emergencies and cervical myelopathy all hard-halt.
-_EMERGENCY_CATEGORIES = {
+# Confirmed findings in these categories hard-halt clinical reasoning (v0.10 orthopedic
+# safety ontology). The halt set is split by *action semantics* (P1-2): resuscitation-
+# level emergencies are A0; cervical myelopathy also halts TCM reasoning but its correct
+# clinical action is same-day urgent specialist referral (A1), not an ambulance.
+_A0_EMERGENCY_CATEGORIES = {
     "cauda_equina_symptoms", "progressive_weakness", "fever_or_infection",
     "major_trauma", "open_fracture_dislocation", "neurovascular_deficit",
     "compartment_syndrome", "vascular_emergency", "cardiopulmonary_emergency",
-    "cervical_myelopathy",
 }
+_A1_HALT_CATEGORIES = {"cervical_myelopathy"}
+_EMERGENCY_CATEGORIES = _A0_EMERGENCY_CATEGORIES | _A1_HALT_CATEGORIES
 # Trauma is urgent only against a fragility background; otherwise caution.
 _FRAGILITY_TAGS = {"osteoporosis", "elderly", "very_elderly"}
 
@@ -53,6 +54,11 @@ _FRAGILITY_TAGS = {"osteoporosis", "elderly", "very_elderly"}
 # point of asking); every other category requires a current/unresolved finding —
 # "一周前发热，现已痊愈" must not trigger a current infection hard stop.
 _HISTORY_RELEVANT_CATEGORIES = {"cancer_history"}
+
+# Policy/role findings (self-medication requests etc.): they drive guard behaviour and
+# physician review, but they are NOT clinical red flags and must not raise the clinical
+# safety status alongside open fractures and PE (P1-3).
+_POLICY_TERMS = ("自服", "自己买药", "开方")
 
 # Categories that hard-halt TCM reasoning entirely (emergency referral is the only
 # valid output). Contextual-urgent flags (e.g. fragility trauma) still mark the case
@@ -86,6 +92,10 @@ def _confirmed_urgent(confirmed: list[dict[str, Any]], tags: set[str], text: str
     categories = {flag.get("category") for flag in confirmed}
     if categories & _EMERGENCY_CATEGORIES:
         return True
+    if "cardiopulmonary_symptom" in categories:
+        # Chest pain / dyspnea alone: urgent same-day cardiopulmonary workup (A1),
+        # escalated to an A0 emergency only by the combination logic below.
+        return True
     if "trauma_fracture_risk" in categories and (
         tags & _FRAGILITY_TAGS or is_affirmed(text, "剧痛") or "压缩性骨折" in text
     ):
@@ -102,22 +112,30 @@ def _confirmed_urgent(confirmed: list[dict[str, Any]], tags: set[str], text: str
 def _combination_flags(text: str, tags: set[str], confirmed_categories: set[str]) -> list[dict[str, Any]]:
     """Multi-sign escalations no single keyword captures (orthopedic ontology v0.10).
 
-    * suspected PE: calf swelling/pain plus dyspnea/palpitation after immobilisation —
-      each sign alone is benign-ish (气短 is also a TCM qi-deficiency cue), together
-      they are a cardiopulmonary emergency;
+    * suspected PE / cardiopulmonary emergency: chest pain or calf swelling alone is a
+      symptom-level urgent finding; combined with dyspnea/palpitations it becomes a
+      highly-suspected emergency (each sign alone is benign-ish — 气短 is also a TCM
+      qi-deficiency cue, chest pain can be a reproducible chest-wall strain);
     * immunosuppressed red-flag context: biologics/long-term steroids plus night pain
       or infection signs → infection/malignancy high-risk (contextual urgent referral,
       not an emergency halt — the workup is urgent, the scene is not a resuscitation).
     """
 
     combos: list[dict[str, Any]] = []
-    if is_affirmed(text, "小腿肿") and (
+    dyspnea_like = (
         is_affirmed(text, "气短") or is_affirmed(text, "呼吸困难") or is_affirmed(text, "心慌")
-    ):
+    )
+    if is_affirmed(text, "小腿肿") and dyspnea_like:
         combos.append({
             "id": "cardiopulmonary_emergency", "category": "cardiopulmonary_emergency",
-            "term": "小腿肿痛+气短/心慌", "source": "combination",
+            "term": "小腿肿痛+气短/心慌", "source": "combination", "certainty": "highly_suspected",
             "message": "制动/骨折背景下小腿肿痛伴气短、心慌需警惕肺栓塞，立即急诊评估。",
+        })
+    if is_affirmed(text, "胸痛") and dyspnea_like:
+        combos.append({
+            "id": "cardiopulmonary_emergency", "category": "cardiopulmonary_emergency",
+            "term": "胸痛+气短/心慌", "source": "combination", "certainty": "highly_suspected",
+            "message": "胸痛伴气短/心慌需警惕肺栓塞或急性心肺事件，立即急诊评估。",
         })
     immunosuppressed = "immunosuppressant_use" in tags or any(
         is_affirmed(text, term) for term in ("生物制剂", "免疫抑制剂", "长期激素", "长期使用激素")
@@ -125,7 +143,7 @@ def _combination_flags(text: str, tags: set[str], confirmed_categories: set[str]
     if immunosuppressed and ("night_pain" in tags or "fever_or_infection" in confirmed_categories):
         combos.append({
             "id": "immunosuppressed_risk", "category": "immunosuppressed_risk",
-            "term": "免疫抑制+夜间痛/感染线索", "source": "combination",
+            "term": "免疫抑制+夜间痛/感染线索", "source": "combination", "certainty": "highly_suspected",
             "message": "免疫抑制患者腰痛伴夜间痛或感染线索，属感染/肿瘤高风险，需尽快专科评估。",
         })
     return combos
@@ -141,6 +159,8 @@ def safety_guard_skill(case_json: dict[str, Any], matched_modules: list[dict[str
     denied: list[dict[str, Any]] = []
     uncertain: list[dict[str, Any]] = []
     historical: list[dict[str, Any]] = []
+    other_experiencer: list[dict[str, Any]] = []
+    policy_flags: list[dict[str, Any]] = []
 
     # 1) Controlled-vocabulary tags (already polarity-resolved upstream).
     for key, message in red_flag_messages.items():
@@ -167,14 +187,20 @@ def safety_guard_skill(case_json: dict[str, Any], matched_modules: list[dict[str
         }
         polarity = entity.get("polarity")
         temporality = entity.get("temporality") or "current"
-        if polarity == "affirmed" and temporality in {"historical", "resolved"} \
+        experiencer = entity.get("experiencer") or "patient"
+        if polarity == "affirmed" and experiencer != "patient":
+            # A family member's event/finding is never the patient's red flag
+            # ("父亲昨日车祸" must not fire the patient's major-trauma emergency).
+            other_experiencer.append({**record, "experiencer": experiencer,
+                                      "message": f"家属/他人线索：{term}（非患者本人，不作为红旗）"})
+        elif polarity == "affirmed" and temporality in {"historical", "resolved"} \
                 and category not in _HISTORY_RELEVANT_CATEGORIES:
             # The NLP layer resolved the temporal status — the safety layer must consume
             # it: a resolved/past finding is recorded for the physician, never alarmed.
             historical.append({**record, "temporality": temporality,
                                "message": f"既往/已缓解线索：{term}（不作为当前红旗，供医师参考）"})
         elif polarity == "affirmed":
-            confirmed.append({**record, "message": f"原文红旗线索：{term}"})
+            confirmed.append({**record, "certainty": "reported", "message": f"原文红旗线索：{term}"})
         elif polarity == "negated":
             denied.append({**record, "message": f"患者已否认：{term}"})
         else:
@@ -184,8 +210,11 @@ def safety_guard_skill(case_json: dict[str, Any], matched_modules: list[dict[str
     confirmed_categories = {flag.get("category") for flag in confirmed}
     confirmed.extend(_combination_flags(text, tags, confirmed_categories))
 
-    if "自服" in text or "自己买药" in text or "开方" in text:
-        confirmed.append({
+    # Policy findings ("给我开方"、"自己买药") stay on their own axis: they drive the
+    # request guard and physician review, never the clinical safety status (P1-3 —
+    # "上次医生开方后腰痛减轻" is not a clinical danger sign).
+    if any(term in text for term in _POLICY_TERMS):
+        policy_flags.append({
             "id": "self_medication_request", "category": "self_medication_request",
             "message": red_flag_messages.get("self_medication_request", "自行购药/自服请求必须拒绝并转为医生复核建议。"),
             "source": "narrative",
@@ -212,11 +241,15 @@ def safety_guard_skill(case_json: dict[str, Any], matched_modules: list[dict[str
 
     # Clinical action stratification: one blended "caution" cannot distinguish "car
     # crash, cannot stand" from "this herb needs physician review". The action level
-    # states what should happen; the drivers state *why* — urgency, medication review
-    # and missing evidence are separate axes, not one bucket.
+    # states what should happen; the drivers state *why* — urgency, medication review,
+    # missing evidence and policy findings are separate axes, not one bucket.
+    # A0 = resuscitation-level halt; cervical myelopathy also halts TCM reasoning but
+    # its correct action is same-day urgent specialist referral (A1-with-halt, P1-2).
     categories = {flag.get("category") for flag in confirmed}
-    if status == "urgent" and categories & _EMERGENCY_CATEGORIES:
+    if status == "urgent" and categories & _A0_EMERGENCY_CATEGORIES:
         action_level, action_meaning = "A0", "立即急救/急诊评估；硬停止全部辨证与方药推理"
+    elif status == "urgent" and categories & _A1_HALT_CATEGORIES:
+        action_level, action_meaning = "A1", "当日紧急专科评估（如脊柱外科）；硬停止辨证与方药推理"
     elif status == "urgent":
         action_level, action_meaning = "A1", "当日紧急专科评估；停止患者端方药建议（医师复盘分析保留）"
     elif status == "caution":
@@ -232,6 +265,7 @@ def safety_guard_skill(case_json: dict[str, Any], matched_modules: list[dict[str
             "clinical_urgency": status if status != "safe" else None,
             "medication_review_required": bool(medication_risks),
             "evidence_insufficient": bool(uncertain or need_further_inquiry),
+            "policy_flags": [flag["id"] for flag in policy_flags],
         },
         # Backward-compatible alias of confirmed_red_flags: only confirmed findings.
         "red_flags": confirmed,
@@ -240,6 +274,10 @@ def safety_guard_skill(case_json: dict[str, Any], matched_modules: list[dict[str
         "uncertain_red_flags": uncertain,
         # Past/resolved findings: physician-visible record, never an alarm driver.
         "historical_red_flags": historical,
+        # Findings experienced by someone other than the patient: never alarmed.
+        "other_experiencer_flags": other_experiencer,
+        # Role/policy findings (self-medication requests): guard axis, not clinical axis.
+        "policy_flags": policy_flags,
         "need_further_inquiry": need_further_inquiry,
         "medication_risks": sorted(set(medication_risks)),
         "required_disclaimer": True,

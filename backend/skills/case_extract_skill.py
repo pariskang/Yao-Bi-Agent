@@ -57,8 +57,10 @@ RED_FLAG_CATEGORY = {
     # 血管急症：主动脉夹层 / 腹主动脉瘤样表现。
     "撕裂样": "vascular_emergency", "腹部搏动感": "vascular_emergency",
     "搏动性包块": "vascular_emergency",
-    # 心肺急症：胸痛 / 呼吸困难 / 咯血（PE 组合升级见 safety_guard_skill）。
-    "胸痛": "cardiopulmonary_emergency", "呼吸困难": "cardiopulmonary_emergency",
+    # 心肺急症：咯血确认即急诊；胸痛/呼吸困难单独出现是"心肺症状"（当日紧急评估 +
+    # 心肺追问），与气短/心慌/制动史等组合后才升级为心肺急症硬停（见 safety_guard_skill
+    # 的组合逻辑）——避免"胸壁拉伤按压可复现"式的过度分诊（P1-1）。
+    "胸痛": "cardiopulmonary_symptom", "呼吸困难": "cardiopulmonary_symptom",
     "咯血": "cardiopulmonary_emergency",
     # 颈髓病：手部精细动作障碍 + 步态踩棉花感。
     "踩棉花": "cervical_myelopathy", "双手笨拙": "cervical_myelopathy",

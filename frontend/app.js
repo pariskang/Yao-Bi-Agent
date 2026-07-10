@@ -707,13 +707,15 @@ function renderQuestion(q, stage) {
   const options = tpl.querySelector('.options');
   const current = answerValue(q.id);
   if (q.probe || q.type === 'free') {
-    options.innerHTML = `<input class="free-note" type="text" placeholder="可简要回答，作为补充线索（非必填）" value="${current || ''}" />`;
+    options.innerHTML = `<input class="free-note" type="text" placeholder="可简要回答，作为补充线索（非必填）" />`;
+    options.querySelector('input').value = current || '';   // DOM property, not attribute — no injection surface
     options.querySelector('input').addEventListener('input', e => setAnswer(q.id, e.target.value));
     tpl.querySelector('.free-note:last-child')?.remove();
     return card;
   }
   if (q.type === 'number') {
-    options.innerHTML = `<input class="free-note" type="number" placeholder="${q.placeholder || ''}" value="${current || ''}" />`;
+    options.innerHTML = `<input class="free-note" type="number" placeholder="${escapeHtml(q.placeholder || '')}" />`;
+    options.querySelector('input').value = current || '';
     options.querySelector('input').addEventListener('input', e => setAnswer(q.id, Number(e.target.value)));
   } else if (q.type === 'range') {
     options.innerHTML = `<input type="range" min="0" max="10" value="${current ?? 5}" /><strong>${current ?? 5} 分</strong>`;
@@ -1284,15 +1286,15 @@ function paintAgents(model, real) {
         <li class="agent-step ${t.status}">
           <div class="agent-head">
             <span class="agent-order">${i + 1}</span>
-            <strong>${t.name}</strong>
+            <strong>${escapeHtml(t.name)}</strong>
             <span class="kind-badge ${t.kind}">${t.kind === 'llm' ? '语言模型' : '规则'}</span>
             ${t.used_llm ? '<span class="kind-badge llm-on">Tao 在环</span>' : ''}
             <span class="agent-status ${t.status}">${statusCn[t.status] || t.status}</span>
             ${t.confidence != null ? `<span class="agent-conf">置信度 ${Number(t.confidence).toFixed(2)}</span>` : ''}
           </div>
-          <p class="agent-role">${t.role}</p>
-          <p class="agent-summary">${t.summary}</p>
-          <p class="agent-handoff">→ 接力：${t.handoff}</p>
+          <p class="agent-role">${escapeHtml(t.role)}</p>
+          <p class="agent-summary">${escapeHtml(t.summary)}</p>
+          <p class="agent-handoff">→ 接力：${escapeHtml(t.handoff)}</p>
         </li>`).join('')}</ol>
     </section>
     <section class="result-panel"><h3>自主协作机制说明</h3>

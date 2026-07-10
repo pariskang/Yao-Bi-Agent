@@ -351,6 +351,38 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
   （高能量创伤/开放骨折漏报率 0、PE/主动脉零方药、历史发热不误停、无证型候选
   primary_route 为 None、急诊门控后 LLM 调用为 0）全部以断言固定在 CI。
 
+## 入口一致性与统一安全内核层（v0.11：任何 API 同一门控）
+
+针对第五轮外部评审的整改（`app_version` 同步为 0.11.0；逐条处置见
+[`docs/entry_consistency_review_response_2026-07.md`](docs/entry_consistency_review_response_2026-07.md)）。
+评审核心发现经实证成立：同一膝关节主诉，主流水线正确拒绝，而 chat / autonomous /
+collaboration 三入口都输出了当归四逆汤——本轮统一：
+
+- **入口统一门控（P0）**：chat 与 autonomous 在红旗门控后增加范围门控（域外主诉
+  拒绝辨证方药并转诊）；多智能体协作新增 **ScopeGateAgent**（能力签发者）+
+  **黑板能力令牌**——方剂/药物模块智能体在自身内部校验 `formula_draft`/`herb_module`
+  能力，未授权即 blocked（纵深防御）；服务端把叙事范围判定随 case_state 下发到全部
+  入口。入口一致性矩阵测试（`tests/test_entry_consistency.py`）锁定：开放骨折五入口
+  全硬停、膝关节五入口零方药、历史车祸全入口不按当前急症。
+- **interview 复用共享内核（P0）**：完整问诊的红旗检测叠加与 pipeline 完全同源的
+  安全内核（时态/经历者/组合升级/脆性背景），活动性发热从"high 可继续"统一为
+  emergency 硬停；内核异常按高风险 fail-closed。
+- **范围路由优先级（P0）**：骨折/脱位/术后随访锚点优先于裸"腰"锚点——"腰椎压缩性
+  骨折术后复查"路由为 fracture_followup 并阻断腰痹方药能力；路由输出升级为
+  reason_codes + allowed/blocked_capabilities；锚点判定要求 affirmed+current+patient。
+- **方证兼容约束（P0）**：方剂规则新增 `compatible_syndromes`，只允许与 top-1 或
+  medium+ 证型候选兼容的方路入选；F001 以久病为必要条件+虚证佐证。三个对抗封死：
+  少阳+高龄→仅柴胡类方、湿热+骨松→仅四妙丸、高龄无久病→无独活寄生汤。
+- **时态绑定与经历者（P0）**：缓解词跨句绑定只接受纯缓解短句（"发热，腰痛已缓解"
+  不再误标发热）；"已复位"入缓解词；"N年前"事件转 historical（十年前车祸不触发
+  A0）；家属经历者识别（父亲车祸≠患者红旗，`other_experiencer_flags` 记录不报警）。
+- **分级细化（P1）**：胸痛/呼吸困难单独→A1 心肺追问（组合才 A0 硬停，胸壁拉伤
+  不再过度分诊）；颈髓病 halt 但 A1（当日专科而非急救）；确认旗带 certainty；
+  "自行服药"移出临床红旗改 policy_flags；pipeline 输出 `clinical_mode`。
+- **生产面（P1）**：安全抽取异常 fail-closed（弃权+审计，不静默放行）；
+  `/api/metrics`、`/api/warmup` 公网绑定需令牌；前端输入框与协作时间轴动态字段
+  XSS 修复。
+
 ## CDSS 草案模块
 
 项目新增 `cdss_recommendation_skill`，用于医生端 CDSS 自动生成候选诊断、候选证型、方剂路线和药物模块草案。该草案状态固定为 `draft_for_clinician_review`，不是最终诊断、不是签名处方、不是患者可见医嘱，也不会生成患者可执行剂量；最终医嘱仍需 `physician_review_skill` 医师手工录入并签名。

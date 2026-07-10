@@ -36,7 +36,10 @@ def test_orthopedic_emergencies_hard_halt_with_zero_formula_output(name, text, c
     result = run_case_pipeline(text)
     assert result["red_flag_gate"]["halted"] is True, f"{name}: emergency must hard-halt"
     assert result["safety"]["safety_status"] == "urgent"
-    assert result["safety"]["action_level"] == "A0"
+    # Cervical myelopathy halts TCM reasoning but its action is same-day urgent
+    # specialist referral (A1-with-halt), not resuscitation (P1-2 stratification).
+    expected_level = "A1" if category == "cervical_myelopathy" else "A0"
+    assert result["safety"]["action_level"] == expected_level
     assert result["syndrome_candidates"] == []
     assert result["formula_routes"] == [] and result["primary_route"] is None
     assert result["matched_modules"] == []
@@ -157,10 +160,22 @@ def test_scope_router_keeps_non_lumbar_complaints_out():
 def test_scope_router_unit_domains():
     assert clinical_scope_router_skill("腰痛三年，遇冷加重。")["in_scope"] is True
     assert clinical_scope_router_skill("肩关节疼痛半年。")["domain"] == "joint"
-    assert clinical_scope_router_skill("右腕骨折术后复查。")["domain"] == "trauma"
+    assert clinical_scope_router_skill("右腕骨折术后复查。")["domain"] == "fracture_followup"
     assert clinical_scope_router_skill("最近心情不好。")["domain"] == "unknown"
     emergency = clinical_scope_router_skill("腰痛。", red_flag_categories=["vascular_emergency"])
     assert emergency["domain"] == "emergency" and emergency["in_scope"] is False
+
+
+def test_scope_router_fracture_postop_outranks_lumbar_anchor():
+    # "腰椎压缩性骨折术后复查" is a fracture-follow-up task, not lumbar-Bi formula work.
+    result = clinical_scope_router_skill("患者68岁，腰椎压缩性骨折术后复查，腰膝酸软，腰痛反复。")
+    assert result["in_scope"] is False
+    assert result["domain"] == "spine_fracture_followup"
+    assert "FRACTURE_POSTOPERATIVE_PRIORITY" in result["reason_codes"]
+    assert "lumbar_bi_formula_route" in result["blocked_capabilities"]
+    # A resolved dislocation ("已复位") no longer steers the domain nor halts.
+    resolved = clinical_scope_router_skill("昨日肩关节脱位已复位，目前只有轻微疼痛。")
+    assert resolved["domain"] in {"joint", "unknown"}
 
 
 # -- action stratification -------------------------------------------------------------------

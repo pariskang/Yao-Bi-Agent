@@ -61,6 +61,8 @@ class RuleHit:
     priority: int = 0
     # Case tags that argue *against* this rule's conclusion (the rule's `contra` list).
     contra_tags: tuple[str, ...] = ()
+    # Formula rules: syndromes this route is compatible with (empty = unconstrained).
+    compatible_syndromes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -106,6 +108,7 @@ class RuleEngine:
                         rationale=rule.get("rationale", ""),
                         priority=int(rule.get("priority", 0)),
                         contra_tags=tuple(sorted(set(rule.get("contra") or []) & tag_set)),
+                        compatible_syndromes=tuple(rule.get("compatible_syndromes") or []),
                     )
                 )
         return sorted(hits, key=lambda h: (h.priority, h.rule_id), reverse=True)

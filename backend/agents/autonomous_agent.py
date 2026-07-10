@@ -157,6 +157,26 @@ class AutonomousQAAgent:
             self.history.append(turn)
             return turn
 
+        # Scope gate BEFORE planning (same invariant as the pipeline scope router and
+        # the chat gate): out-of-domain complaints get triage/referral, never a plan
+        # that delegates to lumbar-Bi clinical subagents.
+        from backend.skills.clinical_scope_router_skill import question_scope_gate
+
+        scope_gate = question_scope_gate(question, self.session.case_state)
+        if not scope_gate["allowed"] or self.session.case_state.get("safety_extraction_failed"):
+            answer = scope_gate["message"] or "⚠️ 安全信息解析异常，本轮不进行辨证与方药分析（已记录待人工复核）。"
+            run.finish(StopReason.POLICY_DENIED, note="out_of_scope_or_fail_closed")
+            turn = {
+                "question": question, "blocked": False, "scope_gated": True, "run": run.to_dict(),
+                "plan": [], "plan_method": "clinical_scope_gate", "state_updates": state_updates,
+                "steps": [], "subagents_used": [], "used_llm": False, "answer": answer,
+                "trace": [{"step": 1, "thought": "范围门控：主诉不属于腰痹任务域或安全解析失败，拒绝临床规划。",
+                           "action": "clinical_scope_gate", "observation": answer}],
+                "disclaimer": "本系统仅支持腰痹任务域；域外主诉请至相应专科面诊。",
+            }
+            self.history.append(turn)
+            return turn
+
         if self.use_llm:
             run.budget.charge("model_call")  # LLM planner call
         planned = plan_question(question, max_steps=self.max_steps, use_llm=self.use_llm, dao_client=self.dao_client)

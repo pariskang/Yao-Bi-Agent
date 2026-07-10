@@ -43,13 +43,26 @@ def formula_base_selector_skill(normalized_tags: list[str], syndrome_candidates:
     if not gate["allowed"]:
         return {"formula_routes": [], "primary_route": None, "formula_rule_hits": [], "route_gate": gate}
 
+    # Syndrome-formula compatibility (v0.11): a route may only be derived from the
+    # top-1 syndrome or medium+/high-confidence candidates — background tags alone
+    # (elderly, osteoporosis) can no longer pull 独活寄生汤 into a 少阳/湿热 case.
+    eligible_syndromes = {
+        c.get("name") for i, c in enumerate(syndrome_candidates or [])
+        if c.get("name") and (i == 0 or c.get("confidence") in ("medium", "high"))
+    }
+
     tags = set(normalized_tags)
     for candidate in syndrome_candidates:
+        if candidate.get("name") not in eligible_syndromes:
+            continue  # low-confidence trailing candidates do not feed derived tags
         derived = SYNDROME_DERIVED_TAGS.get(candidate.get("name") or "")
         if derived:
             tags.add(derived)
     engine = RuleEngine(["03_formula_rules.yaml"])
-    hits = engine.match(tags, category="formula")
+    hits = [
+        hit for hit in engine.match(tags, category="formula")
+        if not hit.compatible_syndromes or set(hit.compatible_syndromes) & eligible_syndromes
+    ]
     scores: dict[str, int] = defaultdict(int)
     route_hits: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for hit in hits:
