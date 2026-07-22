@@ -81,9 +81,9 @@ TAO_BACKEND=transformers TAO_MODEL_ID=CMLM/Dao1-30b-a3b \
 
 ## Colab 一键复现（含 ngrok 公网 UI）
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pariskang/Yao-Bi-Agent/blob/claude/focused-planck-3dv9we/colab/YaoBi_Skill_Colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pariskang/Yao-Bi-Agent/blob/main/colab/YaoBi_Skill_Colab.ipynb)
 
-[`colab/YaoBi_Skill_Colab.ipynb`](colab/YaoBi_Skill_Colab.ipynb) 在 Google Colab 上一键复现全部功能：启动 `backend.server`（默认本地 **全量 FP16** 加载 `CMLM/Dao1-30b-a3b`，推荐 A100 80GB / H100）、经 **ngrok** 暴露 `https://xxxx.ngrok-free.app` 公网链接，UI 即可**真正调用语言模型**自主选择技能与问诊，并复现规则管线、多智能体协作、全量测试与脱敏挖掘。无 GPU 时可在笔记本第 ② 步切换 mock / 小模型 / 外部 HTTP 接口。详见 [`colab/README.md`](colab/README.md)。
+[`colab/YaoBi_Skill_Colab.ipynb`](colab/YaoBi_Skill_Colab.ipynb) 在 Google Colab 上一键复现完整功能：启动重新设计的前端 UI、`/api/agentic` 下一代 TaskGraph/Loop/Graph/Critic 智能体、读片/检验报告 skill、规则管线、多智能体协作与医师反馈闭环，并经 **ngrok** 暴露 `https://xxxx.ngrok-free.app` 公网链接。也可在 Colab 直接运行脚本：`python colab/launch_yaobi_colab.py --backend mock --ngrok-token "$NGROK_AUTHTOKEN" --no-preload`；`--backend` 支持 `minimax`（中国内地）、`poe`（可配 `Gemini-3.1-Pro`）、`azure`、`openai`、`anthropic`、`http`、`transformers`、`mock`、`disabled`。无 GPU 时建议先用 `mock` 或外部 API 验证 UI/流程，再切换本地 Dao1。详见 [`colab/README.md`](colab/README.md)。
 
 ## 自动问诊：YaoBi-CaseGuide Skill
 
@@ -172,6 +172,10 @@ s.ask("有哪些危险信号要排查？")     # → red_flag_inquiry
 3. **案例经验总结自动生成**（`case_experience_summary_skill`）：`mode="case"` 生成单案「医案按语」，`mode="experience"` 基于脱敏挖掘统计生成「经验规律总结」；确定性总结为事实来源，Tao 仅润色，不得新增数据外结论，不得产出最终诊断/可执行处方/剂量。
 
 三项能力均以 `draft_for_clinician_review`、`patient_visible=false` 输出，并随 `final_report` 一并返回。UI 在左侧导航新增「经验推理」「经验总结」模块，问诊页提供「Tao 自动追问」开关，最终报告新增「经验推理」「经验按语」标签页。
+
+## 下一代 CDSS / 智能体改造建议
+
+基于当前仓库、旧版 `Yao-Bi-Agent-main (1).zip` 与 `Shanghan-Hermes-main (2).zip` 的对照，新增一份面向未来的设计建议文档：[`docs/next_generation_cdss_agent_recommendations.md`](docs/next_generation_cdss_agent_recommendations.md)。该文档建议把证型/方路规则从硬裁决升级为可反驳的软约束假设层，并补强专家经验 skill 化、模型自由规划调用 skill/tool/subagent/loop/graph、bounded loop、subagent 独立证据包、声明级接地、相似病例队列、Decision Diff Agent 与多模型专家合议；配套蓝图见 [`config/next_gen_agent_blueprint.yaml`](config/next_gen_agent_blueprint.yaml)。 本轮新增 `backend.agents.loop_agent.AgenticCDSSLoopAgent` 原型：自由提问先写入 `ClinicalExperienceGraph`，Planner 生成 TaskGraph，执行 skill/subagent/critic/judge 节点，并在多轮中保留病例事实、证据、反证缺口和追问目标；新增 `imaging_report_skill` 作为读片/检验检查环节，且 Tao Runtime 可通过 `TAO_BACKEND=openai|poe|minimax|azure|anthropic` 接入多家 API（Poe 读片可配置 `TAO_MODEL_ID=Gemini-3.1-Pro`）。
 
 ## CDSS 治理层（v0.5：按顶级 CDSS 设计理念加固）
 
@@ -453,17 +457,20 @@ collaboration 三入口都输出了当归四逆汤——本轮统一：
 - **CI 落库**：`.github/workflows/ci.yml` —— push/PR 全量测试（含金标准、变异哨兵、
   入口一致性矩阵、23 项新临床不变量测试）成为合并门槛。
 
-## 多提供商模型后端（v0.13：Poe / MiniMax / Azure OpenAI）
+## 多提供商模型后端（v0.15：OpenAI / Poe / MiniMax / Azure / Anthropic）
 
-`TAO_BACKEND` 在原有 `disabled / mock / http / transformers` 之外新增三个托管提供商
-后端：`poe`、`minimax`、`azure`。它们复用同一条 OpenAI 兼容 HTTP 通路（零第三方
-依赖，仍是 stdlib `urllib`），差异被收敛为三件事：默认端点、鉴权头约定、错误面。
+`TAO_BACKEND` 在原有 `disabled / mock / http / transformers` 之外支持五类托管提供商
+后端：`openai`、`poe`、`minimax`、`azure`、`anthropic`。OpenAI/Poe/MiniMax/Azure 复用 OpenAI-compatible HTTP 通路（零第三方
+依赖，仍是 stdlib `urllib`）；Anthropic 使用 Messages API。差异被收敛为三件事：默认端点、鉴权头约定、错误面。
 所有既有治理不变：模型调用仍走 `DaoClient` 单一漏斗（执行点预算扣减、输出守卫、
 失败回退确定性规则）。
 
 ```bash
-# Poe（model 为 bot 名，如 Claude-Sonnet-4.5 / GPT-4o / Gemini-2.5-Pro）
-TAO_BACKEND=poe POE_API_KEY=... TAO_MODEL_ID=Claude-Sonnet-4.5 python -m backend.server
+# OpenAI（OpenAI Chat Completions）
+TAO_BACKEND=openai OPENAI_API_KEY=... TAO_MODEL_ID=gpt-4.1 python -m backend.server
+
+# Poe（model 为 bot 名，如 Claude-Sonnet-4.5 / GPT-4o / Gemini-3.1-Pro；读片可选 Gemini-3.1-Pro）
+TAO_BACKEND=poe POE_API_KEY=... TAO_MODEL_ID=Gemini-3.1-Pro python -m backend.server
 
 # MiniMax（HTTP 200 + base_resp.status_code != 0 的错误面已识别为运行时错误）
 TAO_BACKEND=minimax MINIMAX_API_KEY=... TAO_MODEL_ID=MiniMax-Text-01 python -m backend.server
@@ -472,19 +479,22 @@ TAO_BACKEND=minimax MINIMAX_API_KEY=... TAO_MODEL_ID=MiniMax-Text-01 python -m b
 TAO_BACKEND=azure AZURE_OPENAI_API_KEY=... \
   AZURE_OPENAI_ENDPOINT=https://myres.openai.azure.com \
   AZURE_OPENAI_DEPLOYMENT=gpt-4o-prod python -m backend.server
+
+# Anthropic（Messages API）
+TAO_BACKEND=anthropic ANTHROPIC_API_KEY=... TAO_MODEL_ID=claude-sonnet-4-5 python -m backend.server
 ```
 
 | 变量 | 适用后端 | 说明 |
 |---|---|---|
 | `TAO_API_KEY` | 全部 | 统一密钥入口，优先于各提供商变量 |
-| `POE_API_KEY` / `MINIMAX_API_KEY` / `AZURE_OPENAI_API_KEY` | 对应提供商 | 提供商惯用密钥变量（`TAO_API_KEY` 未设时生效） |
-| `TAO_ENDPOINT_URL` | 全部 | 显式端点，覆盖提供商默认（Poe/MiniMax 有内置默认） |
+| `OPENAI_API_KEY` / `POE_API_KEY` / `MINIMAX_API_KEY` / `AZURE_OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | 对应提供商 | 提供商惯用密钥变量（`TAO_API_KEY` 未设时生效） |
+| `TAO_ENDPOINT_URL` | 全部 | 显式端点，覆盖提供商默认（OpenAI/Poe/MiniMax/Anthropic 有内置默认） |
 | `AZURE_OPENAI_ENDPOINT` | azure | 资源基址（如 `https://myres.openai.azure.com`）；也可用 `TAO_ENDPOINT_URL` 直接给完整 completions URL |
 | `TAO_AZURE_DEPLOYMENT` / `AZURE_OPENAI_DEPLOYMENT` | azure | 部署名（缺省回退 `TAO_MODEL_ID`），进入 URL 路径 |
 | `TAO_AZURE_API_VERSION` / `AZURE_OPENAI_API_VERSION` | azure | api-version 查询参数（默认 `2024-06-01`） |
 
-约定：Poe/MiniMax 用 `Authorization: Bearer` 且 payload 携带 `model`；Azure 用
-`api-key` 头，模型由 URL 中的 deployment 决定（payload 不带 `model`）。托管提供商
+约定：OpenAI/Poe/MiniMax 用 `Authorization: Bearer` 且 payload 携带 `model`；Azure 用
+`api-key` 头，模型由 URL 中的 deployment 决定（payload 不带 `model`）；Anthropic 用 `x-api-key` 与 `anthropic-version` 头并调用 Messages API。托管提供商
 缺密钥即刻 fail-fast 并在错误信息中给出应设置的环境变量；泛用 `http` 后端继续支持
 无密钥的自建端点（vLLM/Ollama 等）。请求构造逐提供商有 CI 测试
 （`tests/test_model_backends.py`，mock `urlopen` 断言 URL/头/payload），后端清单

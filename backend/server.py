@@ -34,6 +34,7 @@ from threading import Lock, Thread
 from typing import Any
 
 from backend.agents.autonomous_agent import AutonomousQAAgent
+from backend.agents.loop_agent import AgenticCDSSLoopAgent
 from backend.agents.conversation import ConversationSession
 from backend.agents.orchestrator import AgentOrchestrator
 from backend.agents.skill_router import suggested_questions
@@ -55,7 +56,7 @@ FRONTEND_DIR = ROOT / "frontend"
 
 # Shared, process-wide client (the heavy transformers model is cached on the class).
 CLIENT = DaoClient()
-TAO_ENABLED = CLIENT.config.backend in ({"mock", "transformers"} | OPENAI_COMPATIBLE_BACKENDS)
+TAO_ENABLED = CLIENT.config.backend in ({"mock", "transformers", "anthropic"} | OPENAI_COMPATIBLE_BACKENDS)
 
 # Map frontend intake stages to FSM states and the fields Tao may hint at (must mirror the
 # allowed fields so a generated probe cannot drive a state jump or invent a new field).
@@ -303,7 +304,7 @@ def _decision_summary(path: str, data: dict[str, Any], result: dict[str, Any]) -
 
     summary: dict[str, Any] = {}
     turn = result.get("turn") if isinstance(result.get("turn"), dict) else None
-    if path in {"/api/chat", "/api/autonomous"} and turn:
+    if path in {"/api/chat", "/api/autonomous", "/api/agentic"} and turn:
         summary = {
             "intent": turn.get("intent"),
             "method": turn.get("method") or turn.get("plan_method"),
@@ -391,6 +392,27 @@ def handle_autonomous(data: dict[str, Any]) -> dict[str, Any]:
     role, role_source = _resolve_role(data)
     agent = AutonomousQAAgent(case_state=_case_state(_enrich_with_question(data, question)), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=role)
     turn = agent.run(question)
+    if role == "patient":
+        turn = filter_patient_payload(turn)
+    return {"turn": turn, "role": role, "role_source": role_source, "tao": tao_info()}
+
+
+def handle_agentic(data: dict[str, Any]) -> dict[str, Any]:
+    """Next-generation graph-backed CDSS loop endpoint (TaskGraph + critics + judge)."""
+
+    question = str(data.get("question") or "").strip()
+    if not question:
+        return {"error": "empty question"}
+    role, role_source = _resolve_role(data)
+    agent = AgenticCDSSLoopAgent(
+        case_state=_case_state(_enrich_with_question(data, question)),
+        use_llm=TAO_ENABLED,
+        dao_client=CLIENT,
+        user_role=role,
+        max_rounds=int(data.get("max_rounds") or 3),
+        max_steps_per_round=int(data.get("max_steps_per_round") or 4),
+    )
+    turn = agent.ask(question)
     if role == "patient":
         turn = filter_patient_payload(turn)
     return {"turn": turn, "role": role, "role_source": role_source, "tao": tao_info()}
@@ -599,6 +621,7 @@ ROUTES_GET = {"/api/health": handle_health, "/api/starters": handle_starters, "/
 ROUTES_POST = {
     "/api/chat": handle_chat,
     "/api/autonomous": handle_autonomous,
+    "/api/agentic": handle_agentic,
     "/api/followup_probe": handle_followup_probe,
     "/api/reasoning": handle_reasoning,
     "/api/summary": handle_summary,
@@ -608,7 +631,7 @@ ROUTES_POST = {
     "/api/warmup": handle_warmup,
 }
 # POST endpoints whose decisions are audit-logged (feedback logs itself with full detail).
-_AUDITED_ENDPOINTS = {"/api/chat", "/api/autonomous", "/api/interview", "/api/collaboration", "/api/followup_probe"}
+_AUDITED_ENDPOINTS = {"/api/chat", "/api/autonomous", "/api/agentic", "/api/interview", "/api/collaboration", "/api/followup_probe"}
 
 
 # Fixed-window per-IP rate limiter (stdlib only). YAOBI_RATE_LIMIT=requests/minute;

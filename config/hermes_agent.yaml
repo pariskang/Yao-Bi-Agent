@@ -35,9 +35,9 @@ default_sequence:
   - tao_report_generation_skill
 tao_runtime:
   default_enabled: false
-  # http = generic OpenAI-compatible endpoint; poe/minimax/azure are hosted providers
+  # http = generic OpenAI-compatible endpoint; openai/poe/minimax/azure are hosted providers
   # served by the same wire path with provider-correct endpoints/auth (v0.13).
-  supported_backends: [disabled, mock, http, poe, minimax, azure, transformers]
+  supported_backends: [disabled, mock, http, openai, poe, minimax, azure, anthropic, transformers]
   output_format: json_object
   json_repair: true
   guardrail: no_final_diagnosis_no_patient_executable_prescription_no_dose
