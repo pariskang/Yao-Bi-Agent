@@ -37,6 +37,7 @@ CONSULT_SCOPES = {
     "herb_inquiry": "用药功效模块与配伍思路",
     "reasoning_inquiry": "辨证论治推理（症状→证候→治法→方药→安全）",
     "safety_inquiry": "用药安全、配伍禁忌与风险复核",
+    "imaging_report_inquiry": "影像读片、检验检查报告与红旗/辨证关系评估",
     "experience_inquiry": "医案按语与经验总结",
 }
 
@@ -69,7 +70,7 @@ PATIENT_SCOPE_ANSWER = (
 # safety / red-flag / meta intents stay available — they are what an urgent case needs.
 RED_FLAG_GATED_INTENTS = {
     "syndrome_inquiry", "formula_inquiry", "herb_inquiry", "reasoning_inquiry",
-    "experience_inquiry", "evidence_inquiry", "dose_inquiry",
+    "experience_inquiry", "evidence_inquiry", "dose_inquiry", "imaging_report_inquiry",
 }
 
 # Escalate-only severity order for merging red-flag status across turns.
@@ -303,6 +304,30 @@ class ConversationSession:
         lines = ["用药功效模块草案（需医师审核，无剂量）："] + [f"- {m['name']}（{m.get('role')}）：{('、'.join(m.get('herbs', [])[:6]))}" for m in matched[:6]]
         return {"answer": "\n".join(lines), "evidence": [m["name"] for m in matched[:6]], "skills": ["herb_module_composer_skill"]}
 
+    def _h_imaging(self, question: str = "") -> dict[str, Any]:
+        reports = []
+        if question:
+            reports.append({"text": question, "source": "user_question"})
+        for item in (self.case_state.get("imaging_reports") or []):
+            reports.append(item)
+        labs = list(self.case_state.get("lab_reports") or [])
+        res = _tool(
+            "imaging_report_skill",
+            case_state=self.case_state,
+            imaging_reports=reports,
+            lab_reports=labs,
+            image_urls=self.case_state.get("image_urls") or [],
+            use_llm=self.use_llm,
+        )
+        evidence = [e.get("source_id") for e in res.get("evidence_packets", []) if isinstance(e, dict)]
+        return {
+            "answer": res.get("imaging_markdown", ""),
+            "evidence": evidence,
+            "skills": ["imaging_report_skill"],
+            "used_llm": res.get("source") == "llm_guarded",
+            "llm_runtime": res.get("llm_runtime"),
+        }
+
     def _h_safety(self) -> dict[str, Any]:
         routed = _tool("syndrome_router_skill", normalized_tags=self._tags())
         _f = _tool; formula = _f("formula_base_selector_skill", normalized_tags=self._tags(), syndrome_candidates=routed.get("syndrome_candidates", []))
@@ -459,7 +484,7 @@ class ConversationSession:
         handlers = {
             "syndrome_inquiry": self._h_syndrome, "formula_inquiry": self._h_formula,
             "herb_inquiry": self._h_herb, "safety_inquiry": self._h_safety,
-            "red_flag_inquiry": self._h_red_flag, "evidence_inquiry": self._h_evidence,
+            "red_flag_inquiry": self._h_red_flag, "imaging_report_inquiry": self._h_imaging, "evidence_inquiry": self._h_evidence,
             "reasoning_inquiry": self._h_reasoning, "experience_inquiry": self._h_experience,
             "agent_inquiry": self._h_agent, "capabilities": self._h_capabilities,
         }
@@ -467,7 +492,10 @@ class ConversationSession:
             return self._with_urgent_banner(intent, self._h_mining(question))
         if intent == "dose_inquiry":
             return self._with_urgent_banner(intent, self._h_dose(question))
-        det = handlers.get(intent, self._h_capabilities)()
+        if intent == "imaging_report_inquiry":
+            det = self._h_imaging(question)
+        else:
+            det = handlers.get(intent, self._h_capabilities)()
         # Clinical intents: the model becomes the primary reasoner, grounded in rule evidence.
         if self.use_llm and intent in CONSULT_SCOPES:
             return self._consult(intent, question, det, full)

@@ -280,3 +280,29 @@ EMERGENCY_REFERRAL_PROMPT_TEMPLATE = """
 - 末尾用一句话声明：本内容为供执业医师参考的急诊转诊辅助信息，最终处置由接诊医师决定。
 - 直接输出 Markdown 正文，不要输出 JSON，不要代码围栏。
 """
+
+
+IMAGING_ASSESSMENT_PROMPT_TEMPLATE = """你是腰痹 CDSS 的影像/检验报告评估助手。
+
+任务：只基于输入的影像报告文字、检查项目、用户转述和已结构化病例证据，生成供执业医师复核的结构化评估。
+
+安全边界：
+- 不得替代放射科/检验科正式报告；
+- 不得仅凭影像给出最终诊断或治疗处方；
+- 对马尾综合征、感染、肿瘤、骨折、进行性神经损害等危险线索必须优先提示线下/急诊评估；
+- 若只有图片 URL 或用户说“片子”，但无可读报告文字或模型不具备视觉能力，应明确说明证据不足。
+
+请输出 JSON object，字段：
+{{
+  "imaging_markdown": "Markdown，含：影像/检验摘要、与腰痹辨证相关的结构化线索、红旗/转诊提示、需补充检查/病史、医师复核清单",
+  "key_findings": ["关键发现"],
+  "red_flag_imaging_signals": ["危险影像/检验信号"],
+  "followup_questions": ["下一步需追问或核对"],
+  "final_diagnosis": null,
+  "complete_prescription": null,
+  "patient_executable_dose": null
+}}
+
+输入上下文：
+{imaging_context}
+"""

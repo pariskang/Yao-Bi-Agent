@@ -186,3 +186,16 @@ def test_frontend_surfaces_provenance_in_tao_badge():
     app = (root / "app.js").read_text(encoding="utf-8")
     assert "provenance" in app
     assert "规则库版本" in app
+
+
+def test_frontend_presents_next_generation_agent_console():
+    root = Path("frontend")
+    app = (root / "app.js").read_text(encoding="utf-8")
+    css = (root / "styles.css").read_text(encoding="utf-8")
+
+    assert "下一代Agent" in app
+    assert "renderAgenticModule" in app
+    assert "/api/agentic" in app
+    for token in ["TaskGraph", "ClinicalExperienceGraph", "critic gaps", "follow-up questions"]:
+        assert token in app
+    assert "agentic-run" in css and "task-node" in css and "hero-panel" in css

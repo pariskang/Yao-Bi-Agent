@@ -3,6 +3,7 @@ const modules = [
   { id: 'intake', label: '智能问诊', icon: '✚' },
   { id: 'chat', label: '智能问答', icon: '✦' },
   { id: 'agents', label: '智能体协作', icon: '⇄' },
+  { id: 'agentic', label: '下一代Agent', icon: '◎' },
   { id: 'reasoning', label: '经验推理', icon: '❖' },
   { id: 'summary', label: '经验总结', icon: '✎' },
   { id: 'mining', label: '规则挖掘', icon: '⛏' },
@@ -237,6 +238,7 @@ const state = {
   // (YAOBI_CLINICIAN_TOKEN) — the client can only request it, never grant it.
   doctorMode: false,
   chat: { history: [] },
+  agentic: { history: [], maxRounds: 3, maxSteps: 4 },
   intakeMode: localStorage.getItem('yaobi-intake-mode') || 'chat',
   interview: null,
   // Case narrative and FSM state are health data: keep them in sessionStorage only
@@ -391,6 +393,7 @@ function render() {
     if (state.module === 'dashboard') return renderDashboard();
     if (state.module === 'chat') return renderChatModule();
     if (state.module === 'agents') return renderAgentsModule();
+    if (state.module === 'agentic') return renderAgenticModule();
     if (state.module === 'reasoning') return renderReasoningModule();
     if (state.module === 'summary') return renderSummaryModule();
     if (state.module === 'mining') return renderMiningModule();
@@ -1193,6 +1196,115 @@ function mdLite(s) {
   }
   closeList();
   return out.join('');
+}
+
+
+// ---------------------------------------------------------------------------
+// Next-generation graph-backed agentic CDSS loop (TaskGraph + Critic + Judge)
+// ---------------------------------------------------------------------------
+
+function adaptAgenticTurn(q, res) {
+  const t = res.turn || {}; const tao = res.tao || {};
+  return {
+    q, real: true, agentic: true, md: t.answer || '', decision: t.decision || {},
+    rounds: t.rounds || [], steps: t.steps || [], critic: t.critic || {},
+    followups: t.followup_questions || [], graph: t.graph || {},
+    usedLlm: !!t.used_llm, backend: tao.backend, model: tao.model_id,
+  };
+}
+
+async function agenticAsk(q) {
+  q = String(q || '').trim();
+  if (!q) return;
+  const pending = { q, pending: true };
+  state.agentic.history.push(pending);
+  renderAgenticModule();
+  try {
+    await api.health(); renderTaoBadge();
+    const res = await api.post('/api/agentic', {
+      question: q,
+      ...casePayload(),
+      max_rounds: state.agentic.maxRounds,
+      max_steps_per_round: state.agentic.maxSteps,
+    });
+    Object.assign(pending, adaptAgenticTurn(q, res), { pending: false });
+  } catch (e) {
+    Object.assign(pending, {
+      pending: false, real: false, agentic: true,
+      decision: { state: 'offline_fallback', reason: '后端不可用，显示离线提示。' },
+      rounds: [], graph: {}, followups: [],
+      md: '未连接后端 `/api/agentic`，无法运行真实 TaskGraph loop。请在 Colab/服务器启动 `backend.server` 后重试。',
+    });
+    await api.health(); renderTaoBadge();
+  }
+  renderAgenticModule();
+}
+
+function renderRoundCard(round) {
+  const tasks = round.tasks || [];
+  const observations = round.observations || [];
+  return `<article class="round-card">
+    <div class="agent-head"><span class="agent-order">${round.round || '?'}</span><strong>Round ${round.round || ''}</strong><span class="kind-badge rule">TaskGraph</span><span class="route-tag">${tasks.length} tasks</span></div>
+    <div class="task-grid">${tasks.map(t => `<div class="task-node ${escapeHtml(t.task_type)}"><strong>${escapeHtml(t.task_type)}</strong><span>${escapeHtml(t.target)}</span><em>${escapeHtml(t.rationale || '')}</em></div>`).join('')}</div>
+    <details class="json-details"><summary>观察 / Judge 原始输出</summary><pre>${escapeHtml(JSON.stringify(observations.map(o => ({ task: o.task, observation: { status: o.observation && o.observation.status, intent: o.observation && o.observation.intent, decision: o.observation && o.observation.decision } })), null, 2))}</pre></details>
+  </article>`;
+}
+
+function renderAgenticModule() {
+  pageTitle.textContent = '下一代Agent · TaskGraph / Loop / Graph / Critic / Judge';
+  const h = state.agentic.history;
+  const examples = [
+    '请综合病例、读片、证型、方路和安全风险，给出医师复核决策包',
+    '帮我读片：腰椎MRI报告提示L4/5椎间盘突出、椎管狭窄、神经根受压',
+    '信息还不够时，请自主追问最关键的鉴别问题',
+  ];
+  const cards = h.map((t, i) => {
+    if (t.pending) return `<div class="chat-turn"><div class="bubble user">${escapeHtml(t.q)}</div><div class="bubble bot"><div class="bot-body muted">⏳ 正在运行 TaskGraph loop：graph_update → subagent → critic → judge…</div></div></div>`;
+    const graph = t.graph || {}; const nodes = graph.nodes || []; const edges = graph.edges || [];
+    const gaps = (t.critic && t.critic.gaps) || [];
+    return `<div class="agentic-run">
+      <div class="bubble user">${escapeHtml(t.q)}</div>
+      <section class="result-panel">
+        <p class="eyebrow">agentic_cdss_loop · ${t.real ? '实时后端' : '离线提示'} · ${escapeHtml(t.backend || '')} ${t.model ? '· ' + escapeHtml(t.model) : ''}</p>
+        <div class="stat-grid compact">
+          <article class="stat-card"><p class="eyebrow">Loop 决策</p><strong>${escapeHtml((t.decision || {}).state || '—')}</strong><span>${escapeHtml((t.decision || {}).reason || '')}</span></article>
+          <article class="stat-card"><p class="eyebrow">Rounds</p><strong>${(t.rounds || []).length}</strong><span>bounded loop</span></article>
+          <article class="stat-card"><p class="eyebrow">Graph</p><strong>${nodes.length}</strong><span>${edges.length} edges</span></article>
+          <article class="stat-card"><p class="eyebrow">Critic gaps</p><strong>${gaps.length}</strong><span>证据/反证/追问</span></article>
+        </div>
+        <div class="bot-body">${mdLite(t.md)}</div>
+        ${(t.rounds || []).map(renderRoundCard).join('')}
+        ${gaps.length ? `<h3>Critic gaps</h3><div class="chip-cloud">${gaps.map(g => `<span class="tag-pill">${escapeHtml(g.gap_id)} · ${escapeHtml(g.kind)}</span>`).join('')}</div>` : ''}
+        ${(t.followups || []).length ? `<h3>下一轮自主问诊</h3><ul>${t.followups.map(q => `<li>${escapeHtml(q.question_text)} <span class="route-tag">目标：${escapeHtml(q.target_gap)}</span></li>`).join('')}</ul>` : ''}
+        <details class="json-details"><summary>ClinicalExperienceGraph JSON</summary><pre>${escapeHtml(JSON.stringify(graph, null, 2))}</pre></details>
+        ${feedbackWidget(t, `agentic-${i}`)}
+      </section>
+    </div>`;
+  }).join('');
+  screen.innerHTML = `
+    <section class="hero-panel">
+      <div><p class="eyebrow">参考 Shanghan-Hermes 控制台 · 面向下一代 CDSS</p><h3>自由提问 → Planner → TaskGraph → Skill/Tool/Subagent → Critic → Judge → Graph</h3><p>本模块调用后端 <code>/api/agentic</code>，展示真实 rounds、tasks、critic gaps、follow-up questions 与 ClinicalExperienceGraph。规则是软约束与安全底线，模型负责规划、反思和追问，最终输出仍为医师复核草案。</p></div>
+      <div class="hero-badges"><span>读片/检查</span><span>多Provider LLM</span><span>沈医师经验Skills</span><span>Graph Memory</span></div>
+    </section>
+    <section class="result-panel">
+      <div class="chat-toolbar"><label class="fsm-setting">max_rounds <select id="agenticRounds">${[1,2,3,4,5].map(n => `<option value="${n}" ${state.agentic.maxRounds===n?'selected':''}>${n}</option>`).join('')}</select></label><label class="fsm-setting">max_steps <select id="agenticSteps">${[2,3,4,5,6].map(n => `<option value="${n}" ${state.agentic.maxSteps===n?'selected':''}>${n}</option>`).join('')}</select></label><span class="muted">红旗/患者端边界仍由服务端强制</span></div>
+      <div class="chat-input"><input id="agenticInput" type="text" placeholder="输入自由问题，或粘贴 MRI/CT/检验报告结论…" /><button class="primary-btn" id="agenticSend">运行Agent</button>${h.length ? '<button class="ghost-btn" id="agenticClear">清空</button>' : ''}</div>
+      <div class="chip-row">${examples.map(x => `<button class="chip-btn" data-agentic-q="${escapeHtml(x)}">${escapeHtml(x)}</button>`).join('')}</div>
+    </section>
+    ${cards || '<section class="result-panel"><p class="muted">尚未运行。点击示例可体验完整 agentic CDSS loop。</p></section>'}`;
+  document.querySelector('#agenticRounds').addEventListener('change', e => { state.agentic.maxRounds = Number(e.target.value); });
+  document.querySelector('#agenticSteps').addEventListener('change', e => { state.agentic.maxSteps = Number(e.target.value); });
+  const input = document.querySelector('#agenticInput');
+  const send = () => agenticAsk(input.value);
+  document.querySelector('#agenticSend').addEventListener('click', send);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  const clr = document.querySelector('#agenticClear');
+  if (clr) clr.addEventListener('click', () => { state.agentic.history = []; renderAgenticModule(); });
+  screen.querySelectorAll('[data-agentic-q]').forEach(b => b.addEventListener('click', () => agenticAsk(b.dataset.agenticQ)));
+  wireFeedback(key => {
+    const t = state.agentic.history[Number(String(key).replace('agentic-', ''))];
+    return t ? { holder: t, target: 'agentic_loop_turn', extra: { decision: (t.decision || {}).state, used_llm: !!t.usedLlm } } : null;
+  }, renderAgenticModule);
 }
 
 // ---------------------------------------------------------------------------
