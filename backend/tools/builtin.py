@@ -39,6 +39,7 @@ def _build() -> ToolRegistry:
     from backend.skills.consent_privacy_skill import consent_privacy_skill
     from backend.skills.formula_base_selector_skill import formula_base_selector_skill
     from backend.skills.herb_module_composer_skill import herb_module_composer_skill
+    from backend.skills.imaging_report_skill import imaging_report_skill
     from backend.skills.mined_evidence_skill import mined_evidence_skill
     from backend.skills.neuro_ortho_screen_skill import neuro_ortho_screen_skill
     from backend.skills.pain_profile_skill import pain_profile_skill
@@ -154,6 +155,7 @@ def _build() -> ToolRegistry:
     add(chief_complaint_skill, "Convert patient wording into a standard chief complaint.", ALL_ROLES, "read")
     add(pain_profile_skill, "Collect and tag pain location, radiation, nature, severity, aggravating and relieving factors.", ALL_ROLES, "read")
     add(neuro_ortho_screen_skill, "Collect numbness, weakness, walking limitation, imaging and western diagnosis fields.", ALL_ROLES, "read")
+    add(imaging_report_skill, "Assess lumbar imaging and laboratory report findings as clinician-review evidence; optional guarded model overlay for Poe/OpenAI/Azure/MiniMax/Anthropic.", CLIN_ROLES, "clinical_draft")
     add(tcm_four_diagnosis_skill, "Collect patient-friendly cold/heat, dampness, sleep, appetite, tongue and pulse fields.", ALL_ROLES, "read")
     add(shen_rule_signal_skill, "Derive high-value Shen Qinrong rule signals from current case state.", CLIN_ROLES, "read")
     add(comorbidity_medication_skill, "Collect comorbidities and medications relevant to safety and rule explanation.", ALL_ROLES, "read")

@@ -27,11 +27,12 @@ from backend.llm.prompt_templates import (
     REASONING_PROMPT_TEMPLATE,
     REPORT_PROMPT_TEMPLATE,
     SKILL_PLAN_PROMPT_TEMPLATE,
+    IMAGING_ASSESSMENT_PROMPT_TEMPLATE,
     SKILL_ROUTING_PROMPT_TEMPLATE,
     SYSTEM_PROMPT,
 )
 
-DaoBackend = Literal["disabled", "mock", "http", "poe", "minimax", "azure", "transformers"]
+DaoBackend = Literal["disabled", "mock", "http", "openai", "poe", "minimax", "azure", "anthropic", "transformers"]
 
 # Hosted chat-completions providers served by the shared OpenAI-compatible HTTP path.
 # "http" is the generic bring-your-own endpoint; the named providers add correct
@@ -49,16 +50,20 @@ DaoBackend = Literal["disabled", "mock", "http", "poe", "minimax", "azure", "tra
 #             the deployment in the URL). TAO_AZURE_API_VERSION=v1 selects the
 #             newer {endpoint}/openai/v1/chat/completions surface (no dated
 #             api-version; deployment name travels as payload "model").
-OPENAI_COMPATIBLE_BACKENDS = frozenset({"http", "poe", "minimax", "azure"})
+OPENAI_COMPATIBLE_BACKENDS = frozenset({"http", "openai", "poe", "minimax", "azure"})
 
 _PROVIDER_DEFAULT_ENDPOINTS = {
+    "openai": "https://api.openai.com/v1/chat/completions",
     "poe": "https://api.poe.com/v1/chat/completions",
     "minimax": "https://api.minimax.io/v1/chat/completions",
+    "anthropic": "https://api.anthropic.com/v1/messages",
 }
 _PROVIDER_KEY_ENVS = {
+    "openai": ("TAO_API_KEY", "OPENAI_API_KEY"),
     "poe": ("TAO_API_KEY", "POE_API_KEY"),
     "minimax": ("TAO_API_KEY", "MINIMAX_API_KEY"),
     "azure": ("TAO_API_KEY", "AZURE_OPENAI_API_KEY"),
+    "anthropic": ("TAO_API_KEY", "ANTHROPIC_API_KEY"),
     "http": ("TAO_API_KEY",),
 }
 
@@ -125,40 +130,57 @@ class DaoGenerationConfig:
     timeout_seconds: int = 120
 
     @classmethod
-    def from_env(cls) -> "DaoGenerationConfig":
-        backend = os.getenv("TAO_BACKEND", "disabled")
-        # Provider-aware credential/endpoint resolution: TAO_API_KEY always wins; the
-        # provider's conventional variable (POE_API_KEY / MINIMAX_API_KEY /
-        # AZURE_OPENAI_API_KEY) is the fallback. Endpoints: explicit TAO_ENDPOINT_URL
-        # first, then the provider default (Azure: AZURE_OPENAI_ENDPOINT resource base).
-        api_key = None
-        for env_name in _PROVIDER_KEY_ENVS.get(backend, ("TAO_API_KEY",)):
-            api_key = os.getenv(env_name)
-            if api_key:
-                break
-        endpoint_url = os.getenv("TAO_ENDPOINT_URL") or _PROVIDER_DEFAULT_ENDPOINTS.get(backend)
-        if backend == "azure" and not os.getenv("TAO_ENDPOINT_URL"):
+    def from_env(cls, prefix: str = "TAO") -> "DaoGenerationConfig":
+        """Build config from ``<prefix>_*`` env vars.
+
+        The default prefix preserves the existing ``TAO_*`` contract. Secondary
+        clients can use scoped prefixes, e.g. ``TAO_IMAGING_BACKEND=poe`` with
+        ``TAO_IMAGING_MODEL_ID=Gemini-3.1-Pro`` while the main agent uses
+        ``TAO_BACKEND=minimax``.
+        """
+
+        def env(name: str, default: str | None = None) -> str | None:
+            value = os.getenv(f"{prefix}_{name}")
+            return value if value is not None else default
+
+        backend = env("BACKEND", "disabled") or "disabled"
+        # Provider-aware credential/endpoint resolution: scoped API key wins, then
+        # TAO_API_KEY for the primary client, then the provider's conventional
+        # variable (OPENAI_API_KEY / POE_API_KEY / MINIMAX_API_KEY /
+        # AZURE_OPENAI_API_KEY / ANTHROPIC_API_KEY). Endpoints: scoped endpoint first,
+        # then provider default (Azure: AZURE_OPENAI_ENDPOINT resource base).
+        api_key = env("API_KEY")
+        if not api_key and prefix == "TAO":
+            api_key = os.getenv("TAO_API_KEY")
+        if not api_key:
+            for env_name in _PROVIDER_KEY_ENVS.get(backend, ("TAO_API_KEY",)):
+                if prefix != "TAO" and env_name == "TAO_API_KEY":
+                    continue
+                api_key = os.getenv(env_name)
+                if api_key:
+                    break
+        endpoint_url = env("ENDPOINT_URL") or _PROVIDER_DEFAULT_ENDPOINTS.get(backend)
+        if backend == "azure" and not env("ENDPOINT_URL"):
             endpoint_url = os.getenv("AZURE_OPENAI_ENDPOINT")
         return cls(
-            model_id=os.getenv("TAO_MODEL_ID", cls.model_id),
-            model_revision=os.getenv("TAO_MODEL_REVISION") or None,
+            model_id=env("MODEL_ID", cls.model_id) or cls.model_id,
+            model_revision=env("MODEL_REVISION") or None,
             backend=backend,  # type: ignore[arg-type]
             endpoint_url=endpoint_url,
             api_key=api_key,
-            azure_deployment=os.getenv("TAO_AZURE_DEPLOYMENT") or os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-            azure_api_version=os.getenv("TAO_AZURE_API_VERSION")
-            or os.getenv("AZURE_OPENAI_API_VERSION") or cls.azure_api_version,
-            temperature=float(os.getenv("TAO_TEMPERATURE", "0.3")),
-            top_p=float(os.getenv("TAO_TOP_P", "0.85")),
-            repetition_penalty=float(os.getenv("TAO_REPETITION_PENALTY", "1.1")),
-            max_new_tokens=int(os.getenv("TAO_MAX_NEW_TOKENS", "2048")),
-            do_sample=os.getenv("TAO_DO_SAMPLE", "true").lower() == "true",
-            torch_dtype=os.getenv("TAO_TORCH_DTYPE", cls.torch_dtype),
-            device_map=os.getenv("TAO_DEVICE_MAP", cls.device_map),
-            attn_implementation=os.getenv("TAO_ATTN_IMPLEMENTATION", cls.attn_implementation),
-            load_in_4bit=os.getenv("TAO_LOAD_IN_4BIT", "false").lower() == "true",
-            load_in_8bit=os.getenv("TAO_LOAD_IN_8BIT", "false").lower() == "true",
-            timeout_seconds=int(os.getenv("TAO_TIMEOUT_SECONDS", "120")),
+            azure_deployment=env("AZURE_DEPLOYMENT") or os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            azure_api_version=env("AZURE_API_VERSION") or os.getenv("AZURE_OPENAI_API_VERSION") or cls.azure_api_version,
+            temperature=float(env("TEMPERATURE", "0.3") or "0.3"),
+            top_p=float(env("TOP_P", "0.85") or "0.85"),
+            repetition_penalty=float(env("REPETITION_PENALTY", "1.1") or "1.1"),
+            max_new_tokens=int(env("MAX_NEW_TOKENS", "2048") or "2048"),
+            do_sample=(env("DO_SAMPLE", "true") or "true").lower() == "true",
+            torch_dtype=env("TORCH_DTYPE", cls.torch_dtype) or cls.torch_dtype,
+            device_map=env("DEVICE_MAP", cls.device_map) or cls.device_map,
+            attn_implementation=env("ATTN_IMPLEMENTATION", cls.attn_implementation) or cls.attn_implementation,
+            load_in_4bit=(env("LOAD_IN_4BIT", "false") or "false").lower() == "true",
+            load_in_8bit=(env("LOAD_IN_8BIT", "false") or "false").lower() == "true",
+            timeout_seconds=int(env("TIMEOUT_SECONDS", "120") or "120"),
         )
 
 
@@ -227,7 +249,7 @@ class DaoClient:
         backend = self.config.backend
         if backend == "disabled":
             state = "disabled"
-        elif backend == "mock" or backend in OPENAI_COMPATIBLE_BACKENDS:
+        elif backend == "mock" or backend in OPENAI_COMPATIBLE_BACKENDS or backend == "anthropic":
             state = "ready"
         else:
             state = self.__class__._load_state
@@ -249,8 +271,8 @@ class DaoClient:
 
         backend = self.config.backend
         if backend == "disabled":
-            return {"ok": False, "state": "disabled", "backend": backend, "reason": "Tao backend disabled (set TAO_BACKEND=transformers/http/poe/minimax/azure/mock)."}
-        if backend == "mock" or backend in OPENAI_COMPATIBLE_BACKENDS:
+            return {"ok": False, "state": "disabled", "backend": backend, "reason": "Tao backend disabled (set TAO_BACKEND=transformers/http/openai/poe/minimax/azure/anthropic/mock)."}
+        if backend == "mock" or backend in OPENAI_COMPATIBLE_BACKENDS or backend == "anthropic":
             self.__class__._load_state = "ready"
             return {"ok": True, "state": "ready", "backend": backend, "model_id": self.config.model_id}
         if backend == "transformers":
@@ -306,7 +328,7 @@ class DaoClient:
         """
 
         if self.config.backend == "disabled":
-            raise DaoRuntimeError(f"Tao {task} runtime is disabled. Set TAO_BACKEND=http/poe/minimax/azure or transformers to enable.")
+            raise DaoRuntimeError(f"Tao {task} runtime is disabled. Set TAO_BACKEND=http/openai/poe/minimax/azure/anthropic or transformers to enable.")
         # Model-call budget is charged HERE — the single funnel every generation task
         # passes through — so nested skill calls can never under-count model usage
         # the way planner-side guessing did (harness review v0.12).
@@ -321,6 +343,8 @@ class DaoClient:
         params = self._profile_params(profile)
         if self.config.backend in OPENAI_COMPATIBLE_BACKENDS:
             text = self._generate_http(body, history=history, params=params)
+        elif self.config.backend == "anthropic":
+            text = self._generate_anthropic(body, history=history, params=params)
         elif self.config.backend == "transformers":
             text = self._generate_transformers(self.build_prompt(body, history), params=params)
         else:
@@ -347,6 +371,14 @@ class DaoClient:
             summary_context=json.dumps(summary_context, ensure_ascii=False, indent=2, default=str)
         )
         return self._dispatch(body, self._mock_experience_summary(summary_context), "experience summary", profile="research_report")
+
+    def generate_imaging_assessment(self, imaging_context: dict[str, Any]) -> str:
+        """Assess imaging / lab report text as a guarded clinician-review support layer."""
+
+        body = IMAGING_ASSESSMENT_PROMPT_TEMPLATE.format(
+            imaging_context=json.dumps(imaging_context, ensure_ascii=False, indent=2, default=str)
+        )
+        return self._dispatch(body, self._mock_imaging_assessment(imaging_context), "imaging assessment", profile="structured_json")
 
     def route_skill(self, routing_context: dict[str, Any]) -> str:
         body = SKILL_ROUTING_PROMPT_TEMPLATE.format(
@@ -448,7 +480,7 @@ class DaoClient:
         """
 
         if self.config.backend == "disabled":
-            raise DaoRuntimeError("Tao direct chat is disabled. Set TAO_BACKEND=transformers for local model inference.")
+            raise DaoRuntimeError("Tao direct chat is disabled. Set TAO_BACKEND=http/openai/poe/minimax/azure/anthropic or transformers to enable.")
         from backend.runtime.execution_context import charge_active_run
 
         exhausted = charge_active_run("model_call")
@@ -459,6 +491,8 @@ class DaoClient:
         params = self._profile_params("teaching_explanation")
         if self.config.backend in OPENAI_COMPATIBLE_BACKENDS:
             text = self._generate_http(user_input, history=history, params=params)
+        elif self.config.backend == "anthropic":
+            text = self._generate_anthropic(user_input, history=history, params=params)
         elif self.config.backend == "transformers":
             text = self._generate_transformers(self.build_prompt(user_input, history), stream_callback=stream_callback, params=params)
         else:
@@ -558,6 +592,37 @@ class DaoClient:
             "complete_prescription": None,
             "patient_executable_dose": None,
             "administration_instruction": None,
+        }, ensure_ascii=False)
+
+    def _mock_imaging_assessment(self, ctx: dict[str, Any]) -> str:
+        reports = ctx.get("imaging_reports") or []
+        labs = ctx.get("lab_reports") or []
+        text = "\n".join(str(r.get("text", r)) if isinstance(r, dict) else str(r) for r in reports + labs)
+        findings = []
+        red_flags = []
+        for key in ("椎间盘突出", "椎管狭窄", "神经根受压", "骨质疏松", "压缩骨折", "肿瘤", "感染", "脓肿", "马尾"):
+            if key in text:
+                findings.append(key)
+        for key in ("压缩骨折", "肿瘤", "感染", "脓肿", "马尾"):
+            if key in text:
+                red_flags.append(key)
+        if not findings and ctx.get("image_urls"):
+            findings.append("提供了影像文件/链接，但当前 mock 仅确认需要视觉模型或正式报告复核")
+        markdown = (
+            "# 影像/检验检查评估（供医师复核）\n\n"
+            f"- 关键发现：{('、'.join(findings) or '未从报告文字中识别到明确结构化发现')}。\n"
+            f"- 红旗影像/检验信号：{('、'.join(red_flags) or '未见明确红旗词；仍需结合正式报告与查体')}。\n"
+            "- 与腰痹辨证关系：影像/检验只提供现代医学风险与结构损害线索，不能单独裁定中医证型或方路。\n"
+            "- 复核建议：请医生核对原始影像、正式报告、神经查体、炎症指标及既往片对比。"
+        )
+        return json.dumps({
+            "imaging_markdown": markdown,
+            "key_findings": findings,
+            "red_flag_imaging_signals": red_flags,
+            "followup_questions": ["请补充正式影像报告结论、检查日期、节段位置以及是否有神经受压/骨折/感染提示。"],
+            "final_diagnosis": None,
+            "complete_prescription": None,
+            "patient_executable_dose": None,
         }, ensure_ascii=False)
 
     def _mock_route_skill(self, routing_context: dict[str, Any]) -> str:
@@ -861,7 +926,7 @@ class DaoClient:
         - azure (``TAO_AZURE_API_VERSION=v1``/``preview``): the newer
           ``{resource}/openai/v1/chat/completions`` surface — no dated api-version
           query parameter; the deployment name travels as the payload "model".
-        - poe / minimax / http: Bearer auth, model in the payload. The hosted
+        - openai / poe / minimax / http: Bearer auth, model in the payload. The hosted
           providers must have a key (an unauthenticated call can only fail); the
           generic ``http`` backend keeps supporting keyless self-hosted endpoints.
         """
@@ -901,12 +966,69 @@ class DaoClient:
             return url, {"api-key": self.config.api_key}, None
         if not endpoint:
             raise DaoRuntimeError(f"TAO_ENDPOINT_URL is required when TAO_BACKEND={backend}.")
-        if backend in {"poe", "minimax"} and not self.config.api_key:
+        if backend in {"openai", "poe", "minimax"} and not self.config.api_key:
             provider_env = _PROVIDER_KEY_ENVS[backend][-1]
             raise DaoRuntimeError(f"{backend} API key is required. Set TAO_API_KEY or {provider_env}.")
         self._check_egress(endpoint)
         headers = {"Authorization": f"Bearer {self.config.api_key}"} if self.config.api_key else {}
         return endpoint, headers, self.config.model_id
+
+    def _resolve_anthropic_provider(self) -> tuple[str, dict[str, str]]:
+        endpoint = self.config.endpoint_url or _PROVIDER_DEFAULT_ENDPOINTS["anthropic"]
+        if not self.config.api_key:
+            raise DaoRuntimeError("anthropic API key is required. Set TAO_API_KEY or ANTHROPIC_API_KEY.")
+        self._check_egress(endpoint)
+        return endpoint, {
+            "x-api-key": self.config.api_key,
+            "anthropic-version": os.getenv("TAO_ANTHROPIC_VERSION", "2023-06-01"),
+        }
+
+    def _generate_anthropic(
+        self,
+        user_content: str,
+        history: list[dict[str, str]] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> str:
+        """Call Anthropic Messages API (/v1/messages)."""
+
+        url, auth_headers = self._resolve_anthropic_provider()
+        label = self.config.backend
+        params = params or self._profile_params("teaching_explanation")
+        messages = []
+        for turn in history or []:
+            role = "assistant" if turn.get("role") == "assistant" else "user"
+            messages.append({"role": role, "content": turn.get("content", "")})
+        messages.append({"role": "user", "content": user_content})
+        payload = {
+            "model": self.config.model_id,
+            "system": SYSTEM_PROMPT,
+            "messages": messages,
+            "max_tokens": params["max_new_tokens"],
+            "temperature": params["temperature"],
+            "top_p": params["top_p"],
+        }
+        data = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json", **auth_headers}
+        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
+                raw = response.read(self._HTTP_MAX_RESPONSE_BYTES + 1)
+                if len(raw) > self._HTTP_MAX_RESPONSE_BYTES:
+                    raise DaoRuntimeError(f"Tao {label} endpoint response exceeded {self._HTTP_MAX_RESPONSE_BYTES} bytes.")
+                body = json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise DaoRuntimeError(f"Tao {label} endpoint returned {exc.code}: {exc.reason}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            raise DaoRuntimeError(f"Tao {label} endpoint failed: {type(exc).__name__}: {exc}") from exc
+        content = body.get("content") if isinstance(body, dict) else None
+        if isinstance(content, list):
+            texts = [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
+            text = "".join(texts).strip()
+            if text:
+                return text
+        if isinstance(body, dict) and body.get("error"):
+            raise DaoRuntimeError(f"Tao {label} endpoint error: {body['error']}")
+        raise DaoRuntimeError(f"Tao {label} endpoint returned no text content.")
 
     def _generate_http(
         self,
@@ -914,7 +1036,7 @@ class DaoClient:
         history: list[dict[str, str]] | None = None,
         params: dict[str, Any] | None = None,
     ) -> str:
-        """Call an OpenAI-compatible endpoint (http/poe/minimax/azure) with chat messages.
+        """Call an OpenAI-compatible endpoint (http/openai/poe/minimax/azure) with chat messages.
 
         The endpoint applies its own chat template, so we must NOT send the locally
         templated ``<|im_start|>`` prompt string here — only raw message contents.

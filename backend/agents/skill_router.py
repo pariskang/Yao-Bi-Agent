@@ -50,6 +50,12 @@ INTENTS: list[dict[str, Any]] = [
         "examples": ["这个方案有什么用药安全风险？", "有没有配伍冲突？"],
     },
     {
+        "intent": "imaging_report_inquiry", "label": "读片/检查评估", "group": "安全与风险",
+        "description": "评估影像报告、检验检查报告与腰痹辨证/红旗风险的关系（医师复核）。",
+        "keywords": ["片子", "读片", "影像", "核磁", "磁共振", "MRI", "CT", "X线", "X光", "报告", "检验", "化验", "CRP", "血沉"],
+        "examples": ["这份腰椎MRI报告和辨证有什么关系？", "检验报告里有没有需要先排除的风险？"],
+    },
+    {
         "intent": "red_flag_inquiry", "label": "红旗排查", "group": "安全与风险",
         "description": "列出需要立即排查的危险信号（红旗）。",
         "keywords": ["红旗", "危险信号", "急诊", "马尾", "肿瘤", "感染", "骨折", "无力"],

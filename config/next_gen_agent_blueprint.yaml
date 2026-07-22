@@ -1,0 +1,207 @@
+# 下一代腰痹 CDSS 智能体蓝图（设计草案，非运行时配置）
+# 目的：把专家经验 skill 化，并让模型按用户自由提问自主规划 skill/tool/subagent/loop/graph 调用。
+version: 0.1-draft
+status: design_proposal
+non_prescriptive: true
+clinician_review_required: true
+
+provider_matrix:
+  required_backends: [minimax, poe, azure, openai, anthropic]
+  recommended_imaging_backend:
+    backend: poe
+    model_id: Gemini-3.1-Pro
+    note: 通过 Poe 的 OpenAI-compatible Chat Completions 接入；实际 bot/model 名由部署方按 Poe 控制台可用名称配置。
+  mainland_china_option:
+    backend: minimax
+    note: 面向中国内地部署的 OpenAI-compatible MiniMax 接入，可通过 TAO_ENDPOINT_URL 切换 api.minimaxi.com 或私有代理。
+
+planning_contract:
+  planner_input:
+    - user_question
+    - user_role
+    - clinical_state_graph
+    - skill_registry
+    - tool_registry
+    - safety_policy
+    - run_budget
+  planner_output: task_graph
+  allowed_task_types:
+    - skill
+    - tool
+    - subagent
+    - graph_query
+    - graph_update
+    - critic
+    - judge
+  stop_reasons:
+    - safety_halt
+    - ready_for_clinician
+    - ask_followup
+    - need_human_input
+    - budget_exhausted
+    - abstain_due_to_low_evidence
+
+experience_skills:
+  - skill_id: shen_experience_signal_skill
+    capability: extract_signal
+    purpose: 从自由叙述和结构化病例中提取沈老腰痹经验信号。
+    outputs:
+      - evidence_packets
+      - graph_updates
+      - missing_signal_fields
+    soft_constraints:
+      - 经验信号只作为候选证据，不直接裁决证型或方路。
+      - 阴性、疑问、既往已缓解线索不得作为阳性证据。
+    hard_safety_bounds:
+      - 不输出最终诊断。
+      - 不输出患者可执行处方或剂量。
+    allowed_roles: [clinician, researcher]
+
+  - skill_id: experience_hypothesis_skill
+    capability: generate_hypothesis
+    purpose: 基于经验信号生成证型/治法/方路候选假设集合。
+    outputs:
+      - hypothesis_packets
+      - evidence_for
+      - evidence_against
+      - missing_discriminators
+    soft_constraints:
+      - 必须保留 top-N 候选和反证，不强行单一结论。
+      - 低证据病例应输出 abstain 或 ask_followup。
+    hard_safety_bounds:
+      - 医师端仅为 draft_for_clinician_review。
+      - 患者端不得展示方路和药物模块。
+    allowed_roles: [clinician, researcher]
+
+  - skill_id: imaging_report_skill
+    capability: audit_safety
+    purpose: 评估医学影像报告、检验检查报告与腰痹红旗/神经骨科风险及辨证线索的关系。
+    outputs:
+      - imaging_markdown
+      - key_findings
+      - red_flag_imaging_signals
+      - evidence_packets
+      - followup_questions
+    soft_constraints:
+      - 影像和检验只作为现代医学风险、结构损害和鉴别证据，不单独裁定中医证型或方路。
+      - 若只有图片/链接而缺少正式报告或视觉模型能力，必须说明证据不足。
+    hard_safety_bounds:
+      - 不替代放射科/检验科正式报告。
+      - 出现马尾、感染、肿瘤、骨折等线索时优先 SafetySubagent/JudgeAgent。
+    allowed_roles: [clinician, researcher]
+
+  - skill_id: counterevidence_skill
+    capability: differentiate
+    purpose: 主动寻找与当前候选证型/方路冲突的证据、否定信息和禁忌。
+    outputs:
+      - counterevidence_packets
+      - conflict_severity
+      - proposed_followup_gaps
+    soft_constraints:
+      - 反证默认触发降置信或追问，而不是自动删除假设。
+    hard_safety_bounds:
+      - urgent 红旗必须上报 SafetySubagent 和 JudgeAgent。
+    allowed_roles: [clinician, researcher]
+
+  - skill_id: followup_strategy_skill
+    capability: ask_followup
+    purpose: 根据 hypothesis gaps 和 ClinicalStateGraph 生成信息增益最高的下一轮问诊。
+    outputs:
+      - questions
+      - target_gap
+      - expected_information_gain
+      - what_answer_would_change
+    soft_constraints:
+      - 模型可自由生成自然语言问题，但问题必须绑定 gap_id。
+      - 每轮优先 1-3 个高价值问题，避免机械问卷化。
+    hard_safety_bounds:
+      - 红旗未排除时只能追问安全问题或建议线下/急诊评估。
+    allowed_roles: [patient, clinician, researcher]
+
+  - skill_id: clinician_decision_package_skill
+    capability: explain
+    purpose: 汇总候选诊疗框架、证据、反证、风险和待复核问题，形成医师端 CDSS 决策包。
+    outputs:
+      - hypothesis_set
+      - candidate_care_frames
+      - safety_review
+      - questions_before_action
+      - claim_ledger
+      - patient_visible_summary
+    soft_constraints:
+      - 使用候选、倾向、需复核口吻。
+      - 所有关键声明必须进入 claim ledger。
+    hard_safety_bounds:
+      - 不替代执业医师最终诊断和处方。
+      - patient_visible_summary 必须去诊断、去处方、去剂量。
+    allowed_roles: [clinician]
+
+subagents:
+  - agent_id: PlannerAgent
+    role: 根据自由提问、病例图谱、技能注册表和预算生成 TaskGraph。
+    can_call: [graph_query, judge]
+  - agent_id: SyndromeHypothesisAgent
+    role: 生成并维护证型预测集。
+    can_call: [shen_experience_signal_skill, experience_hypothesis_skill, counterevidence_skill]
+  - agent_id: FormulaFrameAgent
+    role: 生成方路框架和适用/反证条件。
+    can_call: [experience_hypothesis_skill, counterevidence_skill]
+  - agent_id: SafetySubagent
+    role: 持续红旗、合并病、药物相互作用、角色边界审查。
+    can_call: [red_flag_screen, imaging_report_skill, drug_risk_guard, patient_request_guard]
+  - agent_id: SimilarCaseAgent
+    role: 检索脱敏相似病例簇并判断规则/队列 concordance。
+    can_call: [case_retrieval_tool, graph_update]
+  - agent_id: CriticAgent
+    role: 查找未接地、过度确定、遗漏鉴别、伪共识和低价值追问。
+    can_call: [groundedness_check, contradiction_check, uncertainty_check]
+  - agent_id: JudgeAgent
+    role: 决定继续 loop、追问、输出医师决策包、弃权或安全中止。
+    can_call: [clinician_decision_package_skill]
+
+loop_policy:
+  max_rounds_default: 4
+  max_questions_per_round: 3
+  replan_triggers:
+    - evidence_gap
+    - counterevidence_found
+    - ungrounded_claim
+    - top_hypotheses_too_close
+    - user_asks_new_goal
+    - safety_status_changed
+  convergence:
+    ready_for_clinician:
+      - no_urgent_red_flags_unresolved
+      - top_hypotheses_have_evidence_and_counterevidence_review
+      - key_claims_grounded_or_marked_inferred
+    ask_followup:
+      - high_value_gap_exists
+      - patient_or_clinician_can_answer
+    abstain:
+      - low_evidence
+      - no_useful_next_question
+      - out_of_scope
+
+graph_contract:
+  graph_name: ClinicalExperienceGraph
+  node_types:
+    - case_fact
+    - symptom
+    - negated_finding
+    - temporal_event
+    - medication
+    - comorbidity
+    - preference
+    - hypothesis
+    - evidence
+    - counterevidence
+    - followup_gap
+    - decision
+  edge_types:
+    - supports
+    - contradicts
+    - requires_followup
+    - temporally_before
+    - derived_from
+    - updated_by
+    - reviewed_by_clinician

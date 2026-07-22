@@ -22,6 +22,7 @@ ALLOWED_DIRECT_SKILL_IMPORTS = {
     ("backend/agents/conversation.py", "backend.skills.tao_consultation_skill"),
     ("backend/agents/conversation.py", "backend.skills.physician_reasoning_skill"),
     ("backend/agents/conversation.py", "backend.skills.case_experience_summary_skill"),
+    ("backend/agents/conversation.py", "backend.skills.imaging_report_skill"),  # runtime-bound separate Poe/Gemini client
     ("backend/agents/clinical_agents.py", "backend.skills.physician_reasoning_skill"),
     ("backend/agents/clinical_agents.py", "backend.skills.case_experience_summary_skill"),
     ("backend/agents/yaobi_interview.py", "backend.skills.tao_consultation_skill"),

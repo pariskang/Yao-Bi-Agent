@@ -23,6 +23,7 @@ from backend.llm.dao_client import (
 )
 
 _OPENAI_REPLY = {"choices": [{"message": {"content": "OK：模型回复（待医师复核）。"}}]}
+_ANTHROPIC_REPLY = {"content": [{"type": "text", "text": "OK：Claude模型回复（待医师复核）。"}]}
 
 
 class _FakeResponse:
@@ -60,7 +61,8 @@ def _capture_urlopen(monkeypatch, payload: dict[str, Any]) -> dict[str, Any]:
 def _clear_provider_env(monkeypatch) -> None:
     for name in (
         "TAO_BACKEND", "TAO_ENDPOINT_URL", "TAO_API_KEY", "TAO_MODEL_ID",
-        "POE_API_KEY", "MINIMAX_API_KEY",
+        "TAO_IMAGING_BACKEND", "TAO_IMAGING_ENDPOINT_URL", "TAO_IMAGING_API_KEY", "TAO_IMAGING_MODEL_ID",
+        "OPENAI_API_KEY", "POE_API_KEY", "MINIMAX_API_KEY", "ANTHROPIC_API_KEY",
         "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT",
         "AZURE_OPENAI_API_VERSION", "TAO_AZURE_DEPLOYMENT", "TAO_AZURE_API_VERSION",
     ):
@@ -89,6 +91,26 @@ def test_from_env_tao_api_key_wins_over_provider_key(monkeypatch):
     assert DaoGenerationConfig.from_env().api_key == "unified-key"
 
 
+def test_from_env_openai_defaults(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("TAO_BACKEND", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "oa-key")
+    config = DaoGenerationConfig.from_env()
+    assert config.backend == "openai"
+    assert config.api_key == "oa-key"
+    assert config.endpoint_url == "https://api.openai.com/v1/chat/completions"
+
+
+def test_from_env_anthropic_defaults(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("TAO_BACKEND", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ant-key")
+    config = DaoGenerationConfig.from_env()
+    assert config.backend == "anthropic"
+    assert config.api_key == "ant-key"
+    assert config.endpoint_url == "https://api.anthropic.com/v1/messages"
+
+
 def test_from_env_minimax_defaults(monkeypatch):
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("TAO_BACKEND", "minimax")
@@ -100,6 +122,25 @@ def test_from_env_minimax_defaults(monkeypatch):
     # via TAO_ENDPOINT_URL (as is mainland api.minimaxi.com).
     assert config.endpoint_url == "https://api.minimax.io/v1/chat/completions"
 
+
+
+def test_from_prefixed_env_supports_separate_imaging_client(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("TAO_BACKEND", "minimax")
+    monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
+    monkeypatch.setenv("TAO_IMAGING_BACKEND", "poe")
+    monkeypatch.setenv("TAO_IMAGING_MODEL_ID", "Gemini-3.1-Pro")
+    monkeypatch.setenv("TAO_IMAGING_API_KEY", "poe-image-key")
+
+    agent = DaoGenerationConfig.from_env()
+    imaging = DaoGenerationConfig.from_env("TAO_IMAGING")
+
+    assert agent.backend == "minimax"
+    assert agent.api_key == "mm-key"
+    assert imaging.backend == "poe"
+    assert imaging.model_id == "Gemini-3.1-Pro"
+    assert imaging.api_key == "poe-image-key"
+    assert imaging.endpoint_url == "https://api.poe.com/v1/chat/completions"
 
 def test_from_env_azure_reads_conventional_variables(monkeypatch):
     _clear_provider_env(monkeypatch)
@@ -126,6 +167,52 @@ def test_from_env_explicit_endpoint_overrides_provider_default(monkeypatch):
 # ---------------------------------------------------------------------------
 # Wire shape per provider
 # ---------------------------------------------------------------------------
+
+def test_openai_request_shape(monkeypatch):
+    captured = _capture_urlopen(monkeypatch, _OPENAI_REPLY)
+    client = DaoClient(DaoGenerationConfig(
+        backend="openai",
+        endpoint_url="https://api.openai.com/v1/chat/completions",
+        api_key="oa-key",
+        model_id="gpt-4.1",
+    ))
+    reply = client.chat([], "你好")
+    assert "模型回复" in reply
+    assert captured["headers"]["authorization"] == "Bearer oa-key"
+    assert captured["payload"]["model"] == "gpt-4.1"
+    assert captured["payload"]["messages"][-1] == {"role": "user", "content": "你好"}
+
+
+def test_anthropic_request_shape(monkeypatch):
+    captured = _capture_urlopen(monkeypatch, _ANTHROPIC_REPLY)
+    client = DaoClient(DaoGenerationConfig(
+        backend="anthropic",
+        endpoint_url="https://api.anthropic.com/v1/messages",
+        api_key="ant-key",
+        model_id="claude-sonnet-4-5",
+    ))
+    reply = client.chat([], "你好")
+    assert "Claude模型回复" in reply
+    assert captured["headers"]["x-api-key"] == "ant-key"
+    assert captured["headers"]["anthropic-version"] == "2023-06-01"
+    assert captured["payload"]["model"] == "claude-sonnet-4-5"
+    assert captured["payload"]["messages"][-1] == {"role": "user", "content": "你好"}
+    assert captured["payload"]["system"]
+
+
+def test_poe_gemini_31_pro_request_shape(monkeypatch):
+    captured = _capture_urlopen(monkeypatch, _OPENAI_REPLY)
+    client = DaoClient(DaoGenerationConfig(
+        backend="poe",
+        endpoint_url="https://api.poe.com/v1/chat/completions",
+        api_key="poe-key",
+        model_id="Gemini-3.1-Pro",
+    ))
+    client.generate_imaging_assessment({"imaging_reports": ["腰椎MRI提示椎间盘突出"], "case_state": {}})
+    assert captured["url"] == "https://api.poe.com/v1/chat/completions"
+    assert captured["payload"]["model"] == "Gemini-3.1-Pro"
+    assert "影像" in captured["payload"]["messages"][-1]["content"]
+
 
 def test_poe_request_shape(monkeypatch):
     captured = _capture_urlopen(monkeypatch, _OPENAI_REPLY)
@@ -220,6 +307,12 @@ def test_generic_http_backend_still_supports_keyless_endpoints(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_hosted_providers_require_api_key():
+    openai = DaoClient(DaoGenerationConfig(backend="openai", endpoint_url="https://api.openai.com/v1/chat/completions"))
+    with pytest.raises(DaoRuntimeError, match="OPENAI_API_KEY"):
+        openai.chat([], "你好")
+    anthropic = DaoClient(DaoGenerationConfig(backend="anthropic", endpoint_url="https://api.anthropic.com/v1/messages"))
+    with pytest.raises(DaoRuntimeError, match="ANTHROPIC_API_KEY"):
+        anthropic.chat([], "你好")
     poe = DaoClient(DaoGenerationConfig(backend="poe", endpoint_url="https://api.poe.com/v1/chat/completions"))
     with pytest.raises(DaoRuntimeError, match="POE_API_KEY"):
         poe.chat([], "你好")
@@ -242,7 +335,7 @@ def test_azure_requires_endpoint():
 # ---------------------------------------------------------------------------
 
 def test_provider_backends_report_ready_without_local_weights():
-    for backend in ("poe", "minimax", "azure"):
+    for backend in ("openai", "poe", "minimax", "azure", "anthropic"):
         client = DaoClient(DaoGenerationConfig(backend=backend, endpoint_url="https://x", api_key="k"))  # type: ignore[arg-type]
         assert client.load_status()["state"] == "ready"
         assert client.preload()["ok"] is True
@@ -254,7 +347,7 @@ def test_manifest_backend_lists_match_code(monkeypatch):
     from backend import provenance
 
     expected = set(get_args(DaoBackend))
-    assert expected == {"disabled", "mock", "transformers"} | OPENAI_COMPATIBLE_BACKENDS
+    assert expected == {"disabled", "mock", "transformers", "anthropic"} | OPENAI_COMPATIBLE_BACKENDS
     root = provenance.ROOT
     hermes = yaml.safe_load((root / "config" / "hermes_agent.yaml").read_text(encoding="utf-8"))
     model_cfg = yaml.safe_load((root / "config" / "model_config.yaml").read_text(encoding="utf-8"))

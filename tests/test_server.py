@@ -340,3 +340,21 @@ def test_interview_physician_override_is_two_phase_approval(monkeypatch):
     res_new = server.handle_interview({"session_id": "ph_o", "message": "今天开始发热寒战，体温39度"})
     assert res_new["safety_level"] in {"high", "emergency"}
     assert any("发热" in f or "感染" in f for f in res_new["red_flags"])
+
+
+def test_agentic_endpoint_runs_graph_backed_loop(monkeypatch):
+    server = _server(monkeypatch)
+    res = server.handle_agentic({
+        "question": "腰痛伴下肢麻木，MRI提示椎间盘突出，请自主评估证型、读片线索和风险",
+        "tags": ["lower_limb_numbness", "dark_tongue"],
+        "doctor_mode": True,
+        "max_rounds": 2,
+        "max_steps_per_round": 4,
+    })
+    turn = res["turn"]
+    assert turn["agentic"] is True
+    assert turn["rounds"]
+    assert turn["steps"]
+    assert turn["graph"]["nodes"] and turn["graph"]["edges"]
+    assert any(task["intent"] == "imaging_report_inquiry" for task in turn["steps"])
+    assert res["tao"]["imaging"]["backend"] == "mock"

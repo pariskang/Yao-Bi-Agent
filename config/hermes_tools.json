@@ -641,6 +641,63 @@
     }
   },
   {
+    "name": "imaging_report_skill",
+    "description": "Assess lumbar imaging and laboratory report findings as clinician-review evidence; optional guarded model overlay for Poe/OpenAI/Azure/MiniMax/Anthropic.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "case_state": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "imaging_reports": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object"
+          }
+        },
+        "lab_reports": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object"
+          }
+        },
+        "image_urls": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "use_llm": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "x_governance": {
+      "allowed_roles": [
+        "clinician",
+        "researcher",
+        "system"
+      ],
+      "risk_level": "clinical_draft",
+      "idempotent": true,
+      "execution": "registry"
+    }
+  },
+  {
     "name": "mined_evidence_skill",
     "description": "Match de-identified mined rule candidates (pending expert review) to the case tags.",
     "parameters": {
