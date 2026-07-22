@@ -3,7 +3,7 @@
 
 The script is intentionally plain Python so a Colab cell can run it directly:
 
-    !python colab/launch_yaobi_colab.py --backend mock --ngrok-token "$NGROK_AUTHTOKEN"
+    !python colab/launch_yaobi_colab.py --backend minimax --api-key "$MINIMAX_API_KEY" --imaging-backend poe --imaging-model-id Gemini-3.1-Pro --imaging-api-key "$POE_API_KEY" --ngrok-token "$NGROK_AUTHTOKEN"
 
 It installs the project, configures one of the supported Tao/LLM providers, starts
 ``backend.server`` and optionally opens a public ngrok tunnel.
@@ -65,6 +65,13 @@ def configure_env(args: argparse.Namespace) -> dict[str, str]:
     env["TAO_MODEL_ID"] = args.model_id or DEFAULT_MODEL_BY_BACKEND[args.backend]
     if args.api_key:
         env["TAO_API_KEY"] = args.api_key
+    if args.imaging_backend:
+        env["TAO_IMAGING_BACKEND"] = args.imaging_backend
+        env["TAO_IMAGING_MODEL_ID"] = args.imaging_model_id or DEFAULT_MODEL_BY_BACKEND[args.imaging_backend]
+    if args.imaging_api_key:
+        env["TAO_IMAGING_API_KEY"] = args.imaging_api_key
+    if args.imaging_endpoint_url:
+        env["TAO_IMAGING_ENDPOINT_URL"] = args.imaging_endpoint_url
     if args.endpoint_url:
         env["TAO_ENDPOINT_URL"] = args.endpoint_url
     if args.azure_endpoint:
@@ -137,9 +144,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--repo-url", default=REPO_URL)
     p.add_argument("--branch", default="main")
     p.add_argument("--workdir", default="/content/Yao-Bi-Agent")
-    p.add_argument("--backend", choices=sorted(DEFAULT_MODEL_BY_BACKEND), default=os.getenv("TAO_BACKEND", "mock"))
+    p.add_argument("--backend", choices=sorted(DEFAULT_MODEL_BY_BACKEND), default=os.getenv("TAO_BACKEND", "minimax"), help="Main agent/planner provider; Colab default uses MiniMax.")
     p.add_argument("--model-id", default=os.getenv("TAO_MODEL_ID"))
-    p.add_argument("--api-key", default=os.getenv("TAO_API_KEY"))
+    p.add_argument("--api-key", default=os.getenv("TAO_API_KEY") or os.getenv("MINIMAX_API_KEY"))
+    p.add_argument("--imaging-backend", choices=sorted(DEFAULT_MODEL_BY_BACKEND), default=os.getenv("TAO_IMAGING_BACKEND", "poe"), help="Imaging/report assessment provider; Colab default uses Poe/Gemini.")
+    p.add_argument("--imaging-model-id", default=os.getenv("TAO_IMAGING_MODEL_ID", "Gemini-3.1-Pro"))
+    p.add_argument("--imaging-api-key", default=os.getenv("TAO_IMAGING_API_KEY") or os.getenv("POE_API_KEY"))
+    p.add_argument("--imaging-endpoint-url", default=os.getenv("TAO_IMAGING_ENDPOINT_URL"))
     p.add_argument("--endpoint-url", default=os.getenv("TAO_ENDPOINT_URL"))
     p.add_argument("--azure-endpoint", default=os.getenv("AZURE_OPENAI_ENDPOINT"))
     p.add_argument("--azure-deployment", default=os.getenv("AZURE_OPENAI_DEPLOYMENT"))
@@ -170,7 +181,9 @@ def main() -> None:
     if public_url:
         print(f"- public: {public_url}")
     print(f"- backend pid: {proc.pid}")
-    print(f"- provider: {env['TAO_BACKEND']} / {env['TAO_MODEL_ID']}")
+    print(f"- agent provider:   {env['TAO_BACKEND']} / {env['TAO_MODEL_ID']}")
+    if env.get("TAO_IMAGING_BACKEND"):
+        print(f"- imaging provider: {env['TAO_IMAGING_BACKEND']} / {env['TAO_IMAGING_MODEL_ID']}")
     print("- clinician mode: set YAOBI_CLINICIAN_TOKEN and enter it in UI settings if publicly exposed")
     print("- logs: yaobi_server.log")
 

@@ -41,7 +41,7 @@ from backend.agents.skill_router import suggested_questions
 from backend.agents.yaobi_interview import YaoBiCaseState, YaoBiInterviewEngine
 from backend.audit import get_audit_log, get_counters
 from backend.audit.audit_log import text_digest
-from backend.llm.dao_client import OPENAI_COMPATIBLE_BACKENDS, DaoClient, DaoRuntimeError
+from backend.llm.dao_client import OPENAI_COMPATIBLE_BACKENDS, DaoClient, DaoGenerationConfig, DaoRuntimeError
 from backend.llm.output_guard import filter_patient_payload
 from backend.provenance import get_provenance
 from backend.skills.case_extract_skill import case_extract_skill
@@ -54,8 +54,16 @@ from backend.skills.tao_followup_probe_skill import tao_followup_probe_skill
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_DIR = ROOT / "frontend"
 
-# Shared, process-wide client (the heavy transformers model is cached on the class).
+# Shared, process-wide clients (the heavy transformers model is cached on the class).
+# Main Tao client drives planning/agent/dialogue. An optional scoped imaging client lets
+# deployments use Poe/Gemini for radiology-report assessment while MiniMax drives the
+# autonomous CDSS agent.
 CLIENT = DaoClient()
+IMAGING_CLIENT = (
+    DaoClient(DaoGenerationConfig.from_env("TAO_IMAGING"))
+    if os.getenv("TAO_IMAGING_BACKEND")
+    else CLIENT
+)
 TAO_ENABLED = CLIENT.config.backend in ({"mock", "transformers", "anthropic"} | OPENAI_COMPATIBLE_BACKENDS)
 
 # Map frontend intake stages to FSM states and the fields Tao may hint at (must mirror the
@@ -77,6 +85,8 @@ STAGE_FIELDS = {
 def tao_info() -> dict[str, Any]:
     c = CLIENT.config
     status = CLIENT.load_status()
+    imaging = IMAGING_CLIENT.config
+    imaging_status = IMAGING_CLIENT.load_status()
     return {
         "enabled": TAO_ENABLED,
         "backend": c.backend,
@@ -87,6 +97,14 @@ def tao_info() -> dict[str, Any]:
         "load_state": status["state"],
         "model_loaded": status["model_loaded"],
         "load_error": status["error"],
+        "imaging": {
+            "backend": imaging.backend,
+            "model_id": imaging.model_id,
+            "separate_client": IMAGING_CLIENT is not CLIENT,
+            "load_state": imaging_status["state"],
+            "model_loaded": imaging_status["model_loaded"],
+            "load_error": imaging_status["error"],
+        },
     }
 
 
@@ -376,7 +394,7 @@ def handle_chat(data: dict[str, Any]) -> dict[str, Any]:
     if not question:
         return {"error": "empty question"}
     role, role_source = _resolve_role(data)
-    session = ConversationSession(case_state=_case_state(_enrich_with_question(data, question)), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=role)
+    session = ConversationSession(case_state=_case_state(_enrich_with_question(data, question)), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=role, imaging_dao_client=IMAGING_CLIENT)
     turn = session.ask(question)
     if role == "patient":
         # Strict allowlist view: patient responses expose only whitelisted fields and
@@ -390,7 +408,7 @@ def handle_autonomous(data: dict[str, Any]) -> dict[str, Any]:
     if not question:
         return {"error": "empty question"}
     role, role_source = _resolve_role(data)
-    agent = AutonomousQAAgent(case_state=_case_state(_enrich_with_question(data, question)), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=role)
+    agent = AutonomousQAAgent(case_state=_case_state(_enrich_with_question(data, question)), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role=role, imaging_dao_client=IMAGING_CLIENT)
     turn = agent.run(question)
     if role == "patient":
         turn = filter_patient_payload(turn)
@@ -408,6 +426,7 @@ def handle_agentic(data: dict[str, Any]) -> dict[str, Any]:
         case_state=_case_state(_enrich_with_question(data, question)),
         use_llm=TAO_ENABLED,
         dao_client=CLIENT,
+        imaging_dao_client=IMAGING_CLIENT,
         user_role=role,
         max_rounds=int(data.get("max_rounds") or 3),
         max_steps_per_round=int(data.get("max_steps_per_round") or 4),
@@ -442,7 +461,7 @@ def handle_reasoning(data: dict[str, Any]) -> dict[str, Any]:
     denied = _clinician_only(data)
     if denied:
         return denied
-    session = ConversationSession(case_state=_case_state(data), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role="clinician")
+    session = ConversationSession(case_state=_case_state(data), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role="clinician", imaging_dao_client=IMAGING_CLIENT)
     return {"result": session.invoke("reasoning_inquiry"), "tao": tao_info()}
 
 
@@ -450,7 +469,7 @@ def handle_summary(data: dict[str, Any]) -> dict[str, Any]:
     denied = _clinician_only(data)
     if denied:
         return denied
-    session = ConversationSession(case_state=_case_state(data), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role="clinician")
+    session = ConversationSession(case_state=_case_state(data), use_llm=TAO_ENABLED, dao_client=CLIENT, user_role="clinician", imaging_dao_client=IMAGING_CLIENT)
     return {"result": session.invoke("experience_inquiry"), "tao": tao_info()}
 
 

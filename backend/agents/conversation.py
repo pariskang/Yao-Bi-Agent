@@ -15,15 +15,16 @@ from backend.agents.skill_router import INTENT_BY_ID, INTENTS, route_intent, sug
 from backend.llm.dao_client import DaoClient
 from backend.skills.case_experience_summary_skill import case_experience_summary_skill
 from backend.skills.clinical_scope_router_skill import question_scope_gate
+from backend.skills.imaging_report_skill import imaging_report_skill
 from backend.skills.mined_evidence_skill import load_mined_rules
 from backend.skills.physician_reasoning_skill import physician_reasoning_skill
 from backend.skills.tao_consultation_skill import tao_consultation_skill
 from backend.tools import get_registry
 
-# All deterministic clinical skills are invoked through the tool registry (role
+# Most deterministic clinical skills are invoked through the tool registry (role
 # authorization, schema validation, budget charging at the execution point, audit
-# spans). Only runtime-bound LLM-overlay skills (consultation / reasoning /
-# experience — they own the DaoClient) remain direct, by design.
+# spans). Runtime-bound LLM-overlay skills that need an explicit DaoClient
+# (consultation / reasoning / experience / imaging override) remain direct.
 
 
 def _tool(name, **kwargs):
@@ -127,10 +128,11 @@ def query_mined(question: str, mined: dict[str, Any]) -> dict[str, Any]:
 
 
 class ConversationSession:
-    def __init__(self, case_state: dict[str, Any] | None = None, use_llm: bool = False, dao_client: DaoClient | None = None, user_role: str = "clinician") -> None:
+    def __init__(self, case_state: dict[str, Any] | None = None, use_llm: bool = False, dao_client: DaoClient | None = None, user_role: str = "clinician", imaging_dao_client: DaoClient | None = None) -> None:
         self.case_state = case_state or {}
         self.use_llm = use_llm
         self.dao_client = dao_client
+        self.imaging_dao_client = imaging_dao_client or dao_client
         self.user_role = user_role
         self.history: list[dict[str, Any]] = []
         self._mined = load_mined_rules()
@@ -311,13 +313,13 @@ class ConversationSession:
         for item in (self.case_state.get("imaging_reports") or []):
             reports.append(item)
         labs = list(self.case_state.get("lab_reports") or [])
-        res = _tool(
-            "imaging_report_skill",
+        res = imaging_report_skill(
             case_state=self.case_state,
             imaging_reports=reports,
             lab_reports=labs,
             image_urls=self.case_state.get("image_urls") or [],
             use_llm=self.use_llm,
+            dao_client=self.imaging_dao_client,
         )
         evidence = [e.get("source_id") for e in res.get("evidence_packets", []) if isinstance(e, dict)]
         return {

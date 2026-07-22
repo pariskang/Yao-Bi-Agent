@@ -1209,7 +1209,7 @@ function adaptAgenticTurn(q, res) {
     q, real: true, agentic: true, md: t.answer || '', decision: t.decision || {},
     rounds: t.rounds || [], steps: t.steps || [], critic: t.critic || {},
     followups: t.followup_questions || [], graph: t.graph || {},
-    usedLlm: !!t.used_llm, backend: tao.backend, model: tao.model_id,
+    usedLlm: !!t.used_llm, backend: tao.backend, model: tao.model_id, imagingBackend: tao.imaging && tao.imaging.backend, imagingModel: tao.imaging && tao.imaging.model_id,
   };
 }
 
@@ -1265,7 +1265,7 @@ function renderAgenticModule() {
     return `<div class="agentic-run">
       <div class="bubble user">${escapeHtml(t.q)}</div>
       <section class="result-panel">
-        <p class="eyebrow">agentic_cdss_loop · ${t.real ? '实时后端' : '离线提示'} · ${escapeHtml(t.backend || '')} ${t.model ? '· ' + escapeHtml(t.model) : ''}</p>
+        <p class="eyebrow">agentic_cdss_loop · ${t.real ? '实时后端' : '离线提示'} · Agent: ${escapeHtml(t.backend || '')} ${t.model ? '/ ' + escapeHtml(t.model) : ''} · Imaging: ${escapeHtml(t.imagingBackend || t.backend || '')} ${t.imagingModel ? '/ ' + escapeHtml(t.imagingModel) : ''}</p>
         <div class="stat-grid compact">
           <article class="stat-card"><p class="eyebrow">Loop 决策</p><strong>${escapeHtml((t.decision || {}).state || '—')}</strong><span>${escapeHtml((t.decision || {}).reason || '')}</span></article>
           <article class="stat-card"><p class="eyebrow">Rounds</p><strong>${(t.rounds || []).length}</strong><span>bounded loop</span></article>

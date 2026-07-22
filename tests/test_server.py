@@ -357,3 +357,4 @@ def test_agentic_endpoint_runs_graph_backed_loop(monkeypatch):
     assert turn["steps"]
     assert turn["graph"]["nodes"] and turn["graph"]["edges"]
     assert any(task["intent"] == "imaging_report_inquiry" for task in turn["steps"])
+    assert res["tao"]["imaging"]["backend"] == "mock"

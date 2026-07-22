@@ -164,10 +164,12 @@ class AgenticCDSSLoopAgent:
         user_role: str = "clinician",
         max_rounds: int = 3,
         max_steps_per_round: int = 4,
+        imaging_dao_client: Any | None = None,
     ) -> None:
-        self.session = ConversationSession(case_state=case_state, use_llm=use_llm, dao_client=dao_client, user_role=user_role)
+        self.session = ConversationSession(case_state=case_state, use_llm=use_llm, dao_client=dao_client, user_role=user_role, imaging_dao_client=imaging_dao_client)
         self.use_llm = use_llm
         self.dao_client = dao_client
+        self.imaging_dao_client = imaging_dao_client or dao_client
         self.user_role = user_role
         self.max_rounds = max_rounds
         self.max_steps_per_round = max_steps_per_round

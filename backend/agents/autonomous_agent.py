@@ -102,8 +102,8 @@ def plan_question(
 class AutonomousQAAgent:
     """A planning agent that delegates each step to a skill subagent."""
 
-    def __init__(self, case_state: dict[str, Any] | None = None, use_llm: bool = False, dao_client: DaoClient | None = None, user_role: str = "clinician", max_steps: int = 3) -> None:
-        self.session = ConversationSession(case_state=case_state, use_llm=use_llm, dao_client=dao_client, user_role=user_role)
+    def __init__(self, case_state: dict[str, Any] | None = None, use_llm: bool = False, dao_client: DaoClient | None = None, user_role: str = "clinician", max_steps: int = 3, imaging_dao_client: DaoClient | None = None) -> None:
+        self.session = ConversationSession(case_state=case_state, use_llm=use_llm, dao_client=dao_client, user_role=user_role, imaging_dao_client=imaging_dao_client)
         self.use_llm = use_llm
         self.dao_client = dao_client
         self.user_role = user_role

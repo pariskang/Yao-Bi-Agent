@@ -130,40 +130,57 @@ class DaoGenerationConfig:
     timeout_seconds: int = 120
 
     @classmethod
-    def from_env(cls) -> "DaoGenerationConfig":
-        backend = os.getenv("TAO_BACKEND", "disabled")
-        # Provider-aware credential/endpoint resolution: TAO_API_KEY always wins; the
-        # provider's conventional variable (OPENAI_API_KEY / POE_API_KEY /
-        # MINIMAX_API_KEY / AZURE_OPENAI_API_KEY / ANTHROPIC_API_KEY) is the fallback. Endpoints: explicit TAO_ENDPOINT_URL
-        # first, then the provider default (Azure: AZURE_OPENAI_ENDPOINT resource base).
-        api_key = None
-        for env_name in _PROVIDER_KEY_ENVS.get(backend, ("TAO_API_KEY",)):
-            api_key = os.getenv(env_name)
-            if api_key:
-                break
-        endpoint_url = os.getenv("TAO_ENDPOINT_URL") or _PROVIDER_DEFAULT_ENDPOINTS.get(backend)
-        if backend == "azure" and not os.getenv("TAO_ENDPOINT_URL"):
+    def from_env(cls, prefix: str = "TAO") -> "DaoGenerationConfig":
+        """Build config from ``<prefix>_*`` env vars.
+
+        The default prefix preserves the existing ``TAO_*`` contract. Secondary
+        clients can use scoped prefixes, e.g. ``TAO_IMAGING_BACKEND=poe`` with
+        ``TAO_IMAGING_MODEL_ID=Gemini-3.1-Pro`` while the main agent uses
+        ``TAO_BACKEND=minimax``.
+        """
+
+        def env(name: str, default: str | None = None) -> str | None:
+            value = os.getenv(f"{prefix}_{name}")
+            return value if value is not None else default
+
+        backend = env("BACKEND", "disabled") or "disabled"
+        # Provider-aware credential/endpoint resolution: scoped API key wins, then
+        # TAO_API_KEY for the primary client, then the provider's conventional
+        # variable (OPENAI_API_KEY / POE_API_KEY / MINIMAX_API_KEY /
+        # AZURE_OPENAI_API_KEY / ANTHROPIC_API_KEY). Endpoints: scoped endpoint first,
+        # then provider default (Azure: AZURE_OPENAI_ENDPOINT resource base).
+        api_key = env("API_KEY")
+        if not api_key and prefix == "TAO":
+            api_key = os.getenv("TAO_API_KEY")
+        if not api_key:
+            for env_name in _PROVIDER_KEY_ENVS.get(backend, ("TAO_API_KEY",)):
+                if prefix != "TAO" and env_name == "TAO_API_KEY":
+                    continue
+                api_key = os.getenv(env_name)
+                if api_key:
+                    break
+        endpoint_url = env("ENDPOINT_URL") or _PROVIDER_DEFAULT_ENDPOINTS.get(backend)
+        if backend == "azure" and not env("ENDPOINT_URL"):
             endpoint_url = os.getenv("AZURE_OPENAI_ENDPOINT")
         return cls(
-            model_id=os.getenv("TAO_MODEL_ID", cls.model_id),
-            model_revision=os.getenv("TAO_MODEL_REVISION") or None,
+            model_id=env("MODEL_ID", cls.model_id) or cls.model_id,
+            model_revision=env("MODEL_REVISION") or None,
             backend=backend,  # type: ignore[arg-type]
             endpoint_url=endpoint_url,
             api_key=api_key,
-            azure_deployment=os.getenv("TAO_AZURE_DEPLOYMENT") or os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-            azure_api_version=os.getenv("TAO_AZURE_API_VERSION")
-            or os.getenv("AZURE_OPENAI_API_VERSION") or cls.azure_api_version,
-            temperature=float(os.getenv("TAO_TEMPERATURE", "0.3")),
-            top_p=float(os.getenv("TAO_TOP_P", "0.85")),
-            repetition_penalty=float(os.getenv("TAO_REPETITION_PENALTY", "1.1")),
-            max_new_tokens=int(os.getenv("TAO_MAX_NEW_TOKENS", "2048")),
-            do_sample=os.getenv("TAO_DO_SAMPLE", "true").lower() == "true",
-            torch_dtype=os.getenv("TAO_TORCH_DTYPE", cls.torch_dtype),
-            device_map=os.getenv("TAO_DEVICE_MAP", cls.device_map),
-            attn_implementation=os.getenv("TAO_ATTN_IMPLEMENTATION", cls.attn_implementation),
-            load_in_4bit=os.getenv("TAO_LOAD_IN_4BIT", "false").lower() == "true",
-            load_in_8bit=os.getenv("TAO_LOAD_IN_8BIT", "false").lower() == "true",
-            timeout_seconds=int(os.getenv("TAO_TIMEOUT_SECONDS", "120")),
+            azure_deployment=env("AZURE_DEPLOYMENT") or os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            azure_api_version=env("AZURE_API_VERSION") or os.getenv("AZURE_OPENAI_API_VERSION") or cls.azure_api_version,
+            temperature=float(env("TEMPERATURE", "0.3") or "0.3"),
+            top_p=float(env("TOP_P", "0.85") or "0.85"),
+            repetition_penalty=float(env("REPETITION_PENALTY", "1.1") or "1.1"),
+            max_new_tokens=int(env("MAX_NEW_TOKENS", "2048") or "2048"),
+            do_sample=(env("DO_SAMPLE", "true") or "true").lower() == "true",
+            torch_dtype=env("TORCH_DTYPE", cls.torch_dtype) or cls.torch_dtype,
+            device_map=env("DEVICE_MAP", cls.device_map) or cls.device_map,
+            attn_implementation=env("ATTN_IMPLEMENTATION", cls.attn_implementation) or cls.attn_implementation,
+            load_in_4bit=(env("LOAD_IN_4BIT", "false") or "false").lower() == "true",
+            load_in_8bit=(env("LOAD_IN_8BIT", "false") or "false").lower() == "true",
+            timeout_seconds=int(env("TIMEOUT_SECONDS", "120") or "120"),
         )
 
 

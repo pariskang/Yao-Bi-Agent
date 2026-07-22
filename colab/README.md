@@ -5,12 +5,15 @@
 本目录提供两种 Colab 启动方式：
 
 1. **点击上方徽章打开 Notebook**：适合交互式逐步运行。
-2. **直接运行脚本**：适合复制到 Colab 单元格后一键启动完整 UI：
+2. **直接运行脚本**：默认同时启用 MiniMax（智能体/规划/问诊）与 Poe Gemini-3.1-Pro（影像/检查报告），适合复制到 Colab 单元格后一键启动完整 UI：
 
 ```bash
 !git clone --depth 1 https://github.com/pariskang/Yao-Bi-Agent.git /content/Yao-Bi-Agent
 %cd /content/Yao-Bi-Agent
-!python colab/launch_yaobi_colab.py --backend mock --ngrok-token "$NGROK_AUTHTOKEN" --no-preload
+!python colab/launch_yaobi_colab.py --backend minimax --api-key "$MINIMAX_API_KEY" --imaging-backend poe --imaging-model-id Gemini-3.1-Pro --imaging-api-key "$POE_API_KEY" --ngrok-token "$NGROK_AUTHTOKEN" --no-preload
+
+# 1b) 免费快速验证完整 UI 与后端流程（无外部 API）
+!python colab/launch_yaobi_colab.py --backend mock --imaging-backend mock --ngrok-token "$NGROK_AUTHTOKEN" --no-preload
 ```
 
 启动完成后脚本会打印：
@@ -38,17 +41,20 @@
 
 ## 多 Provider 运行示例
 
-`launch_yaobi_colab.py` 通过环境变量/CLI 参数配置 `DaoClient`，同一个 UI 流程可切换不同供应商：
+`launch_yaobi_colab.py` 通过环境变量/CLI 参数配置两个 `DaoClient`：主客户端（默认 MiniMax）负责智能体规划/问诊/总结，影像客户端（默认 Poe/Gemini-3.1-Pro）负责读片与检验报告。
 
 ```bash
-# 1) 免费快速验证完整 UI 与后端流程（无外部 API）
-!python colab/launch_yaobi_colab.py --backend mock --ngrok-token "$NGROK_AUTHTOKEN" --no-preload
+# 1) 推荐默认：MiniMax 负责智能体，Poe/Gemini-3.1-Pro 负责影像
+!python colab/launch_yaobi_colab.py --backend minimax --api-key "$MINIMAX_API_KEY" --imaging-backend poe --imaging-model-id Gemini-3.1-Pro --imaging-api-key "$POE_API_KEY" --ngrok-token "$NGROK_AUTHTOKEN" --no-preload
 
-# 2) Poe：读片/报告叠加可选择 Gemini-3.1-Pro
-!python colab/launch_yaobi_colab.py --backend poe --model-id Gemini-3.1-Pro --api-key "$POE_API_KEY" --ngrok-token "$NGROK_AUTHTOKEN" --no-preload
+# 1b) 免费快速验证完整 UI 与后端流程（无外部 API）
+!python colab/launch_yaobi_colab.py --backend mock --imaging-backend mock --ngrok-token "$NGROK_AUTHTOKEN" --no-preload
 
-# 3) MiniMax（中国内地网络环境常用）
-!python colab/launch_yaobi_colab.py --backend minimax --model-id abab6.5s-chat --api-key "$MINIMAX_API_KEY" --ngrok-token "$NGROK_AUTHTOKEN" --no-preload
+# 2) 如需全 Poe：主流程也走 Poe（影像仍可指定 Gemini）
+!python colab/launch_yaobi_colab.py --backend poe --model-id Gemini-3.1-Pro --api-key "$POE_API_KEY" --imaging-backend poe --imaging-model-id Gemini-3.1-Pro --imaging-api-key "$POE_API_KEY" --ngrok-token "$NGROK_AUTHTOKEN" --no-preload
+
+# 3) 如需全 MiniMax：影像也走 MiniMax
+!python colab/launch_yaobi_colab.py --backend minimax --model-id abab6.5s-chat --api-key "$MINIMAX_API_KEY" --imaging-backend minimax --imaging-api-key "$MINIMAX_API_KEY" --ngrok-token "$NGROK_AUTHTOKEN" --no-preload
 
 # 4) Azure OpenAI
 !python colab/launch_yaobi_colab.py --backend azure --azure-endpoint "$AZURE_OPENAI_ENDPOINT" --azure-deployment "$AZURE_OPENAI_DEPLOYMENT" --api-key "$AZURE_OPENAI_API_KEY" --ngrok-token "$NGROK_AUTHTOKEN" --no-preload

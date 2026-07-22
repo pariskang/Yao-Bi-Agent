@@ -61,6 +61,7 @@ def _capture_urlopen(monkeypatch, payload: dict[str, Any]) -> dict[str, Any]:
 def _clear_provider_env(monkeypatch) -> None:
     for name in (
         "TAO_BACKEND", "TAO_ENDPOINT_URL", "TAO_API_KEY", "TAO_MODEL_ID",
+        "TAO_IMAGING_BACKEND", "TAO_IMAGING_ENDPOINT_URL", "TAO_IMAGING_API_KEY", "TAO_IMAGING_MODEL_ID",
         "OPENAI_API_KEY", "POE_API_KEY", "MINIMAX_API_KEY", "ANTHROPIC_API_KEY",
         "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_DEPLOYMENT",
         "AZURE_OPENAI_API_VERSION", "TAO_AZURE_DEPLOYMENT", "TAO_AZURE_API_VERSION",
@@ -121,6 +122,25 @@ def test_from_env_minimax_defaults(monkeypatch):
     # via TAO_ENDPOINT_URL (as is mainland api.minimaxi.com).
     assert config.endpoint_url == "https://api.minimax.io/v1/chat/completions"
 
+
+
+def test_from_prefixed_env_supports_separate_imaging_client(monkeypatch):
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("TAO_BACKEND", "minimax")
+    monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
+    monkeypatch.setenv("TAO_IMAGING_BACKEND", "poe")
+    monkeypatch.setenv("TAO_IMAGING_MODEL_ID", "Gemini-3.1-Pro")
+    monkeypatch.setenv("TAO_IMAGING_API_KEY", "poe-image-key")
+
+    agent = DaoGenerationConfig.from_env()
+    imaging = DaoGenerationConfig.from_env("TAO_IMAGING")
+
+    assert agent.backend == "minimax"
+    assert agent.api_key == "mm-key"
+    assert imaging.backend == "poe"
+    assert imaging.model_id == "Gemini-3.1-Pro"
+    assert imaging.api_key == "poe-image-key"
+    assert imaging.endpoint_url == "https://api.poe.com/v1/chat/completions"
 
 def test_from_env_azure_reads_conventional_variables(monkeypatch):
     _clear_provider_env(monkeypatch)

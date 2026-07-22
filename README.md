@@ -83,7 +83,7 @@ TAO_BACKEND=transformers TAO_MODEL_ID=CMLM/Dao1-30b-a3b \
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pariskang/Yao-Bi-Agent/blob/main/colab/YaoBi_Skill_Colab.ipynb)
 
-[`colab/YaoBi_Skill_Colab.ipynb`](colab/YaoBi_Skill_Colab.ipynb) 在 Google Colab 上一键复现完整功能：启动重新设计的前端 UI、`/api/agentic` 下一代 TaskGraph/Loop/Graph/Critic 智能体、读片/检验报告 skill、规则管线、多智能体协作与医师反馈闭环，并经 **ngrok** 暴露 `https://xxxx.ngrok-free.app` 公网链接。也可在 Colab 直接运行脚本：`python colab/launch_yaobi_colab.py --backend mock --ngrok-token "$NGROK_AUTHTOKEN" --no-preload`；`--backend` 支持 `minimax`（中国内地）、`poe`（可配 `Gemini-3.1-Pro`）、`azure`、`openai`、`anthropic`、`http`、`transformers`、`mock`、`disabled`。无 GPU 时建议先用 `mock` 或外部 API 验证 UI/流程，再切换本地 Dao1。详见 [`colab/README.md`](colab/README.md)。
+[`colab/YaoBi_Skill_Colab.ipynb`](colab/YaoBi_Skill_Colab.ipynb) 在 Google Colab 上一键复现完整功能：启动重新设计的前端 UI、`/api/agentic` 下一代 TaskGraph/Loop/Graph/Critic 智能体、读片/检验报告 skill、规则管线、多智能体协作与医师反馈闭环，并经 **ngrok** 暴露 `https://xxxx.ngrok-free.app` 公网链接。也可在 Colab 直接运行脚本：`python colab/launch_yaobi_colab.py --backend minimax --api-key "$MINIMAX_API_KEY" --imaging-backend poe --imaging-model-id Gemini-3.1-Pro --imaging-api-key "$POE_API_KEY" --ngrok-token "$NGROK_AUTHTOKEN" --no-preload`；`--backend` 默认为 `minimax` 作为智能体/规划主模型；`--imaging-backend` 默认为 `poe` + `Gemini-3.1-Pro` 作为读片/检验报告模型。两者可同时输入不同 API key，也仍支持 `azure`、`openai`、`anthropic`、`http`、`transformers`、`mock`、`disabled`。无 GPU 时建议先用 `mock` 或外部 API 验证 UI/流程，再切换本地 Dao1。详见 [`colab/README.md`](colab/README.md)。
 
 ## 自动问诊：YaoBi-CaseGuide Skill
 
